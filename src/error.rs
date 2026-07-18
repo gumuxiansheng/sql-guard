@@ -7,6 +7,7 @@ pub enum SqlGuardError {
     RuleError { rule_name: String, message: String },
     ScriptError(String),
     CheckError(String),
+    MapperError(String),
 }
 
 impl std::fmt::Display for SqlGuardError {
@@ -19,6 +20,7 @@ impl std::fmt::Display for SqlGuardError {
             }
             SqlGuardError::ScriptError(msg) => write!(f, "Script error: {}", msg),
             SqlGuardError::CheckError(msg) => write!(f, "Check error: {}", msg),
+            SqlGuardError::MapperError(msg) => write!(f, "Mapper error: {}", msg),
         }
     }
 }

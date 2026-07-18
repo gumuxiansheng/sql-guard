@@ -4,6 +4,7 @@ mod error;
 mod checker;
 mod rule;
 mod reporter;
+mod mapper;
 
 use std::path::Path;
 use std::fs;
@@ -93,10 +94,16 @@ fn run_check(
     let (missing, unexpected) = directory::check_directory_structure(&absolute_target, &config.structure);
 
     let sql_files = classification::collect_sql_files(&absolute_target);
-    let files_checked = sql_files.len();
+    let mapper_files = mapper::collect_mapper_files(&absolute_target, &config.mapper);
+    let files_checked = sql_files.len() + mapper_files.len();
+
+    // 构建一次 Rhai 引擎，全文件/全片段复用（mapper 模式可能产生大量片段，
+    // 每片段重建引擎会导致性能问题）
+    let engine_instance = engine::build_engine();
 
     let mut all_violations: Vec<Violation> = Vec::new();
 
+    // ===== 脚本模式：.sql/.ddl/.dml 文件，每个文件作为单 SQL 单元 =====
     for file_path in &sql_files {
         let classification_result = classification::classify_file(file_path, &config.classification)?;
 
@@ -104,15 +111,55 @@ fn run_check(
             .map_err(|e| SqlGuardError::CheckError(format!("Failed to read '{}': {}", file_path.display(), e)))?;
 
         let violations = engine::run_rules_for_file(
+            &engine_instance,
             file_path,
             &sql_content,
             &classification_result.script_type,
             &config,
             &config_dir,
             &filter,
+            0,
         )?;
 
         all_violations.extend(violations);
+    }
+
+    // ===== Mapper 模式：MyBatis XML，每个文件提取多条 SQL，逐条检查 =====
+    if config.mapper.enabled {
+        for file_path in &mapper_files {
+            // 容错：单文件解析失败不影响其他文件
+            let extracted = match mapper::extract_sql_from_xml(file_path) {
+                Ok(v) => v,
+                Err(e) => {
+                    eprintln!(
+                        "Warning: failed to parse mapper XML '{}': {}",
+                        file_path.display(),
+                        e
+                    );
+                    continue;
+                }
+            };
+
+            for sql in extracted {
+                let script_type = mapper::map_statement_type(&sql.statement_type);
+                // line_offset 把规则产出的"SQL 内行号"映射回 XML 行号：
+                // raw_xml_line 是 `<select>` 标签起始行（1-indexed），偏移为 raw_xml_line - 1
+                let line_offset = sql.raw_xml_line.saturating_sub(1);
+
+                let violations = engine::run_rules_for_file(
+                    &engine_instance,
+                    file_path,
+                    &sql.processed_sql,
+                    script_type,
+                    &config,
+                    &config_dir,
+                    &filter,
+                    line_offset,
+                )?;
+
+                all_violations.extend(violations);
+            }
+        }
     }
 
     let formats: Vec<&str> = match format {
@@ -272,6 +319,7 @@ fn generate_default_config() -> Config {
             formats: vec!["plain".to_string()],
             output_dir: None,
         },
+        mapper: crate::config::MapperConfig::default(),
     }
 }
 
@@ -344,6 +392,13 @@ severity = "error"
 
 [output]
 formats = ["plain", "json", "html"]
+
+# MyBatis Mapper 模式：扫描 XML 中的 <select>/<insert>/<update>/<delete>。
+# 缺省或 enabled = false 时完全保持现有行为（仅扫描 .sql/.ddl/.dml）。
+# [mapper]
+# enabled = true
+# paths = ["src/main/resources/mapper"]
+# patterns = ["**/*Mapper.xml", "**/*.xml"]
 "#
 }
 

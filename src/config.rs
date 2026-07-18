@@ -11,6 +11,9 @@ pub struct Config {
     pub rules: Vec<RuleConfig>,
     #[serde(default)]
     pub output: OutputConfig,
+    /// MyBatis Mapper 模式配置。缺失或 `enabled = false` 时完全保持现有行为。
+    #[serde(default)]
+    pub mapper: MapperConfig,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -85,6 +88,35 @@ pub struct OutputConfig {
 
 fn default_formats() -> Vec<String> {
     vec!["plain".to_string(), "json".to_string(), "html".to_string()]
+}
+
+/// MyBatis Mapper 模式配置。`enabled = false` 时其余字段被忽略。
+#[derive(Debug, Deserialize, Clone)]
+pub struct MapperConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_mapper_paths")]
+    pub paths: Vec<String>,
+    #[serde(default = "default_mapper_patterns")]
+    pub patterns: Vec<String>,
+}
+
+impl Default for MapperConfig {
+    fn default() -> Self {
+        MapperConfig {
+            enabled: false,
+            paths: default_mapper_paths(),
+            patterns: default_mapper_patterns(),
+        }
+    }
+}
+
+fn default_mapper_paths() -> Vec<String> {
+    vec!["src/main/resources/mapper".to_string()]
+}
+
+fn default_mapper_patterns() -> Vec<String> {
+    vec!["**/*Mapper.xml".to_string(), "**/*.xml".to_string()]
 }
 
 impl Config {

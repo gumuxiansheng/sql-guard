@@ -675,13 +675,22 @@ fn analyze_query(q: &Query) -> SelectInfo {
 /// 对单个文件应用所有适用规则。AST 在此解析一次，供该文件的所有规则复用。
 ///
 /// `filter` 用于按 CLI 传入的 id/分组筛选规则；`RuleFilter::default()` 表示不筛选。
+///
+/// `engine` 由调用方构建一次后传入复用，避免每条规则重建 Rhai 引擎。
+///
+/// `line_offset` 用于把规则产出的行号偏移到目标坐标系：
+/// - 脚本模式传 `0`
+/// - Mapper 模式传 `raw_xml_line - 1`（即 `<select>` 标签起始行号减 1），
+///   使违规行号指向 XML 文件中的实际行
 pub fn run_rules_for_file(
+    engine: &Engine,
     file_path: &Path,
     sql_content: &str,
     script_type: &str,
     config: &Config,
     config_dir: &Path,
     filter: &RuleFilter,
+    line_offset: usize,
 ) -> Result<Vec<Violation>, SqlGuardError> {
     let mut violations = Vec::new();
 
@@ -730,7 +739,7 @@ pub fn run_rules_for_file(
             continue;
         }
 
-        match run_single_rule(&context, rule_config, &script_path) {
+        match run_single_rule(engine, &context, rule_config, &script_path, line_offset) {
             Ok(rule_violations) => violations.extend(rule_violations),
             Err(e) => {
                 violations.push(Violation {
@@ -752,9 +761,11 @@ pub fn run_rules_for_file(
 }
 
 fn run_single_rule(
+    engine: &Engine,
     context: &RuleContext,
     rule_config: &RuleConfig,
     script_path: &Path,
+    line_offset: usize,
 ) -> Result<Vec<Violation>, SqlGuardError> {
     let script = fs::read_to_string(script_path).map_err(|e| {
         SqlGuardError::ScriptError(format!(
@@ -763,8 +774,6 @@ fn run_single_rule(
             e
         ))
     })?;
-
-    let engine = build_engine();
 
     let mut scope = Scope::new();
 
@@ -824,7 +833,9 @@ fn run_single_rule(
                         message: msg,
                         file_path: Path::new(&context.file_path).to_path_buf(),
                         script_type: context.script_type.clone(),
-                        line: line.map(|l| l as usize),
+                        // 应用行号偏移：脚本模式 line_offset=0 无影响；
+                        // Mapper 模式把规则产出的"SQL 内行号"映射到 XML 行号
+                        line: line.map(|l| (l as usize) + line_offset),
                         column: column.map(|c| c as usize),
                     }
                 })
@@ -862,9 +873,11 @@ fn extract_int(m: &Map, key: &str) -> Option<i64> {
 }
 
 /// 构建一个 Rhai 引擎并注册所有 AST 包装类型的方法。
-/// 每个文件每条规则都会调用一次，因为 Rhai 引擎本身很轻量；
-/// 如有性能需求，后续可缓存 AST 包装类型的注册。
-fn build_engine() -> Engine {
+///
+/// 引擎本身可重入，注册方法只在构建时执行一次；
+/// 调用方应在外层构建一次，传 `&Engine` 给 [`run_rules_for_file`] 复用，
+/// 避免每个文件/每条规则都重建引擎。
+pub fn build_engine() -> Engine {
     let mut engine = Engine::new();
 
     // 注册所有自定义类型，使 Rhai 能正确识别和迭代包含它们的 Array

@@ -66,3 +66,10 @@ severity = "error"
 
 [output]
 formats = ["plain", "json", "html"]
+
+# MyBatis Mapper 模式：扫描 XML 中的 <select>/<insert>/<update>/<delete>。
+# 缺省或 enabled = false 时完全保持现有行为（仅扫描 .sql/.ddl/.dml）。
+# [mapper]
+# enabled = true
+# paths = ["src/main/resources/mapper"]
+# patterns = ["**/*Mapper.xml", "**/*.xml"]
