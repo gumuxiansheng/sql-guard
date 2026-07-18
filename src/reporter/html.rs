@@ -51,17 +51,32 @@ pub fn generate_html_report(
             "warning" => "severity-warning",
             _ => "severity-info",
         };
+        let location = match (v.line, v.column) {
+            (Some(line), Some(col)) => format!(":{}:{}", line, col),
+            (Some(line), None) => format!(":{}", line),
+            _ => String::new(),
+        };
+        let rule_cell = format!(
+            "<span class=\"rule-id\">{}</span> <span class=\"rule-name\">{}</span>{}",
+            escape_html(&v.rule_id),
+            escape_html(&v.rule_name),
+            match &v.rule_group {
+                Some(g) => format!(" <span class=\"badge badge-info\">{}</span>", escape_html(g)),
+                None => String::new(),
+            }
+        );
         violation_rows.push_str(&format!(
             r#"<tr>
                 <td><span class="severity-badge {}">{}</span></td>
                 <td>{}</td>
-                <td>{}</td>
+                <td>{}{}</td>
                 <td>{}</td>
             </tr>"#,
             sev_class,
             escape_html(&v.severity.to_uppercase()),
-            escape_html(&v.rule_name),
+            rule_cell,
             escape_html(&v.file_path.to_string_lossy()),
+            escape_html(&location),
             escape_html(&v.message)
         ));
     }
@@ -129,6 +144,9 @@ pub fn generate_html_report(
   .badge {{ display: inline-block; padding: 0.25rem 0.75rem; border-radius: 9999px; font-size: 0.75rem; font-weight: 600; }}
   .badge-error {{ background: #7f1d1d; color: #fca5a5; }}
   .badge-warning {{ background: #713f12; color: #fcd34d; }}
+  .badge-info {{ background: #1e3a5f; color: #93c5fd; }}
+  .rule-id {{ font-family: 'SF Mono', Monaco, Consolas, monospace; color: #93c5fd; font-size: 0.8125rem; }}
+  .rule-name {{ color: #cbd5e1; }}
   .severity-badge {{ display: inline-block; padding: 0.25rem 0.75rem; border-radius: 9999px; font-size: 0.75rem; font-weight: 600; }}
   .severity-error {{ background: #7f1d1d; color: #fca5a5; }}
   .severity-warning {{ background: #713f12; color: #fcd34d; }}

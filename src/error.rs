@@ -33,11 +33,17 @@ impl From<std::io::Error> for SqlGuardError {
 
 #[derive(Debug, Clone)]
 pub struct Violation {
+    pub rule_id: String,
     pub rule_name: String,
+    pub rule_group: Option<String>,
     pub severity: String,
     pub message: String,
     pub file_path: PathBuf,
     pub script_type: String,
+    #[doc(hidden)]
+    pub line: Option<usize>,
+    #[doc(hidden)]
+    pub column: Option<usize>,
 }
 
 #[derive(Debug, Clone)]

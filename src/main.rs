@@ -22,8 +22,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Check { path, config: config_path, format, output_dir } => {
-            run_check(&path, &config_path, &format, output_dir.as_deref())?;
+        Commands::Check {
+            path,
+            config: config_path,
+            format,
+            output_dir,
+            rules,
+            groups,
+            exclude_rules,
+            exclude_groups,
+        } => {
+            run_check(
+                &path,
+                &config_path,
+                &format,
+                output_dir.as_deref(),
+                &rules,
+                &groups,
+                &exclude_rules,
+                &exclude_groups,
+            )?;
         }
         Commands::Init { path } => {
             run_init(&path)?;
@@ -38,6 +56,10 @@ fn run_check(
     config_path: &Path,
     format: &str,
     output_dir: Option<&Path>,
+    rules: &Option<String>,
+    groups: &Option<String>,
+    exclude_rules: &Option<String>,
+    exclude_groups: &Option<String>,
 ) -> Result<(), SqlGuardError> {
     let config_dir = config_path
         .parent()
@@ -51,6 +73,14 @@ fn run_check(
         Config::load(&config_dir.join("sqlguard.toml"))
             .unwrap_or_else(|_| generate_default_config())
     };
+
+    let filter = engine::RuleFilter::from_cli(rules, groups, exclude_rules, exclude_groups);
+    if !filter.is_empty() {
+        eprintln!(
+            "Rule filter active: include_rules={:?} include_groups={:?} exclude_rules={:?} exclude_groups={:?}",
+            filter.include_rules, filter.include_groups, filter.exclude_rules, filter.exclude_groups
+        );
+    }
 
     let absolute_target = if target_dir.is_absolute() {
         target_dir.to_path_buf()
@@ -79,6 +109,7 @@ fn run_check(
             &classification_result.script_type,
             &config,
             &config_dir,
+            &filter,
         )?;
 
         all_violations.extend(violations);
@@ -205,7 +236,38 @@ fn generate_default_config() -> Config {
             ],
             default_type: "other".to_string(),
         },
-        rules: vec![],
+        rules: vec![
+            crate::config::RuleConfig {
+                id: "DDL001".to_string(),
+                name: "no_drop_table".to_string(),
+                group: Some("ddl-safety".to_string()),
+                description: Some("Disallow DROP TABLE in DDL scripts".to_string()),
+                enabled: true,
+                script_path: "config/rules/ddl/no_drop_table.rhai".into(),
+                applies_to: vec!["ddl".to_string()],
+                severity: "error".to_string(),
+            },
+            crate::config::RuleConfig {
+                id: "DDL002".to_string(),
+                name: "primary_key_required".to_string(),
+                group: Some("ddl-safety".to_string()),
+                description: Some("CREATE TABLE must have a PRIMARY KEY".to_string()),
+                enabled: true,
+                script_path: "config/rules/ddl/primary_key_required.rhai".into(),
+                applies_to: vec!["ddl".to_string()],
+                severity: "warning".to_string(),
+            },
+            crate::config::RuleConfig {
+                id: "DML001".to_string(),
+                name: "no_select_all".to_string(),
+                group: Some("dml-safety".to_string()),
+                description: Some("Disallow SELECT * in DML scripts".to_string()),
+                enabled: true,
+                script_path: "config/rules/dml/no_select_all.rhai".into(),
+                applies_to: vec!["dml".to_string()],
+                severity: "error".to_string(),
+            },
+        ],
         output: crate::config::OutputConfig {
             formats: vec!["plain".to_string()],
             output_dir: None,
@@ -251,7 +313,9 @@ type = "sql"
 priority = 0
 
 [[rules]]
+id = "DDL001"
 name = "no_drop_table"
+group = "ddl-safety"
 description = "Disallow DROP TABLE in DDL scripts"
 enabled = true
 script_path = "config/rules/ddl/no_drop_table.rhai"
@@ -259,7 +323,9 @@ applies_to = ["ddl"]
 severity = "error"
 
 [[rules]]
+id = "DDL002"
 name = "primary_key_required"
+group = "ddl-safety"
 description = "CREATE TABLE must have a PRIMARY KEY"
 enabled = true
 script_path = "config/rules/ddl/primary_key_required.rhai"
@@ -267,7 +333,9 @@ applies_to = ["ddl"]
 severity = "warning"
 
 [[rules]]
+id = "DML001"
 name = "no_select_all"
+group = "dml-safety"
 description = "Disallow SELECT * in DML scripts"
 enabled = true
 script_path = "config/rules/dml/no_select_all.rhai"
@@ -281,30 +349,89 @@ formats = ["plain", "json", "html"]
 
 fn get_no_drop_table_script() -> &'static str {
     r#"// no_drop_table.rhai - Disallow DROP TABLE in DDL scripts
-let sql = context["sql_content"];
-let upper = sql.to_upper();
-if upper.contains("DROP TABLE") || upper.contains("DROP TABLE IF EXISTS") {
-    violations.push("DROP TABLE is not allowed in DDL scripts");
+// 基于 AST：遍历语句列表，对 DROP_TABLE 类型语句上报违规。
+// 相比字符串匹配，AST 能精确识别语句类型，不会误匹配注释或子串。
+
+let ast = context["ast"];
+
+// 解析失败时也上报，避免漏检
+if ast.has_parse_error() {
+    violations.push(#{
+        "message": "SQL parse error: " + ast.parse_error(),
+        "line": 1
+    });
+}
+
+let stmts = ast.statements();
+for s in stmts {
+    if s.kind() == "DROP_TABLE" {
+        let d = s.drop_object();
+        violations.push(#{
+            "message": "DROP TABLE is not allowed in DDL scripts: " + d.name(),
+            "line": s.line(),
+            "column": s.column()
+        });
+    }
 }
 "#
 }
 
 fn get_primary_key_script() -> &'static str {
     r#"// primary_key_required.rhai - CREATE TABLE must have a PRIMARY KEY
-let sql = context["sql_content"];
-let upper = sql.to_upper();
-if upper.contains("CREATE TABLE") && !upper.contains("PRIMARY KEY") {
-    violations.push("CREATE TABLE statement should include a PRIMARY KEY");
+// 基于 AST：识别 CREATE TABLE 语句，检查列定义或表级约束中是否包含 PRIMARY KEY。
+// 相比字符串匹配，AST 能正确识别 CREATE TABLE 结构，不会误判 ALTER TABLE 或注释。
+
+let ast = context["ast"];
+
+if ast.has_parse_error() {
+    violations.push(#{
+        "message": "SQL parse error: " + ast.parse_error(),
+        "line": 1
+    });
+}
+
+let stmts = ast.statements();
+for s in stmts {
+    if s.kind() == "CREATE_TABLE" {
+        let ct = s.create_table();
+        if !ct.has_primary_key() {
+            violations.push(#{
+                "message": "CREATE TABLE " + ct.table_name() + " must include a PRIMARY KEY",
+                "line": s.line(),
+                "column": s.column()
+            });
+        }
+    }
 }
 "#
 }
 
 fn get_no_select_all_script() -> &'static str {
     r#"// no_select_all.rhai - Disallow SELECT * in DML scripts
-let sql = context["sql_content"];
-let upper = sql.to_upper();
-if upper.contains("SELECT *") {
-    violations.push("SELECT * is not allowed. Specify columns explicitly.");
+// 基于 AST：识别 SELECT 语句，检查投影列表是否包含通配符（* 或 table.*）。
+// 相比字符串匹配，AST 不会误判注释中的 SELECT * 或字符串字面量。
+
+let ast = context["ast"];
+
+if ast.has_parse_error() {
+    violations.push(#{
+        "message": "SQL parse error: " + ast.parse_error(),
+        "line": 1
+    });
+}
+
+let stmts = ast.statements();
+for s in stmts {
+    if s.kind() == "SELECT" {
+        let sel = s.select();
+        if sel.has_wildcard() {
+            violations.push(#{
+                "message": "SELECT * is not allowed. Specify columns explicitly.",
+                "line": s.line(),
+                "column": s.column()
+            });
+        }
+    }
 }
 "#
 }

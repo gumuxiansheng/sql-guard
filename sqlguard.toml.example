@@ -35,7 +35,9 @@ type = "sql"
 priority = 0
 
 [[rules]]
+id = "DDL001"
 name = "no_drop_table"
+group = "ddl-safety"
 description = "Disallow DROP TABLE in DDL scripts"
 enabled = true
 script_path = "config/rules/ddl/no_drop_table.rhai"
@@ -43,7 +45,9 @@ applies_to = ["ddl"]
 severity = "error"
 
 [[rules]]
+id = "DDL002"
 name = "primary_key_required"
+group = "ddl-safety"
 description = "CREATE TABLE must have a PRIMARY KEY"
 enabled = true
 script_path = "config/rules/ddl/primary_key_required.rhai"
@@ -51,7 +55,9 @@ applies_to = ["ddl"]
 severity = "warning"
 
 [[rules]]
+id = "DML001"
 name = "no_select_all"
+group = "dml-safety"
 description = "Disallow SELECT * in DML scripts"
 enabled = true
 script_path = "config/rules/dml/no_select_all.rhai"

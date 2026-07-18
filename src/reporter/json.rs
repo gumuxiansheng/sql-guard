@@ -28,11 +28,15 @@ pub struct JsonDirectoryIssue {
 
 #[derive(serde::Serialize)]
 pub struct JsonViolation {
+    pub rule_id: String,
     pub rule: String,
+    pub group: Option<String>,
     pub severity: String,
     pub message: String,
     pub file: String,
     pub script_type: String,
+    pub line: Option<usize>,
+    pub column: Option<usize>,
 }
 
 pub fn generate_json_report(
@@ -59,11 +63,15 @@ pub fn generate_json_report(
     let json_violations: Vec<JsonViolation> = violations
         .iter()
         .map(|v| JsonViolation {
+            rule_id: v.rule_id.clone(),
             rule: v.rule_name.clone(),
+            group: v.rule_group.clone(),
             severity: v.severity.clone(),
             message: v.message.clone(),
             file: v.file_path.to_string_lossy().to_string(),
             script_type: v.script_type.clone(),
+            line: v.line,
+            column: v.column,
         })
         .collect();
 

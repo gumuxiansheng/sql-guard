@@ -27,6 +27,22 @@ pub enum Commands {
         /// Output directory for reports (required for json/html)
         #[clap(short, long)]
         output_dir: Option<PathBuf>,
+
+        /// Only run rules whose id matches (comma-separated, supports prefix wildcard `DDL*`)
+        #[clap(long)]
+        rules: Option<String>,
+
+        /// Only run rules whose group matches (comma-separated, supports prefix wildcard)
+        #[clap(long)]
+        groups: Option<String>,
+
+        /// Exclude rules whose id matches (comma-separated, supports prefix wildcard)
+        #[clap(long)]
+        exclude_rules: Option<String>,
+
+        /// Exclude rules whose group matches (comma-separated, supports prefix wildcard)
+        #[clap(long)]
+        exclude_groups: Option<String>,
     },
     /// Initialize default configuration in the current directory
     Init {
