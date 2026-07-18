@@ -36,6 +36,8 @@ pub struct JsonViolation {
     pub file: String,
     pub script_type: String,
     pub line: Option<usize>,
+    /// 语句结束行（含），用于增量校验时的语句级范围判断。
+    pub end_line: Option<usize>,
     pub column: Option<usize>,
 }
 
@@ -71,6 +73,7 @@ pub fn generate_json_report(
             file: v.file_path.to_string_lossy().to_string(),
             script_type: v.script_type.clone(),
             line: v.line,
+            end_line: v.end_line,
             column: v.column,
         })
         .collect();

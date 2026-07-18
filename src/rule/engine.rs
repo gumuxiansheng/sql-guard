@@ -135,6 +135,9 @@ pub struct SqlAst {
 pub struct StmtInfo {
     pub kind: String,
     pub line: i64,
+    /// 语句结束行（含），用于增量校验时的行级范围判断。
+    /// 近似值：取下一条语句/分号之前最后一行的行号。
+    pub end_line: i64,
     pub column: i64,
     pub create_table: Option<CreateInfo>,
     pub drop_object: Option<DropInfo>,
@@ -256,6 +259,18 @@ impl SqlAst {
             .iter()
             .any(|s| s.kind == "DROP_TABLE")
     }
+
+    /// 返回包含指定行号的语句的 (start_line, end_line)。
+    /// 用于给 violation 自动回填 end_line（增量校验场景）。
+    /// 若无语句覆盖该行，返回 None。
+    pub fn statement_range_at(&self, line: i64) -> Option<(i64, i64)> {
+        for s in &self.statements {
+            if line >= s.line && line <= s.end_line {
+                return Some((s.line, s.end_line));
+            }
+        }
+        None
+    }
 }
 
 impl StmtInfo {
@@ -264,6 +279,14 @@ impl StmtInfo {
     }
     pub fn line(&self) -> i64 {
         self.line
+    }
+    /// 语句结束行（含）。规则脚本可用于判断语句边界。
+    pub fn end_line(&self) -> i64 {
+        self.end_line
+    }
+    /// 返回 (start_line, end_line)，便于规则脚本一次性获取语句范围。
+    pub fn line_range(&self) -> (i64, i64) {
+        (self.line, self.end_line)
     }
     pub fn column(&self) -> i64 {
         self.column
@@ -464,6 +487,7 @@ fn parse_sql_to_ast(sql: &str) -> SqlAst {
         }
     };
 
+    let total_lines = sql.lines().count() as i64;
     let mut statements = Vec::new();
 
     loop {
@@ -481,13 +505,40 @@ fn parse_sql_to_ast(sql: &str) -> SqlAst {
 
         match parser.parse_statement() {
             Ok(stmt) => {
-                statements.push(convert_statement(&stmt, line, column));
+                // 计算 end_line：解析完语句后，下一个 token 的位置是该语句之后
+                // 的第一个 token（通常是 `;` 或 EOF 或下一条语句的首 token）。
+                // - 若下一 token 在新行，说明本语句末行 = next_line - 1
+                // - 若下一 token 在同一行（如 `;` 或 `SELECT 1; SELECT 2;`），
+                //   本语句末行就是当前 line
+                // - 若 EOF，用文件总行数
+                let next_tok = parser.peek_token();
+                let end_line = if next_tok.token == Token::EOF {
+                    total_lines.max(line)
+                } else {
+                    let next_line = next_tok.location.line as i64;
+                    // 下一个 token 还在本语句内（同行分号等）→ end = line
+                    // 下一个 token 在后续行 → end = next_line - 1
+                    if next_line > line {
+                        next_line - 1
+                    } else {
+                        line
+                    }
+                };
+                statements.push(convert_statement(&stmt, line, column, end_line));
             }
             Err(_e) => {
                 // 单条语句解析失败时记录错误位置，然后跳过到下一个分号
+                let next_tok = parser.peek_token();
+                let end_line = if next_tok.token == Token::EOF {
+                    total_lines.max(line)
+                } else {
+                    let next_line = next_tok.location.line as i64;
+                    if next_line > line { next_line - 1 } else { line }
+                };
                 statements.push(StmtInfo {
                     kind: "PARSE_ERROR".to_string(),
                     line,
+                    end_line,
                     column,
                     create_table: None,
                     drop_object: None,
@@ -516,7 +567,7 @@ fn parse_sql_to_ast(sql: &str) -> SqlAst {
     }
 }
 
-fn convert_statement(stmt: &Statement, line: i64, column: i64) -> StmtInfo {
+fn convert_statement(stmt: &Statement, line: i64, column: i64, end_line: i64) -> StmtInfo {
     match stmt {
         Statement::CreateTable { name, columns, constraints, if_not_exists, .. } => {
             let table_name = name.to_string();
@@ -554,6 +605,7 @@ fn convert_statement(stmt: &Statement, line: i64, column: i64) -> StmtInfo {
             StmtInfo {
                 kind: "CREATE_TABLE".to_string(),
                 line,
+                end_line,
                 column,
                 create_table: Some(CreateInfo {
                     table_name,
@@ -575,6 +627,7 @@ fn convert_statement(stmt: &Statement, line: i64, column: i64) -> StmtInfo {
             StmtInfo {
                 kind,
                 line,
+                end_line,
                 column,
                 create_table: None,
                 drop_object: Some(DropInfo {
@@ -593,6 +646,7 @@ fn convert_statement(stmt: &Statement, line: i64, column: i64) -> StmtInfo {
             StmtInfo {
                 kind: "SELECT".to_string(),
                 line,
+                end_line,
                 column,
                 create_table: None,
                 drop_object: None,
@@ -607,6 +661,7 @@ fn convert_statement(stmt: &Statement, line: i64, column: i64) -> StmtInfo {
             StmtInfo {
                 kind: "INSERT".to_string(),
                 line,
+                end_line,
                 column,
                 create_table: None,
                 drop_object: None,
@@ -627,6 +682,7 @@ fn convert_statement(stmt: &Statement, line: i64, column: i64) -> StmtInfo {
             StmtInfo {
                 kind: "UPDATE".to_string(),
                 line,
+                end_line,
                 column,
                 create_table: None,
                 drop_object: None,
@@ -661,6 +717,7 @@ fn convert_statement(stmt: &Statement, line: i64, column: i64) -> StmtInfo {
             StmtInfo {
                 kind: "DELETE".to_string(),
                 line,
+                end_line,
                 column,
                 create_table: None,
                 drop_object: None,
@@ -676,6 +733,7 @@ fn convert_statement(stmt: &Statement, line: i64, column: i64) -> StmtInfo {
         Statement::AlterTable { .. } => StmtInfo {
             kind: "ALTER_TABLE".to_string(),
             line,
+            end_line,
             column,
             create_table: None,
             drop_object: None,
@@ -687,6 +745,7 @@ fn convert_statement(stmt: &Statement, line: i64, column: i64) -> StmtInfo {
         _ => StmtInfo {
             kind: "OTHER".to_string(),
             line,
+            end_line,
             column,
             create_table: None,
             drop_object: None,
@@ -881,6 +940,7 @@ pub fn run_rules_for_file(
                 file_path: file_path.to_path_buf(),
                 script_type: script_type.to_string(),
                 line: None,
+                end_line: None,
                 column: None,
             });
             continue;
@@ -898,6 +958,7 @@ pub fn run_rules_for_file(
                     file_path: file_path.to_path_buf(),
                     script_type: script_type.to_string(),
                     line: None,
+                    end_line: None,
                     column: None,
                 });
             }
@@ -983,6 +1044,14 @@ fn run_single_rule(
                         // 应用行号偏移：脚本模式 line_offset=0 无影响；
                         // Mapper 模式把规则产出的"SQL 内行号"映射到 XML 行号
                         line: line.map(|l| (l as usize) + line_offset),
+                        // end_line 自动从 AST 回填：找到包含 violation.line 的语句范围。
+                        // 此处先用 line_offset 映射 line 到目标坐标系，再回查 AST
+                        // （AST 中的 line 是 SQL 内行号，所以回查用原始 line，映射后写入 end_line）
+                        end_line: line.and_then(|l| {
+                            context.ast.statement_range_at(l).map(|(_, end)| {
+                                (end as usize) + line_offset
+                            })
+                        }),
                         column: column.map(|c| c as usize),
                     }
                 })
@@ -1002,6 +1071,7 @@ fn run_single_rule(
                     file_path: Path::new(&context.file_path).to_path_buf(),
                     script_type: context.script_type.clone(),
                     line: None,
+                    end_line: None,
                     column: None,
                 }])
             } else {
@@ -1062,6 +1132,8 @@ pub fn build_engine() -> Engine {
     // StmtInfo 方法
     engine.register_fn("kind", |s: &mut StmtInfo| s.kind());
     engine.register_fn("line", |s: &mut StmtInfo| s.line());
+    engine.register_fn("end_line", |s: &mut StmtInfo| s.end_line());
+    engine.register_fn("line_range", |s: &mut StmtInfo| s.line_range());
     engine.register_fn("column", |s: &mut StmtInfo| s.column());
     engine.register_fn("has_create_table", |s: &mut StmtInfo| s.has_create_table());
     engine.register_fn("has_drop_object", |s: &mut StmtInfo| s.has_drop_object());

@@ -57,7 +57,7 @@ pub fn generate_html_report(
             _ => String::new(),
         };
         let rule_cell = format!(
-            "<span class=\"rule-id\">{}</span> <span class=\"rule-name\">{}</span>{}",
+            "<div class=\"rule-cell\"><span class=\"rule-id\">{}</span> <span class=\"rule-name\">{}</span>{}",
             escape_html(&v.rule_id),
             escape_html(&v.rule_name),
             match &v.rule_group {
@@ -68,9 +68,9 @@ pub fn generate_html_report(
         violation_rows.push_str(&format!(
             r#"<tr>
                 <td><span class="severity-badge {}">{}</span></td>
-                <td>{}</td>
-                <td>{}{}</td>
-                <td>{}</td>
+                <td>{}</div></td>
+                <td class="file-path">{}{}</td>
+                <td class="message">{}</td>
             </tr>"#,
             sev_class,
             escape_html(&v.severity.to_uppercase()),
@@ -120,39 +120,67 @@ pub fn generate_html_report(
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>SqlGuard Report</title>
 <style>
+  :root {{
+    --bg: #09090b;
+    --surface: #18181b;
+    --surface-2: #121214;
+    --border: #27272a;
+    --text: #e4e4e7;
+    --text-secondary: #a1a1aa;
+    --text-muted: #71717a;
+    --accent-error: #f87171;
+    --accent-error-bg: rgba(239, 68, 68, 0.12);
+    --accent-warning: #facc15;
+    --accent-warning-bg: rgba(234, 179, 8, 0.12);
+    --accent-info: #60a5fa;
+    --accent-info-bg: rgba(59, 130, 246, 0.12);
+    --accent-success: #4ade80;
+    --accent-success-bg: rgba(34, 197, 94, 0.12);
+  }}
   * {{ margin: 0; padding: 0; box-sizing: border-box; }}
-  body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0f172a; color: #e2e8f0; line-height: 1.6; }}
+  body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', sans-serif; background: var(--bg); color: var(--text); line-height: 1.5; -webkit-font-smoothing: antialiased; }}
   .container {{ max-width: 1200px; margin: 0 auto; padding: 2rem; }}
-  .header {{ text-align: center; padding: 2rem 0; border-bottom: 1px solid #334155; margin-bottom: 2rem; }}
-  .header h1 {{ font-size: 2rem; color: #f8fafc; }}
-  .status {{ display: inline-block; padding: 0.5rem 1.5rem; border-radius: 9999px; font-weight: 700; font-size: 1.125rem; margin-top: 1rem; }}
-  .status-pass {{ background: #22c55e; color: #052e16; }}
-  .status-fail {{ background: #ef4444; color: #450a0a; }}
-  .summary {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 1rem; margin-bottom: 2rem; }}
-  .summary-card {{ background: #1e293b; border-radius: 0.75rem; padding: 1.25rem; text-align: center; }}
-  .summary-card .value {{ font-size: 2rem; font-weight: 700; }}
-  .summary-card .label {{ font-size: 0.875rem; color: #94a3b8; }}
-  .value-green {{ color: #22c55e; }}
-  .value-red {{ color: #ef4444; }}
-  .value-yellow {{ color: #eab308; }}
-  .value-blue {{ color: #3b82f6; }}
-  .section {{ background: #1e293b; border-radius: 0.75rem; padding: 1.5rem; margin-bottom: 1.5rem; }}
-  .section h2 {{ font-size: 1.25rem; margin-bottom: 1rem; color: #f1f5f9; }}
-  table {{ width: 100%; border-collapse: collapse; }}
-  th, td {{ padding: 0.75rem 1rem; text-align: left; border-bottom: 1px solid #334155; }}
-  th {{ color: #94a3b8; font-weight: 600; font-size: 0.875rem; text-transform: uppercase; letter-spacing: 0.05em; }}
-  .badge {{ display: inline-block; padding: 0.25rem 0.75rem; border-radius: 9999px; font-size: 0.75rem; font-weight: 600; }}
-  .badge-error {{ background: #7f1d1d; color: #fca5a5; }}
-  .badge-warning {{ background: #713f12; color: #fcd34d; }}
-  .badge-info {{ background: #1e3a5f; color: #93c5fd; }}
-  .rule-id {{ font-family: 'SF Mono', Monaco, Consolas, monospace; color: #93c5fd; font-size: 0.8125rem; }}
-  .rule-name {{ color: #cbd5e1; }}
-  .severity-badge {{ display: inline-block; padding: 0.25rem 0.75rem; border-radius: 9999px; font-size: 0.75rem; font-weight: 600; }}
-  .severity-error {{ background: #7f1d1d; color: #fca5a5; }}
-  .severity-warning {{ background: #713f12; color: #fcd34d; }}
-  .severity-info {{ background: #1e3a5f; color: #93c5fd; }}
-  .pass-text {{ color: #4ade80; font-size: 1.125rem; }}
-  .footer {{ text-align: center; padding: 2rem 0; color: #475569; font-size: 0.875rem; }}
+  .header {{ display: flex; align-items: center; justify-content: space-between; padding: 1.25rem 0; border-bottom: 1px solid var(--border); margin-bottom: 1.5rem; }}
+  .header h1 {{ font-size: 1.25rem; font-weight: 600; color: #fafafa; letter-spacing: -0.01em; }}
+  .status {{ display: inline-flex; align-items: center; gap: 0.5rem; padding: 0.375rem 0.875rem; border-radius: 0.375rem; font-weight: 600; font-size: 0.8125rem; }}
+  .status::before {{ content: ""; width: 0.5rem; height: 0.5rem; border-radius: 50%; background: currentColor; }}
+  .status-pass {{ background: var(--accent-success-bg); color: var(--accent-success); }}
+  .status-fail {{ background: var(--accent-error-bg); color: var(--accent-error); }}
+  .summary {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 0.75rem; margin-bottom: 1.5rem; }}
+  .summary-card {{ background: var(--surface); border: 1px solid var(--border); border-radius: 0.5rem; padding: 1rem 1.25rem; }}
+  .summary-card .value {{ font-size: 1.5rem; font-weight: 700; line-height: 1.2; margin-bottom: 0.25rem; }}
+  .summary-card .label {{ font-size: 0.75rem; color: var(--text-secondary); font-weight: 500; text-transform: uppercase; letter-spacing: 0.05em; }}
+  .value-green {{ color: var(--accent-success); }}
+  .value-red {{ color: var(--accent-error); }}
+  .value-yellow {{ color: var(--accent-warning); }}
+  .value-blue {{ color: var(--accent-info); }}
+  .section {{ margin-bottom: 1.5rem; }}
+  .section h2 {{ font-size: 0.75rem; font-weight: 600; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 0.75rem; }}
+  table {{ width: 100%; border-collapse: separate; border-spacing: 0; background: var(--surface); border: 1px solid var(--border); border-radius: 0.5rem; overflow: hidden; font-size: 0.8125rem; }}
+  th, td {{ padding: 0.625rem 1rem; text-align: left; border-bottom: 1px solid var(--border); vertical-align: middle; }}
+  th {{ color: var(--text-secondary); font-weight: 500; font-size: 0.6875rem; text-transform: uppercase; letter-spacing: 0.08em; background: var(--surface-2); }}
+  tbody tr:last-child td {{ border-bottom: none; }}
+  tbody tr:hover td {{ background: rgba(255, 255, 255, 0.02); }}
+  .badge {{ display: inline-flex; align-items: center; padding: 0.125rem 0.5rem; border-radius: 0.25rem; font-size: 0.6875rem; font-weight: 600; line-height: 1; }}
+  .badge-error {{ background: var(--accent-error-bg); color: var(--accent-error); }}
+  .badge-warning {{ background: var(--accent-warning-bg); color: var(--accent-warning); }}
+  .badge-info {{ background: var(--accent-info-bg); color: var(--accent-info); }}
+  .rule-cell {{ display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.35rem; }}
+  .rule-id {{ font-family: 'SF Mono', Monaco, Consolas, 'Liberation Mono', monospace; color: var(--accent-info); font-size: 0.75rem; font-weight: 500; }}
+  .rule-name {{ color: var(--text); font-weight: 500; }}
+  .severity-badge {{ display: inline-flex; align-items: center; padding: 0.25rem 0.625rem; border-radius: 0.25rem; font-size: 0.6875rem; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase; line-height: 1; }}
+  .severity-error {{ background: var(--accent-error-bg); color: var(--accent-error); }}
+  .severity-warning {{ background: var(--accent-warning-bg); color: var(--accent-warning); }}
+  .severity-info {{ background: var(--accent-info-bg); color: var(--accent-info); }}
+  .file-path {{ font-family: 'SF Mono', Monaco, Consolas, 'Liberation Mono', monospace; color: var(--text-secondary); font-size: 0.75rem; word-break: break-all; line-height: 1.4; }}
+  .message {{ color: var(--text); line-height: 1.4; word-break: normal; overflow-wrap: break-word; }}
+  .pass-text {{ color: var(--accent-success); font-size: 0.875rem; padding: 1rem 1.25rem; background: var(--surface); border: 1px solid var(--border); border-radius: 0.5rem; }}
+  .footer {{ text-align: center; padding: 1.5rem 0; color: var(--text-muted); font-size: 0.75rem; }}
+  @media (max-width: 768px) {{
+    .container {{ padding: 1rem; }}
+    .header {{ flex-direction: column; align-items: flex-start; gap: 0.75rem; }}
+    th, td {{ padding: 0.5rem 0.75rem; }}
+  }}
 </style>
 </head>
 <body>
@@ -182,9 +210,20 @@ pub fn generate_html_report(
   {dir_section}
   {violation_section}
   <div class="footer">
-    Generated by SqlGuard | {timestamp}
+    Generated by SqlGuard | <span id="timestamp">-</span>
   </div>
 </div>
+<script>
+  (function() {{
+    var d = new Date();
+    var pad = function(n) {{ return n < 10 ? '0' + n : n; }};
+    var s = d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()) +
+            ' ' + pad(d.getHours()) + ':' + pad(d.getMinutes()) + ':' + pad(d.getSeconds()) +
+            ' ' + Intl.DateTimeFormat().resolvedOptions().timeZone;
+    var el = document.getElementById('timestamp');
+    if (el) el.textContent = s;
+  }})();
+</script>
 </body>
 </html>"#,
         files_checked = files_checked,
@@ -195,21 +234,7 @@ pub fn generate_html_report(
         status_text = status_text,
         dir_section = dir_section,
         violation_section = violation_section,
-        timestamp = chrono_now(),
     )
-}
-
-fn chrono_now() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let duration = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default();
-    let secs = duration.as_secs();
-    let hours = (secs / 3600) % 24;
-    let minutes = (secs / 60) % 60;
-    let seconds = secs % 60;
-    let days = secs / 86400;
-    format!("Day {} {:02}:{:02}:{:02} UTC", days, hours, minutes, seconds)
 }
 
 pub fn save_html_report(

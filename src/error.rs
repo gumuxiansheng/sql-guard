@@ -44,6 +44,11 @@ pub struct Violation {
     pub script_type: String,
     #[doc(hidden)]
     pub line: Option<usize>,
+    /// 语句结束行（含）。`run_single_rule` 会自动从 AST 回填
+    /// （找到包含 `line` 的语句范围），规则脚本无需关心。
+    /// 增量校验时用于语句级范围交集判断。
+    #[doc(hidden)]
+    pub end_line: Option<usize>,
     #[doc(hidden)]
     pub column: Option<usize>,
 }

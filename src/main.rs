@@ -5,6 +5,7 @@ mod checker;
 mod rule;
 mod reporter;
 mod mapper;
+mod git_diff;
 
 use std::path::Path;
 use std::fs;
@@ -46,6 +47,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         Commands::Init { path } => {
             run_init(&path)?;
+        }
+        Commands::CheckDiff {
+            base,
+            path,
+            config: config_path,
+            format,
+            output_dir,
+            rules,
+            groups,
+            exclude_rules,
+            exclude_groups,
+        } => {
+            run_check_diff(
+                &base,
+                &path,
+                &config_path,
+                &format,
+                output_dir.as_deref(),
+                &rules,
+                &groups,
+                &exclude_rules,
+                &exclude_groups,
+            )?;
         }
     }
 
@@ -213,6 +237,247 @@ fn run_check(
     } else {
         Ok(())
     }
+}
+
+fn run_check_diff(
+    base: &str,
+    target_dir: &Path,
+    config_path: &Path,
+    format: &str,
+    output_dir: Option<&Path>,
+    rules: &Option<String>,
+    groups: &Option<String>,
+    exclude_rules: &Option<String>,
+    exclude_groups: &Option<String>,
+) -> Result<(), SqlGuardError> {
+    let config_dir = config_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .canonicalize()
+        .unwrap_or_else(|_| config_path.parent().unwrap_or_else(|| Path::new(".")).to_path_buf());
+
+    let config = if config_path.exists() {
+        Config::load(config_path)?
+    } else {
+        Config::load(&config_dir.join("sqlguard.toml"))
+            .unwrap_or_else(|_| generate_default_config())
+    };
+
+    let filter = engine::RuleFilter::from_cli(rules, groups, exclude_rules, exclude_groups);
+    if !filter.is_empty() {
+        eprintln!(
+            "Rule filter active: include_rules={:?} include_groups={:?} exclude_rules={:?} exclude_groups={:?}",
+            filter.include_rules, filter.include_groups, filter.exclude_rules, filter.exclude_groups
+        );
+    }
+
+    // 1. 调用 git diff 获取改动文件 + hunk 行范围
+    let mut patterns: Vec<&str> = vec!["*.sql", "*.ddl", "*.dml"];
+    let mapper_patterns_owned: Vec<String> = if config.mapper.enabled {
+        config.mapper.patterns.clone()
+    } else {
+        Vec::new()
+    };
+    for p in &mapper_patterns_owned {
+        patterns.push(p.as_str());
+    }
+
+    eprintln!("Computing diff: {}...HEAD", base);
+    let diffs = git_diff::get_diff(base, &patterns)?;
+
+    if diffs.is_empty() {
+        eprintln!("No SQL changes detected since {}", base);
+        // 仍输出空报告
+        let output_dir_path = output_dir
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+        if !output_dir_path.exists() {
+            let _ = fs::create_dir_all(&output_dir_path);
+        }
+        let empty: Vec<Violation> = Vec::new();
+        for fmt in format.split(',').map(|s| s.trim()) {
+            match fmt {
+                "plain" => plain::print_plain_report(&empty, &[], &[], 0),
+                "json" => {
+                    if let Ok(p) = json::save_json_report(&output_dir_path, &empty, &[], &[], 0) {
+                        eprintln!("JSON report saved: {}", p);
+                    }
+                }
+                _ => {}
+            }
+        }
+        return Ok(());
+    }
+
+    eprintln!(
+        "Incremental check on {} file(s) changed since {}",
+        diffs.len(),
+        base
+    );
+
+    let absolute_target = if target_dir.is_absolute() {
+        target_dir.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map(|cwd| cwd.join(target_dir))
+            .unwrap_or_else(|_| target_dir.to_path_buf())
+    };
+
+    // 2. 对每个改动文件跑规则，按 hunk 范围过滤
+    let engine_instance = engine::build_engine();
+    let mut all_violations: Vec<Violation> = Vec::new();
+    let mut files_checked = 0;
+
+    for file_diff in &diffs {
+        let file_path = &file_diff.path;
+        if !file_path.exists() {
+            continue;
+        }
+        files_checked += 1;
+
+        let is_xml = file_path
+            .extension()
+            .map_or(false, |e| e.eq_ignore_ascii_case("xml"));
+
+        if is_xml {
+            // mapper 模式：提取所有片段，逐条跑 + 过滤
+            let extracted = match mapper::extract_sql_from_xml(file_path) {
+                Ok(v) => v,
+                Err(e) => {
+                    eprintln!(
+                        "Warning: failed to parse mapper XML '{}': {}",
+                        file_path.display(),
+                        e
+                    );
+                    continue;
+                }
+            };
+            for sql in extracted {
+                let script_type = mapper::map_statement_type(&sql.statement_type);
+                let line_offset = sql.raw_xml_line.saturating_sub(1);
+                let violations = engine::run_rules_for_file(
+                    &engine_instance,
+                    file_path,
+                    &sql.processed_sql,
+                    script_type,
+                    &config,
+                    &config_dir,
+                    &filter,
+                    line_offset,
+                )?;
+                let filtered = filter_violations_by_diff(violations, file_diff);
+                all_violations.extend(filtered);
+            }
+        } else {
+            // 脚本模式
+            let classification_result =
+                classification::classify_file(file_path, &config.classification)?;
+            let sql_content = fs::read_to_string(file_path).map_err(|e| {
+                SqlGuardError::CheckError(format!(
+                    "Failed to read '{}': {}",
+                    file_path.display(),
+                    e
+                ))
+            })?;
+            let violations = engine::run_rules_for_file(
+                &engine_instance,
+                file_path,
+                &sql_content,
+                &classification_result.script_type,
+                &config,
+                &config_dir,
+                &filter,
+                0,
+            )?;
+            let filtered = filter_violations_by_diff(violations, file_diff);
+            all_violations.extend(filtered);
+        }
+    }
+
+    // 3. 输出报告（复用现有 reporter）
+    let formats: Vec<&str> = match format {
+        "all" => vec!["plain", "json", "html"],
+        f => f.split(',').map(|s| s.trim()).collect(),
+    };
+
+    let output_dir_path = output_dir
+        .map(|p| {
+            if p.is_absolute() {
+                p.to_path_buf()
+            } else {
+                std::env::current_dir()
+                    .map(|cwd| cwd.join(p))
+                    .unwrap_or_else(|_| p.to_path_buf())
+            }
+        })
+        .unwrap_or_else(|| absolute_target.clone());
+
+    if !output_dir_path.exists() {
+        fs::create_dir_all(&output_dir_path).map_err(SqlGuardError::IoError)?;
+    }
+
+    for fmt in &formats {
+        match *fmt {
+            "plain" => {
+                plain::print_plain_report(&all_violations, &[], &[], files_checked);
+            }
+            "json" => match json::save_json_report(
+                &output_dir_path,
+                &all_violations,
+                &[],
+                &[],
+                files_checked,
+            ) {
+                Ok(path) => eprintln!("JSON report saved: {}", path),
+                Err(e) => eprintln!("Error saving JSON report: {}", e),
+            },
+            "html" => match html::save_html_report(
+                &output_dir_path,
+                &all_violations,
+                &[],
+                &[],
+                files_checked,
+            ) {
+                Ok(path) => eprintln!("HTML report saved: {}", path),
+                Err(e) => eprintln!("Error saving HTML report: {}", e),
+            },
+            _ => eprintln!("Unknown format: {}", fmt),
+        }
+    }
+
+    let has_errors = all_violations.iter().any(|v| v.severity == "error");
+    if has_errors {
+        Err(SqlGuardError::CheckError("Incremental checks failed".to_string()))
+    } else {
+        Ok(())
+    }
+}
+
+/// 语句级交集过滤：保留 violation 的 [line, end_line] 与任一 hunk [s, e] 有交集的违规。
+/// - 新增文件：全保留
+/// - violation 无 line：保守保留（可能是规则脚本错误，宁可误报）
+fn filter_violations_by_diff(
+    violations: Vec<Violation>,
+    file_diff: &git_diff::FileDiff,
+) -> Vec<Violation> {
+    if file_diff.is_new {
+        return violations;
+    }
+    violations
+        .into_iter()
+        .filter(|v| {
+            let line = match v.line {
+                Some(l) => l,
+                None => return true, // 无行号，保守保留
+            };
+            let end_line = v.end_line.unwrap_or(line);
+            // 与任一 hunk 有交集：[line, end_line] ∩ [s, e] != ∅
+            file_diff
+                .hunks
+                .iter()
+                .any(|(s, e)| line <= *e && end_line >= *s)
+        })
+        .collect()
 }
 
 fn run_init(target_dir: &Path) -> Result<(), SqlGuardError> {

@@ -3,6 +3,12 @@ use std::path::Path;
 
 const BINARY: &str = "target/release/sqlguard";
 
+/// 取 sqlguard 二进制的绝对路径（避免 current_dir 切换后相对路径失效）
+fn binary_abs_path() -> String {
+    let cwd = std::env::current_dir().unwrap_or_default();
+    cwd.join(BINARY).to_string_lossy().to_string()
+}
+
 fn setup_test_project(dir: &str) {
     std::fs::create_dir_all(format!("{}/sql/ddl", dir)).unwrap();
     std::fs::create_dir_all(format!("{}/sql/dml", dir)).unwrap();
@@ -34,7 +40,7 @@ fn test_init_creates_config() {
     let dir = "/tmp/sqlguard-test-init";
     let _ = std::fs::remove_dir_all(dir);
 
-    let output = Command::new(BINARY)
+    let output = Command::new(&binary_abs_path())
         .args(["init", dir])
         .output()
         .expect("Failed to run sqlguard init");
@@ -52,7 +58,7 @@ fn test_check_finds_violations() {
     let dir = "/tmp/sqlguard-test-check";
     let _ = std::fs::remove_dir_all(dir);
 
-    Command::new(BINARY)
+    Command::new(&binary_abs_path())
         .args(["init", dir])
         .output()
         .expect("Failed to run sqlguard init");
@@ -61,7 +67,7 @@ fn test_check_finds_violations() {
 
     let config_path = format!("{}/sqlguard.toml", dir);
 
-    let output = Command::new(BINARY)
+    let output = Command::new(&binary_abs_path())
         .args(["check", dir, "-c", &config_path, "-f", "plain"])
         .output()
         .expect("Failed to run sqlguard check");
@@ -142,7 +148,7 @@ formats = ["json"]
         "let sql = context[\"sql_content\"];\nlet upper = sql.to_upper();\nif upper.contains(\"SELECT *\") { violations.push(\"SELECT * not allowed\"); }\n"
     ).unwrap();
 
-    let output = Command::new(BINARY)
+    let output = Command::new(&binary_abs_path())
         .args(["check", dir, "-c", &format!("{}/sqlguard.toml", dir), "-f", "json", "-o", dir])
         .output()
         .expect("Failed to run sqlguard check with JSON");
@@ -165,7 +171,7 @@ fn test_check_mapper_mode() {
     let _ = std::fs::remove_dir_all(dir);
 
     // 1. 初始化项目配置（生成规则脚本骨架）
-    Command::new(BINARY)
+    Command::new(&binary_abs_path())
         .args(["init", dir])
         .output()
         .expect("Failed to run sqlguard init");
@@ -240,7 +246,7 @@ formats = ["json"]
 "#).unwrap();
 
     // 4. 执行 check
-    let output = Command::new(BINARY)
+    let output = Command::new(&binary_abs_path())
         .args(["check", dir, "-c", &format!("{}/sqlguard.toml", dir), "-f", "json", "-o", dir])
         .output()
         .expect("Failed to run sqlguard check with mapper");
@@ -285,7 +291,7 @@ fn test_mapper_disabled_by_default() {
     let dir = "/tmp/sqlguard-test-mapper-disabled";
     let _ = std::fs::remove_dir_all(dir);
 
-    Command::new(BINARY)
+    Command::new(&binary_abs_path())
         .args(["init", dir])
         .output()
         .expect("Failed to run sqlguard init");
@@ -301,7 +307,7 @@ fn test_mapper_disabled_by_default() {
     ).unwrap();
 
     // 用 init 生成的默认配置（不含 [mapper] 段）跑 check
-    let output = Command::new(BINARY)
+    let output = Command::new(&binary_abs_path())
         .args(["check", dir, "-c", &format!("{}/sqlguard.toml", dir), "-f", "json", "-o", dir])
         .output()
         .expect("Failed to run sqlguard check");
@@ -317,6 +323,265 @@ fn test_mapper_disabled_by_default() {
         !content.contains("BadMapper.xml"),
         "Mapper XML should NOT be scanned when mapper.enabled defaults to false: {}",
         content
+    );
+
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn test_check_diff_only_changed_statements() {
+    // 验证 check-diff 只校验改动语句，未改动语句的违规被过滤掉
+    let dir = "/tmp/sqlguard-test-diff";
+    let _ = std::fs::remove_dir_all(dir);
+
+    // 1. 初始化 git 仓库
+    Command::new("git")
+        .args(["init", dir])
+        .output()
+        .expect("git init");
+    Command::new("git")
+        .current_dir(dir)
+        .args(["config", "user.email", "test@test.com"])
+        .output()
+        .expect("git config");
+    Command::new("git")
+        .current_dir(dir)
+        .args(["config", "user.name", "Test"])
+        .output()
+        .expect("git config");
+
+    // 2. 初始化 sqlguard
+    Command::new(&binary_abs_path())
+        .args(["init", dir])
+        .output()
+        .expect("sqlguard init");
+
+    // 3. 创建初始 SQL 文件，包含两条 SELECT *（都会违规）
+    std::fs::create_dir_all(format!("{}/sql/dml", dir)).unwrap();
+    std::fs::write(
+        format!("{}/sql/dml/001.sql", dir),
+        "SELECT * FROM users;\nSELECT * FROM orders;\n",
+    ).unwrap();
+
+    // 4. 提交初始版本
+    Command::new("git")
+        .current_dir(dir)
+        .args(["add", "."])
+        .output()
+        .expect("git add");
+    Command::new("git")
+        .current_dir(dir)
+        .args(["commit", "-m", "initial"])
+        .output()
+        .expect("git commit");
+
+    // 5. 修改第一条 SELECT *（改为规范查询），第二条保持违规不变
+    std::fs::write(
+        format!("{}/sql/dml/001.sql", dir),
+        "SELECT id, name FROM users;\nSELECT * FROM orders;\n",
+    ).unwrap();
+    Command::new("git")
+        .current_dir(dir)
+        .args(["add", "."])
+        .output()
+        .expect("git add");
+    Command::new("git")
+        .current_dir(dir)
+        .args(["commit", "-m", "fix first query"])
+        .output()
+        .expect("git commit");
+
+    // 6. 跑 check-diff HEAD~1
+    let output = Command::new(&binary_abs_path())
+        .current_dir(dir)
+        .args([
+            "check-diff",
+            "--base", "HEAD~1",
+            "-c", &format!("{}/sqlguard.toml", dir),
+            "-f", "json",
+            "-o", dir,
+        ])
+        .output()
+        .expect("sqlguard check-diff");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("JSON report saved"),
+        "JSON report should be saved: {}",
+        stderr
+    );
+
+    // 7. 验证：因为改动行（第 1 行 SELECT * FROM users → SELECT id, name FROM users）
+    //    已经不再违规，所以增量校验应无违规
+    //    第二条 SELECT * FROM orders 虽然违规，但不在改动 hunk 内（hunk = 第 1 行）
+    //    所以应被过滤掉
+    let report_path = format!("{}/sqlguard-report.json", dir);
+    let content = std::fs::read_to_string(&report_path).unwrap();
+    let total: usize = serde_json::from_str::<serde_json::Value>(&content)
+        .ok()
+        .and_then(|v| v["summary"]["total_violations"].as_u64().map(|n| n as usize))
+        .unwrap_or(999);
+    assert_eq!(
+        total, 0,
+        "Incremental check should find 0 violations (changed line no longer violates, unchanged violation filtered): {}",
+        content
+    );
+
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn test_check_diff_detects_new_violation_in_changed_line() {
+    // 验证 check-diff 能检测到改动行新增的违规
+    let dir = "/tmp/sqlguard-test-diff-new";
+    let _ = std::fs::remove_dir_all(dir);
+
+    Command::new("git").args(["init", dir]).output().expect("git init");
+    Command::new("git").current_dir(dir).args(["config", "user.email", "t@t.com"]).output().expect("git config");
+    Command::new("git").current_dir(dir).args(["config", "user.name", "T"]).output().expect("git config");
+
+    Command::new(&binary_abs_path()).args(["init", dir]).output().expect("sqlguard init");
+
+    // 初始：规范查询
+    std::fs::create_dir_all(format!("{}/sql/dml", dir)).unwrap();
+    std::fs::write(
+        format!("{}/sql/dml/001.sql", dir),
+        "SELECT id FROM users;\n",
+    ).unwrap();
+    Command::new("git").current_dir(dir).args(["add", "."]).output().expect("git add");
+    Command::new("git").current_dir(dir).args(["commit", "-m", "initial"]).output().expect("git commit");
+
+    // 改动：把规范查询改成 SELECT *（新增违规）
+    std::fs::write(
+        format!("{}/sql/dml/001.sql", dir),
+        "SELECT * FROM users;\n",
+    ).unwrap();
+    Command::new("git").current_dir(dir).args(["add", "."]).output().expect("git add");
+    Command::new("git").current_dir(dir).args(["commit", "-m", "add violation"]).output().expect("git commit");
+
+    let output = Command::new(&binary_abs_path())
+        .current_dir(dir)
+        .args([
+            "check-diff",
+            "--base", "HEAD~1",
+            "-c", &format!("{}/sqlguard.toml", dir),
+            "-f", "json",
+            "-o", dir,
+        ])
+        .output()
+        .expect("sqlguard check-diff");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("JSON report saved"), "JSON report should be saved: {}", stderr);
+
+    let report_path = format!("{}/sqlguard-report.json", dir);
+    let content = std::fs::read_to_string(&report_path).unwrap();
+    let total: usize = serde_json::from_str::<serde_json::Value>(&content)
+        .ok()
+        .and_then(|v| v["summary"]["total_violations"].as_u64().map(|n| n as usize))
+        .unwrap_or(0);
+    assert_eq!(
+        total, 1,
+        "Incremental check should find 1 violation (new SELECT *): {}",
+        content
+    );
+
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn test_check_diff_new_file_all_checked() {
+    // 验证新增文件整体算改动，所有违规都被保留
+    let dir = "/tmp/sqlguard-test-diff-newfile";
+    let _ = std::fs::remove_dir_all(dir);
+
+    Command::new("git").args(["init", dir]).output().expect("git init");
+    Command::new("git").current_dir(dir).args(["config", "user.email", "t@t.com"]).output().expect("git config");
+    Command::new("git").current_dir(dir).args(["config", "user.name", "T"]).output().expect("git config");
+
+    Command::new(&binary_abs_path()).args(["init", dir]).output().expect("sqlguard init");
+
+    // 初始 commit（无 SQL 文件）
+    Command::new("git").current_dir(dir).args(["add", "."]).output().expect("git add");
+    Command::new("git").current_dir(dir).args(["commit", "-m", "initial"]).output().expect("git commit");
+
+    // 新增 SQL 文件，含 2 条违规
+    std::fs::create_dir_all(format!("{}/sql/dml", dir)).unwrap();
+    std::fs::write(
+        format!("{}/sql/dml/new.sql", dir),
+        "SELECT * FROM users;\nSELECT * FROM orders;\n",
+    ).unwrap();
+    Command::new("git").current_dir(dir).args(["add", "."]).output().expect("git add");
+    Command::new("git").current_dir(dir).args(["commit", "-m", "add new file"]).output().expect("git commit");
+
+    let output = Command::new(&binary_abs_path())
+        .current_dir(dir)
+        .args([
+            "check-diff",
+            "--base", "HEAD~1",
+            "-c", &format!("{}/sqlguard.toml", dir),
+            "-f", "json",
+            "-o", dir,
+        ])
+        .output()
+        .expect("sqlguard check-diff");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("JSON report saved"), "JSON report should be saved: {}", stderr);
+
+    let report_path = format!("{}/sqlguard-report.json", dir);
+    let content = std::fs::read_to_string(&report_path).unwrap();
+    let total: usize = serde_json::from_str::<serde_json::Value>(&content)
+        .ok()
+        .and_then(|v| v["summary"]["total_violations"].as_u64().map(|n| n as usize))
+        .unwrap_or(0);
+    assert_eq!(
+        total, 2,
+        "New file: both SELECT * violations should be kept (is_new=true bypasses hunk filter): {}",
+        content
+    );
+
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn test_check_diff_no_changes() {
+    // 验证无改动时正常退出，输出空报告
+    let dir = "/tmp/sqlguard-test-diff-empty";
+    let _ = std::fs::remove_dir_all(dir);
+
+    Command::new("git").args(["init", dir]).output().expect("git init");
+    Command::new("git").current_dir(dir).args(["config", "user.email", "t@t.com"]).output().expect("git config");
+    Command::new("git").current_dir(dir).args(["config", "user.name", "T"]).output().expect("git config");
+
+    Command::new(&binary_abs_path()).args(["init", dir]).output().expect("sqlguard init");
+
+    std::fs::create_dir_all(format!("{}/sql/dml", dir)).unwrap();
+    std::fs::write(
+        format!("{}/sql/dml/001.sql", dir),
+        "SELECT * FROM users;\n",
+    ).unwrap();
+    Command::new("git").current_dir(dir).args(["add", "."]).output().expect("git add");
+    Command::new("git").current_dir(dir).args(["commit", "-m", "initial"]).output().expect("git commit");
+
+    // 无改动直接跑 check-diff
+    let output = Command::new(&binary_abs_path())
+        .current_dir(dir)
+        .args([
+            "check-diff",
+            "--base", "HEAD",
+            "-c", &format!("{}/sqlguard.toml", dir),
+            "-f", "json",
+            "-o", dir,
+        ])
+        .output()
+        .expect("sqlguard check-diff");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("No SQL changes detected"),
+        "Should report no changes: {}",
+        stderr
     );
 
     let _ = std::fs::remove_dir_all(dir);

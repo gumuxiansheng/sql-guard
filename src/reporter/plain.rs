@@ -54,9 +54,11 @@ pub fn generate_plain_report(
                 "warning" => format!("{}", "WARN".yellow().bold()),
                 other => format!("{}", other.to_uppercase().cyan().bold()),
             };
-            let location = match (v.line, v.column) {
-                (Some(line), Some(col)) => format!(":{}:{}", line, col),
-                (Some(line), None) => format!(":{}", line),
+            let location = match (v.line, v.end_line, v.column) {
+                (Some(line), Some(end), Some(col)) if end > line => format!(":{}-{}:{}", line, end, col),
+                (Some(line), Some(end), None) if end > line => format!(":{}-{}", line, end),
+                (Some(line), _, Some(col)) => format!(":{}:{}", line, col),
+                (Some(line), _, None) => format!(":{}", line),
                 _ => String::new(),
             };
             let group_tag = match &v.rule_group {
