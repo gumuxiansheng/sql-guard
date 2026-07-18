@@ -315,13 +315,18 @@ impl SelectInfo {
 
 /// 把 SQL 文本解析为 AST。解析失败时返回带 `parse_error` 的空 AST，
 /// 不影响后续规则运行（规则可选择是否上报解析错误）。
+///
+/// 注：sqlparser 0.45 的 `parse_sql` 不返回每条语句的位置信息
+/// （位置信息存在于 `TokenWithLocation` 中，但 `Statement` 本身不携带）。
+/// 当前实现把所有语句的行/列设为 0；后续如需精确位置，可通过 visitor
+/// 遍历或自行调用 tokenizer 提取首 token 的 location。
 fn parse_sql_to_ast(sql: &str) -> SqlAst {
     let dialect = GenericDialect {};
-    match Parser::parse_sql_with_offsets(&dialect, sql) {
+    match Parser::parse_sql(&dialect, sql) {
         Ok(stmts) => {
             let statements: Vec<StmtInfo> = stmts
                 .iter()
-                .map(|(stmt, (line, col))| convert_statement(stmt, *line as i64, *col as i64))
+                .map(|stmt| convert_statement(stmt, 0, 0))
                 .collect();
             SqlAst {
                 statements,
@@ -337,12 +342,12 @@ fn parse_sql_to_ast(sql: &str) -> SqlAst {
 
 fn convert_statement(stmt: &Statement, line: i64, column: i64) -> StmtInfo {
     match stmt {
-        Statement::CreateTable(c) => {
-            let table_name = c.name.to_string();
-            let mut columns = Vec::new();
+        Statement::CreateTable { name, columns, constraints, if_not_exists, .. } => {
+            let table_name = name.to_string();
+            let mut cols = Vec::new();
             let mut pk_in_column = false;
 
-            for col_def in &c.columns {
+            for col_def in columns {
                 let mut info = ColumnInfo {
                     name: col_def.name.to_string(),
                     data_type: col_def.data_type.to_string(),
@@ -353,21 +358,20 @@ fn convert_statement(stmt: &Statement, line: i64, column: i64) -> StmtInfo {
                 for opt in &col_def.options {
                     match &opt.option {
                         ColumnOption::NotNull => info.is_not_null = true,
-                        ColumnOption::PrimaryKey => {
-                            info.is_primary_key = true;
-                            pk_in_column = true;
-                        }
-                        ColumnOption::Unique => {
+                        ColumnOption::Unique { is_primary, .. } => {
                             info.is_unique = true;
+                            if *is_primary {
+                                info.is_primary_key = true;
+                                pk_in_column = true;
+                            }
                         }
                         _ => {}
                     }
                 }
-                columns.push(info);
+                cols.push(info);
             }
 
-            let pk_in_constraint = c
-                .constraints
+            let pk_in_constraint = constraints
                 .iter()
                 .any(|con| matches!(con, TableConstraint::PrimaryKey { .. }));
 
@@ -377,33 +381,32 @@ fn convert_statement(stmt: &Statement, line: i64, column: i64) -> StmtInfo {
                 column,
                 create_table: Some(CreateInfo {
                     table_name,
-                    columns,
+                    columns: cols,
                     has_primary_key: pk_in_column || pk_in_constraint,
-                    if_not_exists: c.if_not_exists,
+                    if_not_exists: *if_not_exists,
                 }),
                 drop_object: None,
                 select: None,
             }
         }
-        Statement::Drop(d) => {
-            let object_type = format!("{:?}", d.object_type).to_uppercase();
-            let names: Vec<String> = d.names.iter().map(|n| n.to_string()).collect();
-            let kind = format!("DROP_{}", object_type);
+        Statement::Drop { object_type, if_exists, names, .. } => {
+            let obj_type = format!("{:?}", object_type).to_uppercase();
+            let name_list: Vec<String> = names.iter().map(|n| n.to_string()).collect();
+            let kind = format!("DROP_{}", obj_type);
             StmtInfo {
                 kind,
                 line,
                 column,
                 create_table: None,
                 drop_object: Some(DropInfo {
-                    object_type,
-                    name: names.join(", "),
-                    if_exists: d.if_exists,
+                    object_type: obj_type,
+                    name: name_list.join(", "),
+                    if_exists: *if_exists,
                 }),
                 select: None,
             }
         }
         Statement::Query(q) => {
-            // `q` 是 `&Box<Query>` 或 `&Query`，自动多引用解引用到 `&Query`。
             let info = analyze_query(q);
             StmtInfo {
                 kind: "SELECT".to_string(),
@@ -466,10 +469,10 @@ fn analyze_query(q: &Query) -> SelectInfo {
     if let SetExpr::Select(s) = &*q.body {
         for item in &s.projection {
             match item {
-                SelectItem::Wildcard => info.has_wildcard = true,
-                SelectItem::QualifiedWildcard(_) => info.has_wildcard = true,
+                SelectItem::Wildcard(_) => info.has_wildcard = true,
+                SelectItem::QualifiedWildcard(_, _) => info.has_wildcard = true,
                 SelectItem::UnnamedExpr(expr) => info.projection.push(expr.to_string()),
-                SelectItem::ExprWithAlias(expr, alias) => {
+                SelectItem::ExprWithAlias { expr, alias } => {
                     info.projection.push(format!("{} AS {}", expr, alias));
                 }
             }
@@ -574,10 +577,10 @@ fn run_single_rule(
             "Failed to read script '{}': {}",
             script_path.display(),
             e
-        )
+        ))
     })?;
 
-    let mut engine = build_engine();
+    let engine = build_engine();
 
     let mut scope = Scope::new();
 

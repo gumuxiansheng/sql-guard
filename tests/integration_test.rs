@@ -112,14 +112,18 @@ type = "dml"
 priority = 10
 
 [[rules]]
+id = "DDL001"
 name = "no_drop_table"
+group = "ddl-safety"
 enabled = true
 script_path = "config/rules/ddl/no_drop_table.rhai"
 applies_to = ["ddl"]
 severity = "error"
 
 [[rules]]
+id = "DML001"
 name = "no_select_all"
+group = "dml-safety"
 enabled = false
 script_path = "config/rules/dml/no_select_all.rhai"
 applies_to = ["dml"]
