@@ -3,7 +3,8 @@ use std::path::Path;
 
 use rhai::{Array, Dynamic, Engine, Map, Scope};
 use sqlparser::ast::{
-    ColumnOption, FromTable, Query, SelectItem, SetExpr, Statement, TableConstraint, TableFactor,
+    ColumnOption, FromTable, JoinConstraint, JoinOperator, Query, SelectItem, SetExpr, Statement,
+    TableConstraint, TableFactor,
 };
 use sqlparser::dialect::GenericDialect;
 use sqlparser::parser::Parser;
@@ -170,12 +171,26 @@ pub struct DropInfo {
     pub if_exists: bool,
 }
 
+/// JOIN 子句信息。
+#[derive(Debug, Clone, Default)]
+pub struct JoinInfo {
+    pub table_name: String,
+    pub join_type: String,
+    pub has_condition: bool,
+}
+
 /// SELECT 语句信息。
 #[derive(Debug, Clone, Default)]
 pub struct SelectInfo {
     pub has_wildcard: bool,
     pub projection: Vec<String>,
     pub from_table: Option<String>,
+    pub joins: Vec<JoinInfo>,
+    pub has_subquery_in_from: bool,
+    pub from_subquery_has_alias: bool,
+    pub has_unqualified_column: bool,
+    pub union: bool,
+    pub union_all: bool,
 }
 
 /// INSERT 语句信息。
@@ -351,6 +366,45 @@ impl SelectInfo {
     }
     pub fn from_table(&self) -> String {
         self.from_table.clone().unwrap_or_default()
+    }
+    pub fn joins(&self) -> Vec<JoinInfo> {
+        self.joins.clone()
+    }
+    pub fn has_joins(&self) -> bool {
+        !self.joins.is_empty()
+    }
+    pub fn has_cross_join(&self) -> bool {
+        self.joins.iter().any(|j| j.join_type == "CROSS")
+    }
+    pub fn has_join_without_condition(&self) -> bool {
+        self.joins.iter().any(|j| !j.has_condition)
+    }
+    pub fn has_subquery_in_from(&self) -> bool {
+        self.has_subquery_in_from
+    }
+    pub fn from_subquery_has_alias(&self) -> bool {
+        self.from_subquery_has_alias
+    }
+    pub fn has_unqualified_column(&self) -> bool {
+        self.has_unqualified_column
+    }
+    pub fn is_union(&self) -> bool {
+        self.union
+    }
+    pub fn is_union_all(&self) -> bool {
+        self.union_all
+    }
+}
+
+impl JoinInfo {
+    pub fn table_name(&self) -> String {
+        self.table_name.clone()
+    }
+    pub fn join_type(&self) -> String {
+        self.join_type.clone()
+    }
+    pub fn has_condition(&self) -> bool {
+        self.has_condition
     }
 }
 
@@ -649,21 +703,114 @@ fn analyze_query(q: &Query) -> SelectInfo {
         has_wildcard: false,
         projection: Vec::new(),
         from_table: None,
+        joins: Vec::new(),
+        has_subquery_in_from: false,
+        from_subquery_has_alias: true,
+        has_unqualified_column: false,
+        union: false,
+        union_all: false,
     };
+
+    // 检查是否为 UNION 查询
+    match &*q.body {
+        SetExpr::SetOperation {
+            op, ..
+        } => {
+            info.union = true;
+            let op_str = format!("{:?}", op).to_uppercase();
+            info.union_all = op_str.contains("ALL");
+        }
+        _ => {}
+    }
+
     if let SetExpr::Select(s) = &*q.body {
+        let has_multiple_tables = s.from.len() > 1
+            || s.from.iter().any(|t| !t.joins.is_empty());
+
         for item in &s.projection {
             match item {
                 SelectItem::Wildcard(_) => info.has_wildcard = true,
                 SelectItem::QualifiedWildcard(_, _) => info.has_wildcard = true,
-                SelectItem::UnnamedExpr(expr) => info.projection.push(expr.to_string()),
+                SelectItem::UnnamedExpr(expr) => {
+                    let text = expr.to_string();
+                    info.projection.push(text.clone());
+                    if has_multiple_tables && !text.contains('.') {
+                        if matches!(expr, sqlparser::ast::Expr::Identifier(_)) {
+                            info.has_unqualified_column = true;
+                        }
+                    }
+                }
                 SelectItem::ExprWithAlias { expr, alias } => {
-                    info.projection.push(format!("{} AS {}", expr, alias));
+                    let text = format!("{} AS {}", expr, alias);
+                    info.projection.push(text);
+                    if has_multiple_tables && !expr.to_string().contains('.') {
+                        info.has_unqualified_column = true;
+                    }
                 }
             }
         }
-        if let Some(first_from) = s.from.first() {
-            if let TableFactor::Table { name, .. } = &first_from.relation {
-                info.from_table = Some(name.to_string());
+
+        // 分析 FROM 子句
+        for table_with_joins in &s.from {
+            // 分析主表
+            match &table_with_joins.relation {
+                TableFactor::Table { name, .. } => {
+                    if info.from_table.is_none() {
+                        info.from_table = Some(name.to_string());
+                    }
+                }
+                TableFactor::Derived { alias, .. } => {
+                    info.has_subquery_in_from = true;
+                    if alias.is_none() {
+                        info.from_subquery_has_alias = false;
+                    }
+                }
+                _ => {}
+            }
+
+            // 分析 JOIN
+            for join in &table_with_joins.joins {
+                let (table_name, join_type, has_condition) = match &join.join_operator {
+                    JoinOperator::Inner(constraint) | JoinOperator::LeftOuter(constraint)
+                    | JoinOperator::RightOuter(constraint) | JoinOperator::FullOuter(constraint) => {
+                        let table_name = match &join.relation {
+                            TableFactor::Table { name, .. } => name.to_string(),
+                            _ => join.relation.to_string(),
+                        };
+                        let join_type = match &join.join_operator {
+                            JoinOperator::Inner(_) => "INNER",
+                            JoinOperator::LeftOuter(_) => "LEFT",
+                            JoinOperator::RightOuter(_) => "RIGHT",
+                            JoinOperator::FullOuter(_) => "FULL",
+                            _ => "OTHER",
+                        }.to_string();
+                        let has_condition = match constraint {
+                            JoinConstraint::On(_) | JoinConstraint::Using(_) | JoinConstraint::Natural => true,
+                            JoinConstraint::None => false,
+                        };
+                        (table_name, join_type, has_condition)
+                    }
+                    JoinOperator::CrossJoin => {
+                        let table_name = match &join.relation {
+                            TableFactor::Table { name, .. } => name.to_string(),
+                            _ => join.relation.to_string(),
+                        };
+                        (table_name, "CROSS".to_string(), true)
+                    }
+                    _ => {
+                        let table_name = match &join.relation {
+                            TableFactor::Table { name, .. } => name.to_string(),
+                            _ => join.relation.to_string(),
+                        };
+                        (table_name, "OTHER".to_string(), false)
+                    }
+                };
+
+                info.joins.push(JoinInfo {
+                    table_name,
+                    join_type,
+                    has_condition,
+                });
             }
         }
     }
@@ -887,6 +1034,10 @@ pub fn build_engine() -> Engine {
     engine.register_type_with_name::<DropInfo>("DropInfo");
     engine.register_type_with_name::<SelectInfo>("SelectInfo");
     engine.register_type_with_name::<ColumnInfo>("ColumnInfo");
+    engine.register_type_with_name::<InsertInfo>("InsertInfo");
+    engine.register_type_with_name::<UpdateInfo>("UpdateInfo");
+    engine.register_type_with_name::<DeleteInfo>("DeleteInfo");
+    engine.register_type_with_name::<JoinInfo>("JoinInfo");
 
     // SqlAst 方法
     // 返回 Vec<CustomType> 的闭包需显式转为 Array，否则 Rhai for 循环无法迭代
@@ -951,6 +1102,25 @@ pub fn build_engine() -> Engine {
     engine.register_fn("projection", |s: &mut SelectInfo| s.projection());
     engine.register_fn("has_from_table", |s: &mut SelectInfo| s.has_from_table());
     engine.register_fn("from_table", |s: &mut SelectInfo| s.from_table());
+    engine.register_fn("joins", |s: &mut SelectInfo| -> Array {
+        s.joins().into_iter().map(|j| Dynamic::from(j)).collect()
+    });
+    engine.register_fn("has_joins", |s: &mut SelectInfo| s.has_joins());
+    engine.register_fn("has_cross_join", |s: &mut SelectInfo| s.has_cross_join());
+    engine.register_fn(
+        "has_join_without_condition",
+        |s: &mut SelectInfo| s.has_join_without_condition(),
+    );
+    engine.register_fn("has_subquery_in_from", |s: &mut SelectInfo| s.has_subquery_in_from());
+    engine.register_fn("from_subquery_has_alias", |s: &mut SelectInfo| s.from_subquery_has_alias());
+    engine.register_fn("has_unqualified_column", |s: &mut SelectInfo| s.has_unqualified_column());
+    engine.register_fn("is_union", |s: &mut SelectInfo| s.is_union());
+    engine.register_fn("is_union_all", |s: &mut SelectInfo| s.is_union_all());
+
+    // JoinInfo 方法
+    engine.register_fn("table_name", |j: &mut JoinInfo| j.table_name());
+    engine.register_fn("join_type", |j: &mut JoinInfo| j.join_type());
+    engine.register_fn("has_condition", |j: &mut JoinInfo| j.has_condition());
 
     // InsertInfo 方法
     engine.register_fn("table_name", |i: &mut InsertInfo| i.table_name());

@@ -34,6 +34,10 @@ pattern = "*.sql"
 type = "sql"
 priority = 0
 
+# ================================================================================
+# P0 规则：默认启用，建议 CI 中保持开启
+# ================================================================================
+
 [[rules]]
 id = "DDL001"
 name = "no_drop_table"
@@ -63,6 +67,141 @@ enabled = true
 script_path = "config/rules/dml/no_select_all.rhai"
 applies_to = ["dml"]
 severity = "error"
+
+[[rules]]
+id = "DML002"
+name = "no_delete_update_without_where"
+group = "dml-safety"
+description = "DELETE/UPDATE must have a WHERE clause"
+enabled = true
+script_path = "config/rules/dml/no_delete_update_without_where.rhai"
+applies_to = ["dml"]
+severity = "error"
+
+[[rules]]
+id = "DML003"
+name = "insert_columns_required"
+group = "dml-safety"
+description = "INSERT must specify target columns"
+enabled = true
+script_path = "config/rules/dml/insert_columns_required.rhai"
+applies_to = ["dml"]
+severity = "error"
+
+[[rules]]
+id = "DML004"
+name = "subquery_alias_required"
+group = "dml-style"
+description = "Subqueries in FROM must have an alias"
+enabled = true
+script_path = "config/rules/dml/subquery_alias_required.rhai"
+applies_to = ["dml"]
+severity = "error"
+
+[[rules]]
+id = "DML005"
+name = "column_references_qualified"
+group = "dml-style"
+description = "Qualify column references with table name in multi-table queries"
+enabled = true
+script_path = "config/rules/dml/column_references_qualified.rhai"
+applies_to = ["dml"]
+severity = "warning"
+
+[[rules]]
+id = "DML006"
+name = "no_join_without_condition"
+group = "dml-safety"
+description = "JOIN must have ON or USING condition"
+enabled = true
+script_path = "config/rules/dml/no_join_without_condition.rhai"
+applies_to = ["dml"]
+severity = "error"
+
+# ================================================================================
+# P1 规则：默认禁用，建议评估后启用
+# 将 enabled = false 改为 true 即可启用
+# ================================================================================
+
+[[rules]]
+id = "DML101"
+name = "no_unused_join"
+group = "dml-performance"
+description = "Detect potentially unused JOINs"
+enabled = false
+script_path = "config/rules/dml/no_unused_join.rhai"
+applies_to = ["dml"]
+severity = "warning"
+
+[[rules]]
+id = "DML102"
+name = "no_unused_cte"
+group = "dml-performance"
+description = "Detect unused CTEs (WITH clauses)"
+enabled = false
+script_path = "config/rules/dml/no_unused_cte.rhai"
+applies_to = ["dml"]
+severity = "warning"
+
+[[rules]]
+id = "DML103"
+name = "use_is_null"
+group = "dml-convention"
+description = "Use IS NULL instead of = NULL"
+enabled = false
+script_path = "config/rules/dml/use_is_null.rhai"
+applies_to = ["dml"]
+severity = "error"
+
+[[rules]]
+id = "DML104"
+name = "use_coalesce"
+group = "dml-convention"
+description = "Use standard COALESCE instead of NVL/ISNULL"
+enabled = false
+script_path = "config/rules/dml/use_coalesce.rhai"
+applies_to = ["dml"]
+severity = "warning"
+
+[[rules]]
+id = "DML105"
+name = "no_order_by_in_subquery"
+group = "dml-performance"
+description = "ORDER BY in subquery is typically ignored"
+enabled = false
+script_path = "config/rules/dml/no_order_by_in_subquery.rhai"
+applies_to = ["dml"]
+severity = "warning"
+
+[[rules]]
+id = "DML106"
+name = "union_all_preferred"
+group = "dml-performance"
+description = "Prefer UNION ALL over UNION unless dedup needed"
+enabled = false
+script_path = "config/rules/dml/union_all_preferred.rhai"
+applies_to = ["dml"]
+severity = "warning"
+
+[[rules]]
+id = "DML107"
+name = "no_nested_case"
+group = "dml-convention"
+description = "Avoid nested CASE expressions"
+enabled = false
+script_path = "config/rules/dml/no_nested_case.rhai"
+applies_to = ["dml"]
+severity = "warning"
+
+[[rules]]
+id = "DML108"
+name = "no_constant_where"
+group = "dml-convention"
+description = "Avoid constant conditions in WHERE clause"
+enabled = false
+script_path = "config/rules/dml/no_constant_where.rhai"
+applies_to = ["dml"]
+severity = "warning"
 
 [output]
 formats = ["plain", "json", "html"]

@@ -16,3 +16,15 @@ anyhow = "1"
 colored = "2"
 sqlparser = "0.45"
 quick-xml = "0.31"
+
+# Release 构建优化：显著减小二进制体积
+# - lto = "fat": 跨 crate 全链接优化，去除跨 crate 死代码（慢但小）
+# - codegen-units = 1: 单代码生成单元，让 LLVM 全局优化
+# - strip = true: 剥离调试符号（单独的 dsym 仍保留调试信息）
+# - panic = "abort": 去除 unwind 代码
+# 注：如需调试 release 版本，临时注释掉 strip / panic = "abort"
+[profile.release]
+lto = "fat"
+codegen-units = 1
+strip = true
+panic = "abort"

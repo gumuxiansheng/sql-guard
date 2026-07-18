@@ -1,6 +1,8 @@
-// no_select_all.rhai - Disallow SELECT * in DML scripts
-// 基于 AST：识别 SELECT 语句，检查投影列表是否包含通配符（* 或 table.*）。
-// 相比字符串匹配，AST 不会误判注释中的 SELECT * 或字符串字面量。
+// no_select_all.rhai (DML001)
+// 禁止使用 SELECT *，必须显式列出所需列。
+// 原因：SELECT * 会返回所有列，可能导致不必要的数据传输、
+// 隐式依赖表结构、并破坏视图/物化视图的兼容性。
+// 基于 AST 精确识别通配符，不会误判注释或字符串字面量。
 
 let ast = context["ast"];
 
@@ -11,8 +13,7 @@ if ast.has_parse_error() {
     });
 }
 
-let stmts = ast.statements();
-for s in stmts {
+for s in ast.statements() {
     if s.kind() == "SELECT" {
         let sel = s.select();
         if sel.has_wildcard() {
