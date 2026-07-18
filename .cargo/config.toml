@@ -1,0 +1,14 @@
+# 跨编译配置（仅在交叉编译时使用，不影响本机构建）
+# Linux x86_64 (musl, 静态链接，self-contained)
+[target.x86_64-unknown-linux-musl]
+linker = "rust-lld"
+rustflags = ["-Z", "unstable-options", "-C", "link-self-contained=+linker,+crto,+libc,+unwind"]
+
+# Linux aarch64 (musl, 静态链接，self-contained)
+[target.aarch64-unknown-linux-musl]
+linker = "rust-lld"
+rustflags = ["-Z", "unstable-options", "-C", "link-self-contained=+linker,+crto,+libc,+unwind"]
+
+# Windows x86_64 (self-contained mingw)
+[target.x86_64-pc-windows-gnu]
+rustflags = ["-Z", "unstable-options", "-C", "link-self-contained=+mingw"]
