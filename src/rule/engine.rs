@@ -3,10 +3,11 @@ use std::path::Path;
 
 use rhai::{Array, Dynamic, Engine, Map, Scope};
 use sqlparser::ast::{
-    ColumnOption, Query, SelectItem, SetExpr, Statement, TableConstraint, TableFactor,
+    ColumnOption, FromTable, Query, SelectItem, SetExpr, Statement, TableConstraint, TableFactor,
 };
 use sqlparser::dialect::GenericDialect;
 use sqlparser::parser::Parser;
+use sqlparser::tokenizer::Token;
 
 use crate::config::{Config, RuleConfig};
 use crate::error::{SqlGuardError, Violation};
@@ -137,6 +138,9 @@ pub struct StmtInfo {
     pub create_table: Option<CreateInfo>,
     pub drop_object: Option<DropInfo>,
     pub select: Option<SelectInfo>,
+    pub insert: Option<InsertInfo>,
+    pub update: Option<UpdateInfo>,
+    pub delete: Option<DeleteInfo>,
 }
 
 /// CREATE TABLE 语句信息。
@@ -172,6 +176,27 @@ pub struct SelectInfo {
     pub has_wildcard: bool,
     pub projection: Vec<String>,
     pub from_table: Option<String>,
+}
+
+/// INSERT 语句信息。
+#[derive(Debug, Clone, Default)]
+pub struct InsertInfo {
+    pub table_name: String,
+    pub columns: Vec<String>,
+}
+
+/// UPDATE 语句信息。`where_clause` 为 SQL 文本，便于规则做字符串匹配。
+#[derive(Debug, Clone, Default)]
+pub struct UpdateInfo {
+    pub table_name: String,
+    pub where_clause: Option<String>,
+}
+
+/// DELETE 语句信息。`where_clause` 为 SQL 文本，便于规则做字符串匹配。
+#[derive(Debug, Clone, Default)]
+pub struct DeleteInfo {
+    pub table_name: String,
+    pub where_clause: Option<String>,
 }
 
 // ===== Rhai 方法实现 =====
@@ -237,6 +262,15 @@ impl StmtInfo {
     pub fn has_select(&self) -> bool {
         self.select.is_some()
     }
+    pub fn has_insert(&self) -> bool {
+        self.insert.is_some()
+    }
+    pub fn has_update(&self) -> bool {
+        self.update.is_some()
+    }
+    pub fn has_delete(&self) -> bool {
+        self.delete.is_some()
+    }
     pub fn create_table(&self) -> CreateInfo {
         self.create_table.clone().unwrap_or_default()
     }
@@ -245,6 +279,15 @@ impl StmtInfo {
     }
     pub fn select(&self) -> SelectInfo {
         self.select.clone().unwrap_or_default()
+    }
+    pub fn insert(&self) -> InsertInfo {
+        self.insert.clone().unwrap_or_default()
+    }
+    pub fn update(&self) -> UpdateInfo {
+        self.update.clone().unwrap_or_default()
+    }
+    pub fn delete(&self) -> DeleteInfo {
+        self.delete.clone().unwrap_or_default()
     }
 }
 
@@ -311,32 +354,111 @@ impl SelectInfo {
     }
 }
 
+impl InsertInfo {
+    pub fn table_name(&self) -> String {
+        self.table_name.clone()
+    }
+    pub fn columns(&self) -> Vec<String> {
+        self.columns.clone()
+    }
+    pub fn has_columns(&self) -> bool {
+        !self.columns.is_empty()
+    }
+}
+
+impl UpdateInfo {
+    pub fn table_name(&self) -> String {
+        self.table_name.clone()
+    }
+    pub fn has_where(&self) -> bool {
+        self.where_clause.is_some()
+    }
+    pub fn where_clause(&self) -> String {
+        self.where_clause.clone().unwrap_or_default()
+    }
+}
+
+impl DeleteInfo {
+    pub fn table_name(&self) -> String {
+        self.table_name.clone()
+    }
+    pub fn has_where(&self) -> bool {
+        self.where_clause.is_some()
+    }
+    pub fn where_clause(&self) -> String {
+        self.where_clause.clone().unwrap_or_default()
+    }
+}
+
 // ===== SQL 解析 =====
 
-/// 把 SQL 文本解析为 AST。解析失败时返回带 `parse_error` 的空 AST，
-/// 不影响后续规则运行（规则可选择是否上报解析错误）。
+/// 把 SQL 文本解析为 AST，每条语句记录其在源文件中的行号/列号。
+/// 解析失败时返回带 `parse_error` 的空 AST，不影响后续规则运行。
 ///
-/// 注：sqlparser 0.45 的 `parse_sql` 不返回每条语句的位置信息
-/// （位置信息存在于 `TokenWithLocation` 中，但 `Statement` 本身不携带）。
-/// 当前实现把所有语句的行/列设为 0；后续如需精确位置，可通过 visitor
-/// 遍历或自行调用 tokenizer 提取首 token 的 location。
+/// 利用 `Parser::peek_token()` 在解析每条语句前读取起始位置，
+/// 避免 sqlparser 的 `Statement` 本身不携带位置信息的限制。
 fn parse_sql_to_ast(sql: &str) -> SqlAst {
     let dialect = GenericDialect {};
-    match Parser::parse_sql(&dialect, sql) {
-        Ok(stmts) => {
-            let statements: Vec<StmtInfo> = stmts
-                .iter()
-                .map(|stmt| convert_statement(stmt, 0, 0))
-                .collect();
-            SqlAst {
-                statements,
-                parse_error: None,
+
+    let mut parser = match Parser::new(&dialect).try_with_sql(sql) {
+        Ok(p) => p,
+        Err(e) => {
+            return SqlAst {
+                statements: Vec::new(),
+                parse_error: Some(format!("SQL tokenize error: {}", e)),
+            };
+        }
+    };
+
+    let mut statements = Vec::new();
+
+    loop {
+        // 跳过语句间的空分号（`;` 是分隔符，不属于前一条语句）
+        while parser.peek_token().token == Token::SemiColon {
+            parser.next_token();
+        }
+
+        let peek = parser.peek_token();
+        if peek.token == Token::EOF {
+            break;
+        }
+        let line = peek.location.line as i64;
+        let column = peek.location.column as i64;
+
+        match parser.parse_statement() {
+            Ok(stmt) => {
+                statements.push(convert_statement(&stmt, line, column));
+            }
+            Err(_e) => {
+                // 单条语句解析失败时记录错误位置，然后跳过到下一个分号
+                statements.push(StmtInfo {
+                    kind: "PARSE_ERROR".to_string(),
+                    line,
+                    column,
+                    create_table: None,
+                    drop_object: None,
+                    select: None,
+                    insert: None,
+                    update: None,
+                    delete: None,
+                });
+                loop {
+                    let t = parser.peek_token();
+                    if t.token == Token::SemiColon || t.token == Token::EOF {
+                        if t.token == Token::SemiColon {
+                            parser.next_token();
+                        }
+                        break;
+                    }
+                    parser.next_token();
+                }
             }
         }
-        Err(e) => SqlAst {
-            statements: Vec::new(),
-            parse_error: Some(format!("SQL parse error: {}", e)),
-        },
+    }
+
+    SqlAst {
+        statements,
+        parse_error: None,
     }
 }
 
@@ -387,6 +509,9 @@ fn convert_statement(stmt: &Statement, line: i64, column: i64) -> StmtInfo {
                 }),
                 drop_object: None,
                 select: None,
+                insert: None,
+                update: None,
+                delete: None,
             }
         }
         Statement::Drop { object_type, if_exists, names, .. } => {
@@ -404,6 +529,9 @@ fn convert_statement(stmt: &Statement, line: i64, column: i64) -> StmtInfo {
                     if_exists: *if_exists,
                 }),
                 select: None,
+                insert: None,
+                update: None,
+                delete: None,
             }
         }
         Statement::Query(q) => {
@@ -415,32 +543,82 @@ fn convert_statement(stmt: &Statement, line: i64, column: i64) -> StmtInfo {
                 create_table: None,
                 drop_object: None,
                 select: Some(info),
+                insert: None,
+                update: None,
+                delete: None,
             }
         }
-        Statement::Insert { .. } => StmtInfo {
-            kind: "INSERT".to_string(),
-            line,
-            column,
-            create_table: None,
-            drop_object: None,
-            select: None,
-        },
-        Statement::Update { .. } => StmtInfo {
-            kind: "UPDATE".to_string(),
-            line,
-            column,
-            create_table: None,
-            drop_object: None,
-            select: None,
-        },
-        Statement::Delete { .. } => StmtInfo {
-            kind: "DELETE".to_string(),
-            line,
-            column,
-            create_table: None,
-            drop_object: None,
-            select: None,
-        },
+        Statement::Insert { table_name, columns, .. } => {
+            let col_names: Vec<String> = columns.iter().map(|c| c.to_string()).collect();
+            StmtInfo {
+                kind: "INSERT".to_string(),
+                line,
+                column,
+                create_table: None,
+                drop_object: None,
+                select: None,
+                insert: Some(InsertInfo {
+                    table_name: table_name.to_string(),
+                    columns: col_names,
+                }),
+                update: None,
+                delete: None,
+            }
+        }
+        Statement::Update { table, selection, .. } => {
+            let table_name = match &table.relation {
+                TableFactor::Table { name, .. } => name.to_string(),
+                _ => table.relation.to_string(),
+            };
+            StmtInfo {
+                kind: "UPDATE".to_string(),
+                line,
+                column,
+                create_table: None,
+                drop_object: None,
+                select: None,
+                insert: None,
+                update: Some(UpdateInfo {
+                    table_name,
+                    where_clause: selection.as_ref().map(|e| e.to_string()),
+                }),
+                delete: None,
+            }
+        }
+        Statement::Delete { tables, from, selection, .. } => {
+            // 优先取 `tables`（MySQL 多表 DELETE），否则从 `from` 取首个表
+            let table_name = if !tables.is_empty() {
+                tables.iter().map(|n| n.to_string()).collect::<Vec<_>>().join(", ")
+            } else {
+                let from_tables = match from {
+                    FromTable::WithFromKeyword(v) | FromTable::WithoutKeyword(v) => v,
+                };
+                from_tables
+                    .first()
+                    .and_then(|t| {
+                        if let TableFactor::Table { name, .. } = &t.relation {
+                            Some(name.to_string())
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap_or_default()
+            };
+            StmtInfo {
+                kind: "DELETE".to_string(),
+                line,
+                column,
+                create_table: None,
+                drop_object: None,
+                select: None,
+                insert: None,
+                update: None,
+                delete: Some(DeleteInfo {
+                    table_name,
+                    where_clause: selection.as_ref().map(|e| e.to_string()),
+                }),
+            }
+        }
         Statement::AlterTable { .. } => StmtInfo {
             kind: "ALTER_TABLE".to_string(),
             line,
@@ -448,6 +626,9 @@ fn convert_statement(stmt: &Statement, line: i64, column: i64) -> StmtInfo {
             create_table: None,
             drop_object: None,
             select: None,
+            insert: None,
+            update: None,
+            delete: None,
         },
         _ => StmtInfo {
             kind: "OTHER".to_string(),
@@ -456,6 +637,9 @@ fn convert_statement(stmt: &Statement, line: i64, column: i64) -> StmtInfo {
             create_table: None,
             drop_object: None,
             select: None,
+            insert: None,
+            update: None,
+            delete: None,
         },
     }
 }
@@ -679,18 +863,35 @@ fn extract_int(m: &Map, key: &str) -> Option<i64> {
 
 /// 构建一个 Rhai 引擎并注册所有 AST 包装类型的方法。
 /// 每个文件每条规则都会调用一次，因为 Rhai 引擎本身很轻量；
-/// 如有性能需求，后续可缓存 AST 包装类型的注册（用 `Engine::register_type_with_name`）。
+/// 如有性能需求，后续可缓存 AST 包装类型的注册。
 fn build_engine() -> Engine {
     let mut engine = Engine::new();
 
+    // 注册所有自定义类型，使 Rhai 能正确识别和迭代包含它们的 Array
+    engine.register_type_with_name::<SqlAst>("SqlAst");
+    engine.register_type_with_name::<StmtInfo>("StmtInfo");
+    engine.register_type_with_name::<CreateInfo>("CreateInfo");
+    engine.register_type_with_name::<DropInfo>("DropInfo");
+    engine.register_type_with_name::<SelectInfo>("SelectInfo");
+    engine.register_type_with_name::<ColumnInfo>("ColumnInfo");
+
     // SqlAst 方法
-    engine.register_fn("statements", |ast: &mut SqlAst| ast.statements());
+    // 返回 Vec<CustomType> 的闭包需显式转为 Array，否则 Rhai for 循环无法迭代
+    engine.register_fn("statements", |ast: &mut SqlAst| -> Array {
+        ast.statements().into_iter().map(|s| Dynamic::from(s)).collect()
+    });
     engine.register_fn("has_parse_error", |ast: &mut SqlAst| ast.has_parse_error());
     engine.register_fn("parse_error", |ast: &mut SqlAst| ast.parse_error());
     engine.register_fn("kinds", |ast: &mut SqlAst| ast.kinds());
-    engine.register_fn("create_tables", |ast: &mut SqlAst| ast.create_tables());
-    engine.register_fn("drop_objects", |ast: &mut SqlAst| ast.drop_objects());
-    engine.register_fn("selects", |ast: &mut SqlAst| ast.selects());
+    engine.register_fn("create_tables", |ast: &mut SqlAst| -> Array {
+        ast.create_tables().into_iter().map(|c| Dynamic::from(c)).collect()
+    });
+    engine.register_fn("drop_objects", |ast: &mut SqlAst| -> Array {
+        ast.drop_objects().into_iter().map(|d| Dynamic::from(d)).collect()
+    });
+    engine.register_fn("selects", |ast: &mut SqlAst| -> Array {
+        ast.selects().into_iter().map(|s| Dynamic::from(s)).collect()
+    });
     engine.register_fn("has_create_table", |ast: &mut SqlAst| ast.has_create_table());
     engine.register_fn("has_drop_table", |ast: &mut SqlAst| ast.has_drop_table());
 
@@ -701,13 +902,21 @@ fn build_engine() -> Engine {
     engine.register_fn("has_create_table", |s: &mut StmtInfo| s.has_create_table());
     engine.register_fn("has_drop_object", |s: &mut StmtInfo| s.has_drop_object());
     engine.register_fn("has_select", |s: &mut StmtInfo| s.has_select());
+    engine.register_fn("has_insert", |s: &mut StmtInfo| s.has_insert());
+    engine.register_fn("has_update", |s: &mut StmtInfo| s.has_update());
+    engine.register_fn("has_delete", |s: &mut StmtInfo| s.has_delete());
     engine.register_fn("create_table", |s: &mut StmtInfo| s.create_table());
     engine.register_fn("drop_object", |s: &mut StmtInfo| s.drop_object());
     engine.register_fn("select", |s: &mut StmtInfo| s.select());
+    engine.register_fn("insert", |s: &mut StmtInfo| s.insert());
+    engine.register_fn("update", |s: &mut StmtInfo| s.update());
+    engine.register_fn("delete", |s: &mut StmtInfo| s.delete());
 
     // CreateInfo 方法
     engine.register_fn("table_name", |c: &mut CreateInfo| c.table_name());
-    engine.register_fn("columns", |c: &mut CreateInfo| c.columns());
+    engine.register_fn("columns", |c: &mut CreateInfo| -> Array {
+        c.columns().into_iter().map(|col| Dynamic::from(col)).collect()
+    });
     engine.register_fn("has_primary_key", |c: &mut CreateInfo| c.has_primary_key());
     engine.register_fn("if_not_exists", |c: &mut CreateInfo| c.if_not_exists());
     engine.register_fn("column_names", |c: &mut CreateInfo| c.column_names());
@@ -729,6 +938,21 @@ fn build_engine() -> Engine {
     engine.register_fn("projection", |s: &mut SelectInfo| s.projection());
     engine.register_fn("has_from_table", |s: &mut SelectInfo| s.has_from_table());
     engine.register_fn("from_table", |s: &mut SelectInfo| s.from_table());
+
+    // InsertInfo 方法
+    engine.register_fn("table_name", |i: &mut InsertInfo| i.table_name());
+    engine.register_fn("columns", |i: &mut InsertInfo| i.columns());
+    engine.register_fn("has_columns", |i: &mut InsertInfo| i.has_columns());
+
+    // UpdateInfo 方法
+    engine.register_fn("table_name", |u: &mut UpdateInfo| u.table_name());
+    engine.register_fn("has_where", |u: &mut UpdateInfo| u.has_where());
+    engine.register_fn("where_clause", |u: &mut UpdateInfo| u.where_clause());
+
+    // DeleteInfo 方法
+    engine.register_fn("table_name", |d: &mut DeleteInfo| d.table_name());
+    engine.register_fn("has_where", |d: &mut DeleteInfo| d.has_where());
+    engine.register_fn("where_clause", |d: &mut DeleteInfo| d.where_clause());
 
     engine
 }
