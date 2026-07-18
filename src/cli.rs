@@ -1,0 +1,37 @@
+use clap::{Parser, Subcommand};
+use std::path::PathBuf;
+
+#[derive(Parser)]
+#[clap(name = "sqlguard", version, about = "SQL script checking tool with customizable rules engine")]
+pub struct Cli {
+    #[clap(subcommand)]
+    pub command: Commands,
+}
+
+#[derive(Subcommand)]
+pub enum Commands {
+    /// Check SQL scripts in the specified directory
+    Check {
+        /// Path to the project/sql directory to check
+        #[clap(default_value = ".")]
+        path: PathBuf,
+
+        /// Path to configuration file
+        #[clap(short, long, default_value = "sqlguard.toml")]
+        config: PathBuf,
+
+        /// Output format(s): plain, json, html, all
+        #[clap(short, long, default_value = "plain")]
+        format: String,
+
+        /// Output directory for reports (required for json/html)
+        #[clap(short, long)]
+        output_dir: Option<PathBuf>,
+    },
+    /// Initialize default configuration in the current directory
+    Init {
+        /// Target directory
+        #[clap(default_value = ".")]
+        path: PathBuf,
+    },
+}

@@ -1,0 +1,62 @@
+[structure]
+paths = [
+  "sql/ddl",
+  "sql/dml",
+  "sql/others",
+]
+strict = true
+allow_extra = [".gitkeep"]
+
+[classification]
+default_type = "other"
+
+[[classification.rules]]
+name = "ddl-by-dir"
+pattern = "**/ddl/**"
+type = "ddl"
+priority = 10
+
+[[classification.rules]]
+name = "dml-by-dir"
+pattern = "**/dml/**"
+type = "dml"
+priority = 10
+
+[[classification.rules]]
+name = "other-by-others-dir"
+pattern = "**/others/**"
+type = "other"
+priority = 10
+
+[[classification.rules]]
+name = "sql-by-ext"
+pattern = "*.sql"
+type = "sql"
+priority = 0
+
+[[rules]]
+name = "no_drop_table"
+description = "Disallow DROP TABLE in DDL scripts"
+enabled = true
+script_path = "config/rules/ddl/no_drop_table.rhai"
+applies_to = ["ddl"]
+severity = "error"
+
+[[rules]]
+name = "primary_key_required"
+description = "CREATE TABLE must have a PRIMARY KEY"
+enabled = true
+script_path = "config/rules/ddl/primary_key_required.rhai"
+applies_to = ["ddl"]
+severity = "warning"
+
+[[rules]]
+name = "no_select_all"
+description = "Disallow SELECT * in DML scripts"
+enabled = true
+script_path = "config/rules/dml/no_select_all.rhai"
+applies_to = ["dml"]
+severity = "error"
+
+[output]
+formats = ["plain", "json", "html"]

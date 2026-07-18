@@ -1,0 +1,16 @@
+[package]
+name = "sqlguard"
+version = "0.1.0"
+edition = "2021"
+description = "A SQL script checking tool with customizable rules engine for CI/CD pipelines"
+
+[dependencies]
+clap = { version = "3", features = ["derive"] }
+rhai = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+globset = "0.4"
+walkdir = "2"
+anyhow = "1"
+colored = "2"
