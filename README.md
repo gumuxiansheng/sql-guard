@@ -173,7 +173,7 @@ SqlGuard/
 
 ## 配置
 
-完整配置见 [sqlguard.toml.example](sqlguard.toml.example)。四个主要区块：
+完整配置见 [sqlguard.toml.example](sqlguard.toml.example)。五个主要区块：
 
 ### `[structure]` 目录结构约束
 
@@ -183,6 +183,35 @@ paths = ["sql/ddl", "sql/dml"]  # 必须存在的目录
 strict = true                    # 严格模式：多余目录也报错
 allow_extra = [".gitkeep"]       # 允许的额外条目
 ```
+
+### `[scan]` 文件扫描行为
+
+控制 SQL 脚本扫描白名单与递归跳过目录，避免进入 `.git`/`target`/`node_modules` 等大目录。
+
+```toml
+[scan]
+# SQL 脚本扫描白名单（相对配置文件目录或绝对路径）。
+# 为空时回退到 [structure].paths，仍为空则扫描整个 target_dir（兜底）。
+# 指定后只扫描这些目录下的 .sql/.ddl/.dml。
+paths = []
+
+# 递归扫描时跳过的目录名（按名称匹配，任意层级生效）。
+# 适用于：SQL 脚本扫描、Mapper XML 扫描、目录结构校验三个场景。
+# 未配置 [scan] 段时也按此默认黑名单生效。
+exclude_dirs = [
+  ".git", ".svn", ".hg", ".bzr",                    # 版本控制元数据
+  "target", "node_modules", "build", "dist", "out",  # 构建产物
+  ".idea", ".vscode",                                # IDE 配置
+]
+```
+
+`paths` 与 `exclude_dirs` 组合语义：
+
+| 场景 | `paths` | 行为 |
+|------|---------|------|
+| 默认 | `[]` | 回退到 `[structure].paths` 作为扫描白名单 |
+| 全兜底 | `[]` 且 `[structure].paths` 也为空 | 扫描整个 `target_dir`（仅靠 `exclude_dirs` 过滤） |
+| 精准白名单 | `["sql/ddl", "sql/dml"]` | 只扫描这些目录，白名单外的 SQL 不会被检查 |
 
 ### `[[classification.rules]]` 文件分类
 

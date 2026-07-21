@@ -212,3 +212,24 @@ formats = ["plain", "json", "html"]
 # enabled = true
 # paths = ["src/main/resources/mapper"]
 # patterns = ["**/*Mapper.xml", "**/*.xml"]
+
+# ================================================================================
+# 文件扫描行为配置 [scan]
+# ================================================================================
+# 控制白名单扫描根与黑名单跳过目录，避免递归进入 .git/target/node_modules 等大目录。
+#
+# exclude_dirs：递归扫描时跳过的目录名（按名称匹配，任意层级生效）。
+#   默认值见下，未配置 [scan] 段时也按默认黑名单生效。
+#   适用于：SQL 脚本扫描、Mapper XML 扫描、目录结构校验三个场景。
+#
+# paths：SQL 脚本扫描白名单（相对配置文件目录或绝对路径）。
+#   为空时回退到 [structure].paths，仍为空则扫描整个 target_dir（兜底）。
+#   指定后只扫描这些目录下的 .sql/.ddl/.dml，散落在白名单外的 SQL 会被忽略。
+#
+# [scan]
+# paths = []
+# exclude_dirs = [
+#   ".git", ".svn", ".hg", ".bzr",       # 版本控制元数据
+#   "target", "node_modules", "build", "dist", "out",  # 构建产物
+#   ".idea", ".vscode",                   # IDE 配置
+# ]

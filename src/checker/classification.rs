@@ -1,4 +1,5 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::collections::HashSet;
 
 use globset::{Glob, GlobSetBuilder};
 
@@ -45,20 +46,65 @@ pub fn classify_file(
     })
 }
 
-pub fn collect_sql_files(root: &Path) -> Vec<std::path::PathBuf> {
+/// 收集 SQL 脚本文件（.sql / .ddl / .dml）。
+///
+/// 扫描策略：
+/// - `scan_paths` 非空：仅扫描这些白名单目录（相对 `root` 或绝对路径）。
+/// - `scan_paths` 为空：兜底扫描整个 `root`（保持向后兼容）。
+/// - 递归时跳过 `exclude_dirs` 列出的目录名（任意层级，按名称匹配）。
+pub fn collect_sql_files(
+    root: &Path,
+    scan_paths: &[String],
+    exclude_dirs: &[String],
+) -> Vec<PathBuf> {
     let mut files = Vec::new();
-    if root.exists() {
-        collect_files_recursive(root, root, &mut files);
+    let exclude_set: HashSet<String> = exclude_dirs.iter().cloned().collect();
+
+    let scan_roots: Vec<PathBuf> = if scan_paths.is_empty() {
+        // 兜底：未配置白名单时扫描整个 root
+        if root.exists() {
+            vec![root.to_path_buf()]
+        } else {
+            Vec::new()
+        }
+    } else {
+        scan_paths
+            .iter()
+            .map(|p| {
+                if Path::new(p).is_absolute() {
+                    PathBuf::from(p)
+                } else {
+                    root.join(p)
+                }
+            })
+            .collect()
+    };
+
+    for scan_root in &scan_roots {
+        if scan_root.exists() {
+            collect_files_recursive(scan_root, scan_root, &exclude_set, &mut files);
+        }
     }
     files
 }
 
-fn collect_files_recursive(root: &Path, current: &Path, files: &mut Vec<std::path::PathBuf>) {
+fn collect_files_recursive(
+    root: &Path,
+    current: &Path,
+    exclude_set: &HashSet<String>,
+    files: &mut Vec<PathBuf>,
+) {
     if let Ok(entries) = std::fs::read_dir(current) {
         for entry in entries.flatten() {
             let path = entry.path();
             if path.is_dir() {
-                collect_files_recursive(root, &path, files);
+                // 跳过黑名单目录（按目录名匹配，任意层级）
+                if let Some(file_name) = path.file_name().and_then(|n| n.to_str()) {
+                    if exclude_set.contains(file_name) {
+                        continue;
+                    }
+                }
+                collect_files_recursive(root, &path, exclude_set, files);
             } else if path.is_file() {
                 if let Some(ext) = path.extension() {
                     let ext_lower = ext.to_string_lossy().to_lowercase();

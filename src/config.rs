@@ -14,6 +14,11 @@ pub struct Config {
     /// MyBatis Mapper 模式配置。缺失或 `enabled = false` 时完全保持现有行为。
     #[serde(default)]
     pub mapper: MapperConfig,
+    /// 文件扫描行为配置。控制白名单扫描根与黑名单跳过目录。
+    /// 缺省时 exclude_dirs 生效（默认跳过 .git/target/node_modules 等），
+    /// paths 为空时回退到 structure.paths，仍为空则扫描整个 target_dir。
+    #[serde(default)]
+    pub scan: ScanConfig,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -117,6 +122,50 @@ fn default_mapper_paths() -> Vec<String> {
 
 fn default_mapper_patterns() -> Vec<String> {
     vec!["**/*Mapper.xml".to_string(), "**/*.xml".to_string()]
+}
+
+/// 文件扫描行为配置。
+///
+/// - `paths`：SQL 脚本扫描白名单。为空时回退到 `structure.paths`，
+///   仍为空则扫描整个 `target_dir`（兜底，保持向后兼容）。
+/// - `exclude_dirs`：递归扫描时跳过的目录名黑名单，适用于 SQL 扫描、
+///   Mapper XML 扫描、目录结构校验三个场景。默认包含版本控制与构建产物目录。
+#[derive(Debug, Deserialize, Clone)]
+pub struct ScanConfig {
+    #[serde(default)]
+    pub paths: Vec<String>,
+    #[serde(default = "default_exclude_dirs")]
+    pub exclude_dirs: Vec<String>,
+}
+
+impl Default for ScanConfig {
+    fn default() -> Self {
+        ScanConfig {
+            paths: Vec::new(),
+            exclude_dirs: default_exclude_dirs(),
+        }
+    }
+}
+
+/// 默认跳过的目录名黑名单：版本控制元数据 + 常见构建产物 / IDE 配置。
+/// 注意：按目录名匹配（非路径），任意层级中遇到同名目录都会跳过。
+fn default_exclude_dirs() -> Vec<String> {
+    vec![
+        // 版本控制
+        ".git".to_string(),
+        ".svn".to_string(),
+        ".hg".to_string(),
+        ".bzr".to_string(),
+        // Rust / Node / Java 构建产物
+        "target".to_string(),
+        "node_modules".to_string(),
+        "build".to_string(),
+        "dist".to_string(),
+        "out".to_string(),
+        // IDE
+        ".idea".to_string(),
+        ".vscode".to_string(),
+    ]
 }
 
 impl Config {

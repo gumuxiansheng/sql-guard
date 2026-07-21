@@ -9,6 +9,7 @@
 //! `<include>` 解析见 [`include`]。
 
 use std::path::{Path, PathBuf};
+use std::collections::HashSet;
 
 use globset::{Glob, GlobSetBuilder};
 
@@ -23,7 +24,12 @@ pub use parser::extract_sql_from_xml;
 /// 在 mapper.paths 下收集所有匹配 patterns 的 XML 文件。
 ///
 /// `root` 用于解析相对路径；若 `mapper.enabled == false` 直接返回空。
-pub fn collect_mapper_files(root: &Path, mapper: &MapperConfig) -> Vec<PathBuf> {
+/// 递归时跳过 `exclude_dirs` 列出的目录名（任意层级，按名称匹配）。
+pub fn collect_mapper_files(
+    root: &Path,
+    mapper: &MapperConfig,
+    exclude_dirs: &[String],
+) -> Vec<PathBuf> {
     if !mapper.enabled {
         return Vec::new();
     }
@@ -42,6 +48,8 @@ pub fn collect_mapper_files(root: &Path, mapper: &MapperConfig) -> Vec<PathBuf> 
         }
     };
 
+    let exclude_set: HashSet<&str> = exclude_dirs.iter().map(|s| s.as_str()).collect();
+
     let mut files = Vec::new();
     for path in &mapper.paths {
         let abs_path = if Path::new(path).is_absolute() {
@@ -52,7 +60,7 @@ pub fn collect_mapper_files(root: &Path, mapper: &MapperConfig) -> Vec<PathBuf> 
         if !abs_path.exists() {
             continue;
         }
-        collect_xml_files(&abs_path, &abs_path, &glob_set, &mut files);
+        collect_xml_files(&abs_path, &abs_path, &glob_set, &exclude_set, &mut files);
     }
     files
 }
@@ -69,13 +77,20 @@ fn collect_xml_files(
     root: &Path,
     current: &Path,
     glob_set: &globset::GlobSet,
+    exclude_set: &HashSet<&str>,
     files: &mut Vec<PathBuf>,
 ) {
     if let Ok(entries) = std::fs::read_dir(current) {
         for entry in entries.flatten() {
             let path = entry.path();
             if path.is_dir() {
-                collect_xml_files(root, &path, glob_set, files);
+                // 跳过黑名单目录（按目录名匹配，任意层级）
+                if let Some(file_name) = path.file_name().and_then(|n| n.to_str()) {
+                    if exclude_set.contains(file_name) {
+                        continue;
+                    }
+                }
+                collect_xml_files(root, &path, glob_set, exclude_set, files);
             } else if path.is_file() {
                 if let Some(ext) = path.extension() {
                     if ext == "xml" {

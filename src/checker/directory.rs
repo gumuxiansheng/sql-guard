@@ -4,20 +4,26 @@ use std::collections::HashSet;
 use crate::config::StructureConfig;
 use crate::error::DirectoryIssue;
 
+/// 检查目录结构是否符合 `structure.paths` 约定。
+///
+/// 递归扫描时跳过 `exclude_dirs` 列出的目录名（任意层级，按名称匹配），
+/// 避免 strict 模式下把 `.git`、`target` 等目录误报为 Unexpected。
 pub fn check_directory_structure(
     root: &Path,
     structure: &StructureConfig,
+    exclude_dirs: &[String],
 ) -> (Vec<DirectoryIssue>, Vec<DirectoryIssue>) {
     let mut missing = Vec::new();
     let mut unexpected = Vec::new();
 
     let allow_extra_set: HashSet<&String> = structure.allow_extra.iter().collect();
+    let exclude_set: HashSet<&str> = exclude_dirs.iter().map(|s| s.as_str()).collect();
 
     let mut found_set: HashSet<String> = HashSet::new();
     let mut found_all: Vec<String> = Vec::new();
 
     if root.exists() {
-        collect_relative_paths(root, root, &mut found_all, &allow_extra_set);
+        collect_relative_paths(root, root, &mut found_all, &allow_extra_set, &exclude_set);
     }
 
     for path_str in &found_all {
@@ -67,13 +73,21 @@ fn collect_relative_paths(
     current: &Path,
     paths: &mut Vec<String>,
     allow_extra: &HashSet<&String>,
+    exclude_set: &HashSet<&str>,
 ) {
     if let Ok(entries) = std::fs::read_dir(current) {
         for entry in entries.flatten() {
             let path = entry.path();
             if path.is_dir() {
+                // 跳过黑名单目录（按目录名匹配，任意层级）
+                if let Some(file_name) = path.file_name().and_then(|n| n.to_str()) {
+                    if exclude_set.contains(file_name) {
+                        continue;
+                    }
+                }
                 if let Ok(rel) = path.strip_prefix(root) {
-                    let rel_str = rel.to_string_lossy().to_string();
+                    // 统一为正斜杠，与配置中 paths 的风格一致，避免 Windows 反斜杠导致不匹配
+                    let rel_str = rel.to_string_lossy().replace('\\', "/");
                     let should_skip = allow_extra.iter().any(|a| {
                         if a.ends_with('/') {
                             rel_str.starts_with(a.as_str()) || rel_str == a.trim_end_matches('/')
@@ -85,7 +99,7 @@ fn collect_relative_paths(
                         paths.push(rel_str.clone());
                     }
                 }
-                let _ = collect_relative_paths(root, &path, paths, allow_extra);
+                let _ = collect_relative_paths(root, &path, paths, allow_extra, exclude_set);
             }
         }
     }
