@@ -19,6 +19,10 @@ pub struct Config {
     /// paths 为空时回退到 structure.paths，仍为空则扫描整个 target_dir。
     #[serde(default)]
     pub scan: ScanConfig,
+    /// 文件格式检查配置（编码 / 换行符）。缺省时默认启用：
+    /// UTF-8 无 BOM（error，必须）+ 换行符 LF（warning，提示）。
+    #[serde(default)]
+    pub file_check: FileCheckConfig,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -166,6 +170,57 @@ fn default_exclude_dirs() -> Vec<String> {
         ".idea".to_string(),
         ".vscode".to_string(),
     ]
+}
+
+/// 文件格式检查配置（编码 / 换行符），对扫描到的每个文件做字节级检查。
+///
+/// 与基于 SQL AST 的规则不同，这些检查关注与 SQL 语法无关的文件属性：
+/// - `check_encoding`：编码必须为 UTF-8 且不带 BOM（对应 rule_id `FILE001`）。
+/// - `check_line_ending`：换行符应为 LF（对应 rule_id `FILE002`）。
+///
+/// 严重级别可配置，默认编码违规为 `error`（必须），换行符违规为 `warning`（提示）。
+/// 两条检查均归入 `file-format` 分组，可用 `--exclude-groups file-format` 临时关闭。
+#[derive(Debug, Deserialize, Clone)]
+pub struct FileCheckConfig {
+    /// 总开关。`false` 时完全跳过文件格式检查。
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// 是否检查编码为 UTF-8 无 BOM（FILE001）。
+    #[serde(default = "default_true")]
+    pub check_encoding: bool,
+    /// 是否检查换行符为 LF（FILE002）。
+    #[serde(default = "default_true")]
+    pub check_line_ending: bool,
+    /// 编码违规的严重级别，默认 `error`（必须）。
+    #[serde(default = "default_encoding_severity")]
+    pub encoding_severity: String,
+    /// 换行符违规的严重级别，默认 `warning`（提示）。
+    #[serde(default = "default_line_ending_severity")]
+    pub line_ending_severity: String,
+}
+
+impl Default for FileCheckConfig {
+    fn default() -> Self {
+        FileCheckConfig {
+            enabled: true,
+            check_encoding: true,
+            check_line_ending: true,
+            encoding_severity: default_encoding_severity(),
+            line_ending_severity: default_line_ending_severity(),
+        }
+    }
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_encoding_severity() -> String {
+    "error".to_string()
+}
+
+fn default_line_ending_severity() -> String {
+    "warning".to_string()
 }
 
 impl Config {

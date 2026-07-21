@@ -17,6 +17,7 @@ use crate::error::{SqlGuardError, Violation};
 use crate::config::Config;
 use crate::checker::directory;
 use crate::checker::classification;
+use crate::checker::encoding;
 use crate::rule::engine;
 use crate::reporter::{plain, json, html};
 
@@ -140,6 +141,14 @@ fn run_check(
     for file_path in &sql_files {
         let classification_result = classification::classify_file(file_path, &config.classification)?;
 
+        // 文件级检查（编码 / 换行符），独立于 SQL 语法规则
+        all_violations.extend(encoding::check_file(
+            file_path,
+            &classification_result.script_type,
+            &config.file_check,
+            &filter,
+        ));
+
         let sql_content = fs::read_to_string(file_path)
             .map_err(|e| SqlGuardError::CheckError(format!("Failed to read '{}': {}", file_path.display(), e)))?;
 
@@ -160,6 +169,17 @@ fn run_check(
     // ===== Mapper 模式：MyBatis XML，每个文件提取多条 SQL，逐条检查 =====
     if config.mapper.enabled {
         for file_path in &mapper_files {
+            // 文件级检查（编码 / 换行符），对 XML 文件整体生效
+            let mapper_script_type = classification::classify_file(file_path, &config.classification)
+                .map(|r| r.script_type)
+                .unwrap_or_else(|_| "mapper".to_string());
+            all_violations.extend(encoding::check_file(
+                file_path,
+                &mapper_script_type,
+                &config.file_check,
+                &filter,
+            ));
+
             // 容错：单文件解析失败不影响其他文件
             let extracted = match mapper::extract_sql_from_xml(file_path) {
                 Ok(v) => v,
@@ -343,6 +363,20 @@ fn run_check_diff(
             continue;
         }
         files_checked += 1;
+
+        // 文件级检查（编码 / 换行符）：属于整文件属性，不做 hunk 过滤，
+        // 只要该文件出现在本次 diff 中就检查。
+        {
+            let script_type = classification::classify_file(file_path, &config.classification)
+                .map(|r| r.script_type)
+                .unwrap_or_else(|_| "unknown".to_string());
+            all_violations.extend(encoding::check_file(
+                file_path,
+                &script_type,
+                &config.file_check,
+                &filter,
+            ));
+        }
 
         let is_xml = file_path
             .extension()
@@ -740,6 +774,7 @@ fn generate_default_config() -> Config {
         },
         mapper: crate::config::MapperConfig::default(),
         scan: crate::config::ScanConfig::default(),
+        file_check: crate::config::FileCheckConfig::default(),
     }
 }
 
@@ -979,6 +1014,23 @@ formats = ["plain", "json", "html"]
 #   "target", "node_modules", "build", "dist", "out",  # 构建产物
 #   ".idea", ".vscode",                   # IDE 配置
 # ]
+
+# ================================================================================
+# 文件格式检查 [file_check]
+# ================================================================================
+# 对扫描到的每个文件做字节级检查（独立于 SQL 语法规则）：
+#   FILE001  编码必须为 UTF-8 且不带 BOM（severity = error，必须）
+#   FILE002  换行符应为 LF（severity = warning，提示）
+# 两条检查归入 file-format 分组，可用 --exclude-rules FILE001,FILE002
+# 或 --exclude-groups file-format 临时关闭。
+# 缺省（未写 [file_check] 段）时按下方默认值启用。
+
+[file_check]
+enabled = true
+check_encoding = true               # UTF-8 无 BOM 检查（FILE001）
+check_line_ending = true            # 换行符 LF 检查（FILE002）
+encoding_severity = "error"         # 编码违规级别（必须）
+line_ending_severity = "warning"    # 换行符违规级别（提示）
 "#
 }
 

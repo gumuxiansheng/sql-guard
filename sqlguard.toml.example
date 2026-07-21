@@ -233,3 +233,26 @@ formats = ["plain", "json", "html"]
 #   "target", "node_modules", "build", "dist", "out",  # 构建产物
 #   ".idea", ".vscode",                   # IDE 配置
 # ]
+
+# ================================================================================
+# 文件格式检查 [file_check]
+# ================================================================================
+# 对扫描到的每个文件做字节级检查（独立于 SQL 语法规则）：
+#   FILE001  编码必须为 UTF-8 且不带 BOM（severity = error，必须）
+#   FILE002  换行符应为 LF（severity = warning，提示）
+# 两条检查归入 file-format 分组，可用 --exclude-rules FILE001,FILE002
+# 或 --exclude-groups file-format 临时关闭。
+# 缺省（未写 [file_check] 段）时按下方默认值启用。
+#
+# enabled              总开关，false 时完全跳过文件格式检查。
+# check_encoding       是否检查 UTF-8 无 BOM（FILE001）。
+# check_line_ending    是否检查换行符为 LF（FILE002）。
+# encoding_severity    编码违规级别，默认 error（必须）。
+# line_ending_severity 换行符违规级别，默认 warning（提示）。
+
+[file_check]
+enabled = true
+check_encoding = true
+check_line_ending = true
+encoding_severity = "error"
+line_ending_severity = "warning"

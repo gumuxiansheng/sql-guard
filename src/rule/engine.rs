@@ -66,22 +66,28 @@ impl RuleFilter {
 
     /// 判断单条规则是否应该执行。
     pub fn matches(&self, rule: &RuleConfig) -> bool {
+        self.matches_id_group(&rule.id, rule.group.as_deref())
+    }
+
+    /// 按规则 id 与分组判断是否应执行。供非 Rhai 的原生检查器（如文件格式检查）复用。
+    ///
+    /// 规则同 [`RuleFilter::matches`]：黑名单优先，白名单为空表示不限制，
+    /// 每个条目支持前缀通配 `prefix*`。
+    pub fn matches_id_group(&self, id: &str, group: Option<&str>) -> bool {
         // 1. 黑名单优先：命中即排除
-        if matches_any(&self.exclude_rules, &rule.id) {
+        if matches_any(&self.exclude_rules, id) {
             return false;
         }
-        if let Some(g) = &rule.group {
+        if let Some(g) = group {
             if matches_any(&self.exclude_groups, g) {
                 return false;
             }
         }
 
         // 2. 白名单为空表示不限制
-        let in_rules = self.include_rules.is_empty() || matches_any(&self.include_rules, &rule.id);
+        let in_rules = self.include_rules.is_empty() || matches_any(&self.include_rules, id);
         let in_groups = self.include_groups.is_empty()
-            || rule
-                .group
-                .as_ref()
+            || group
                 .map(|g| matches_any(&self.include_groups, g))
                 .unwrap_or(false);
 

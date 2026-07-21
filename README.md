@@ -173,7 +173,7 @@ SqlGuard/
 
 ## 配置
 
-完整配置见 [sqlguard.toml.example](sqlguard.toml.example)。五个主要区块：
+完整配置见 [sqlguard.toml.example](sqlguard.toml.example)。六个主要区块：
 
 ### `[structure]` 目录结构约束
 
@@ -256,6 +256,27 @@ patterns = ["**/*Mapper.xml", "**/*.xml"]
 [output]
 formats = ["plain", "json", "html"]
 ```
+
+### `[file_check]` 文件格式检查
+
+对扫描到的每个文件做字节级检查（独立于 SQL 语法规则），检查与 SQL 无关的文件属性：
+
+```toml
+[file_check]
+enabled = true
+check_encoding = true               # UTF-8 无 BOM 检查（FILE001）
+check_line_ending = true            # 换行符 LF 检查（FILE002）
+encoding_severity = "error"         # 编码违规级别（必须）
+line_ending_severity = "warning"    # 换行符违规级别（提示）
+```
+
+| 规则 | 检查内容 | 默认级别 | 说明 |
+|------|----------|----------|------|
+| `FILE001` | 编码为 UTF-8 且不带 BOM | `error`（必须） | 检测 UTF-8/UTF-16/UTF-32 BOM 及非法 UTF-8 字节 |
+| `FILE002` | 换行符为 LF | `warning`（提示） | 检测 CRLF / 单独 CR，报告首处行号 |
+
+两条检查归入 `file-format` 分组，缺省（未写 `[file_check]` 段）时按默认值启用。
+可用 `--exclude-rules FILE001,FILE002` 或 `--exclude-groups file-format` 临时关闭。
 
 ## CLI 命令
 
