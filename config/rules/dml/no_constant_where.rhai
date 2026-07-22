@@ -22,7 +22,7 @@ let patterns = [
 ];
 
 let lines = sql.split("\n");
-let mut line_num = 1;
+let line_num = 1;
 for line in lines {
     let uline = line.to_upper();
     for pat in patterns {

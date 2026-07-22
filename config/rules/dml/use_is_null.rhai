@@ -19,7 +19,7 @@ let upper = sql.to_upper();
 
 // 检查 = NULL 但排除 IS NULL 和 IS NOT NULL
 let lines = sql.split("\n");
-let mut line_num = 1;
+let line_num = 1;
 for line in lines {
     let uline = line.to_upper();
     // 避免匹配 "IS NULL" 或 "IS NOT NULL"

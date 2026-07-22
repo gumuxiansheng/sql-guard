@@ -85,7 +85,22 @@ CREATE TABLE order_items (
     item_id INT,
     PRIMARY KEY (order_id, item_id)
 );
+
+-- 主键也可在 CREATE TABLE 之外、由后续 ALTER TABLE 补建（规则跨语句识别，不误报）
+CREATE TABLE sessions (
+    token      VARCHAR(255),
+    user_id    INT,
+    expires_at TIMESTAMP
+);
+ALTER TABLE sessions ADD PRIMARY KEY (token);
+
+-- 带约束名的 ADD CONSTRAINT 同样识别
+ALTER TABLE sessions ADD CONSTRAINT pk_sessions PRIMARY KEY (token);
 ```
+
+**注意**：规则基于整个 SQL 文件的最终状态判断。
+- `CREATE TABLE` 无内联主键、但同文件内有 `ALTER TABLE ... ADD PRIMARY KEY` 补建 → 视为合规（修复了旧版本把这种情况误报的漏洞）。
+- `CREATE TABLE` 有内联主键、但同文件内 `ALTER TABLE ... DROP PRIMARY KEY` 移除 → 仍会报违规（最终无主键）。
 
 ---
 
@@ -249,14 +264,14 @@ SELECT * FROM users CROSS JOIN orders;  -- 显式 CROSS JOIN 豁免
 | 文件 | `config/rules/dml/no_unused_join.rhai` |
 | 分组 | `dml-performance` |
 | 严重度 | `warning` |
-| 检测方式 | 启发式（字符串匹配） |
+| 检测方式 | AST（精确，别名优先） |
 | 对标 | SQLFluff ST11 |
 
 **校验原因**：未使用的 JOIN 表不必要地消耗数据库资源，可能是重构遗留。
 
-**检测逻辑**：如果 JOIN 的表名未出现在 SELECT 投影列表中，视为可能未使用。
+**检测逻辑**：基于 `JoinInfo.alias()` 与 `JoinInfo.table_name()` 两个 needle，检查是否在 `SelectInfo.projection()` 或 `SelectInfo.where_clause()` 中被引用。**别名优先**——`JOIN orders o` 时优先匹配 `o`，无别名才匹配 `orders`，修复了旧版"投影 `o.id` 但用 `orders` 匹配失败"的误报。
 
-**注意**：此规则为启发式，可能有误报（如仅用于 WHERE 子句过滤的 JOIN），需人工复核。
+**注意**：仍是启发式，可能漏报仅用于 HAVING / GROUP BY 的 JOIN；JOIN 仅在 WHERE 过滤的情况已通过把 `where_clause()` 一并加入可见文本来缓解。
 
 **反面案例**：
 ```sql
@@ -266,6 +281,7 @@ SELECT u.id, u.name FROM users u JOIN unused_table t ON u.id = t.user_id;
 **正面案例**：
 ```sql
 SELECT u.id, u.name FROM users u;
+SELECT o.id FROM orders o JOIN users u ON o.user_id = u.id;  -- u 通过 ON 引用
 ```
 
 ---
@@ -277,12 +293,12 @@ SELECT u.id, u.name FROM users u;
 | 文件 | `config/rules/dml/no_unused_cte.rhai` |
 | 分组 | `dml-performance` |
 | 严重度 | `warning` |
-| 检测方式 | 启发式（字符串匹配） |
+| 检测方式 | AST（精确） |
 | 对标 | SQLFluff ST03 |
 
 **校验原因**：定义了但未引用的 CTE 是无用代码，应移除。
 
-**注意**：基于字符串匹配，简单场景有效，复杂 CTE 可能有误报。
+**检测逻辑**：基于 `SelectInfo.ctes()` 提取所有 CTE 名称，再检查名称是否在主查询的 `projection()` / `where_clause()` / `from_table()` / `from_table_alias()` / `joins()` 以及递归子查询 `subqueries()` 中被引用。相比早期字符串 `split(" AS (")` 启发式，AST 方案能精确处理多 CTE、递归 CTE、列别名等场景。
 
 **反面案例**：
 ```sql
@@ -360,10 +376,14 @@ SELECT COALESCE(name, 'N/A') FROM users;
 | 文件 | `config/rules/dml/no_order_by_in_subquery.rhai` |
 | 分组 | `dml-performance` |
 | 严重度 | `warning` |
-| 检测方式 | 启发式（字符串匹配） |
+| 检测方式 | AST（精确，递归子查询） |
 | 对标 | SQLFluff AM03 |
 
-**校验原因**：SQL 标准中，子查询是逻辑无序的，内层 ORDER BY 通常被优化器忽略（仅配合 LIMIT/OFFSET 时有效）。
+**校验原因**：SQL 标准中，子查询是逻辑无序的，内层 ORDER BY 通常被优化器忽略（仅配合 LIMIT/OFFSET/FETCH 时有效）。
+
+**检测逻辑**：基于 `SelectInfo.subqueries()` 递归遍历子查询，对每个子查询检查 `has_order_by() && !has_limit() && !has_offset() && !has_fetch()`。修复了旧版字符串扫描的两个误报：
+1. **窗口函数误报**：`OVER(ORDER BY ...)` 中的 ORDER BY 属于窗口函数语法，AST 中不在子查询层，不会触发；
+2. **最外层误报**：`) ORDER BY` 在括号外（最外层查询，本就允许），AST 中顶层 SELECT 的 ORDER BY 不算子查询。
 
 **反面案例**：
 ```sql
@@ -375,6 +395,8 @@ SELECT * FROM (SELECT * FROM users ORDER BY name) AS u;
 SELECT * FROM (SELECT * FROM users ORDER BY name LIMIT 10) AS u;
 -- 或把 ORDER BY 移到外层
 SELECT * FROM (SELECT * FROM users) AS u ORDER BY name;
+-- 窗口函数中的 ORDER BY 不算误报
+SELECT id, ROW_NUMBER() OVER (ORDER BY created_at) AS rn FROM users;
 ```
 
 ---

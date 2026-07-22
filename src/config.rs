@@ -125,7 +125,9 @@ fn default_mapper_paths() -> Vec<String> {
 }
 
 fn default_mapper_patterns() -> Vec<String> {
-    vec!["**/*Mapper.xml".to_string(), "**/*.xml".to_string()]
+    // 仅匹配以 Mapper.xml 结尾的文件，避免误匹配 pom.xml / web.xml 等非 MyBatis 配置文件。
+    // 如需扫描无 Mapper 后缀的 XML，可在配置中显式追加 "**/*.xml"。
+    vec!["**/*Mapper.xml".to_string()]
 }
 
 /// 文件扫描行为配置。

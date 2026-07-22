@@ -8,6 +8,12 @@ use crate::error::DirectoryIssue;
 ///
 /// 递归扫描时跳过 `exclude_dirs` 列出的目录名（任意层级，按名称匹配），
 /// 避免 strict 模式下把 `.git`、`target` 等目录误报为 Unexpected。
+///
+/// `allow_extra` 的匹配规则（两种形式）：
+/// - 以 `/` 结尾的字符串（如 `"sql/migrations/"`）：前缀匹配，匹配所有以该串开头的相对路径
+/// - 不以 `/` 结尾的字符串（如 `"README.md"`、`"sql"`）：精确匹配相对路径名
+///
+/// 该规则同时适用于"严格模式缺失文件检测"与"递归收集相对路径"两个分支。
 pub fn check_directory_structure(
     root: &Path,
     structure: &StructureConfig,

@@ -1035,510 +1035,65 @@ line_ending_severity = "warning"    # 换行符违规级别（提示）
 }
 
 fn get_no_drop_table_script() -> &'static str {
-    r#"// no_drop_table.rhai - Disallow DROP TABLE in DDL scripts
-// 基于 AST：遍历语句列表，对 DROP_TABLE 类型语句上报违规。
-// 相比字符串匹配，AST 能精确识别语句类型，不会误匹配注释或子串。
-
-let ast = context["ast"];
-
-// 解析失败时也上报，避免漏检
-if ast.has_parse_error() {
-    violations.push(#{
-        "message": "SQL parse error: " + ast.parse_error(),
-        "line": 1
-    });
-}
-
-let stmts = ast.statements();
-for s in stmts {
-    if s.kind() == "DROP_TABLE" {
-        let d = s.drop_object();
-        violations.push(#{
-            "message": "DROP TABLE is not allowed in DDL scripts: " + d.name(),
-            "line": s.line(),
-            "column": s.column()
-        });
-    }
-}
-"#
+    include_str!("../config/rules/ddl/no_drop_table.rhai")
 }
 
 fn get_primary_key_script() -> &'static str {
-    r#"// primary_key_required.rhai - CREATE TABLE must have a PRIMARY KEY
-// 基于 AST：识别 CREATE TABLE 语句，检查列定义或表级约束中是否包含 PRIMARY KEY。
-// 相比字符串匹配，AST 能正确识别 CREATE TABLE 结构，不会误判 ALTER TABLE 或注释。
-
-let ast = context["ast"];
-
-if ast.has_parse_error() {
-    violations.push(#{
-        "message": "SQL parse error: " + ast.parse_error(),
-        "line": 1
-    });
-}
-
-let stmts = ast.statements();
-for s in stmts {
-    if s.kind() == "CREATE_TABLE" {
-        let ct = s.create_table();
-        if !ct.has_primary_key() {
-            violations.push(#{
-                "message": "CREATE TABLE " + ct.table_name() + " must include a PRIMARY KEY",
-                "line": s.line(),
-                "column": s.column()
-            });
-        }
-    }
-}
-"#
+    include_str!("../config/rules/ddl/primary_key_required.rhai")
 }
 
 fn get_no_select_all_script() -> &'static str {
-    r#"// no_select_all.rhai (DML001)
-// 禁止使用 SELECT *，必须显式列出所需列。
-// 原因：SELECT * 会返回所有列，可能导致不必要的数据传输、
-// 隐式依赖表结构、并破坏视图/物化视图的兼容性。
-// 基于 AST 精确识别通配符，不会误判注释或字符串字面量。
-
-let ast = context["ast"];
-
-if ast.has_parse_error() {
-    violations.push(#{
-        "message": "SQL parse error: " + ast.parse_error(),
-        "line": 1
-    });
-}
-
-for s in ast.statements() {
-    if s.kind() == "SELECT" {
-        let sel = s.select();
-        if sel.has_wildcard() {
-            violations.push(#{
-                "message": "SELECT * is not allowed. Specify columns explicitly.",
-                "line": s.line(),
-                "column": s.column()
-            });
-        }
-    }
-}
-"#
+    include_str!("../config/rules/dml/no_select_all.rhai")
 }
 
 fn get_no_delete_update_without_where_script() -> &'static str {
-    r#"// no_delete_update_without_where.rhai (DML002)
-// DELETE 和 UPDATE 语句必须带 WHERE 条件，防止全表误操作。
-// 基于 AST 精确判断 WHERE 子句是否存在。
-
-let ast = context["ast"];
-
-if ast.has_parse_error() {
-    violations.push(#{
-        "message": "SQL parse error: " + ast.parse_error(),
-        "line": 1
-    });
-}
-
-for s in ast.statements() {
-    if s.has_delete() {
-        let d = s.delete();
-        if !d.has_where() {
-            violations.push(#{
-                "message": "DELETE without WHERE clause will remove all rows from table: " + d.table_name() + ". Add a WHERE condition or use TRUNCATE if intentional.",
-                "line": s.line(),
-                "column": s.column()
-            });
-        }
-    }
-    if s.has_update() {
-        let u = s.update();
-        if !u.has_where() {
-            violations.push(#{
-                "message": "UPDATE without WHERE clause will modify all rows in table: " + u.table_name() + ". Add a WHERE condition.",
-                "line": s.line(),
-                "column": s.column()
-            });
-        }
-    }
-}
-"#
+    include_str!("../config/rules/dml/no_delete_update_without_where.rhai")
 }
 
 fn get_insert_columns_required_script() -> &'static str {
-    r#"// insert_columns_required.rhai (DML003)
-// INSERT 语句必须显式指定列名，禁止 INSERT INTO t VALUES(...)。
-// 原因：不指定列名时，INSERT 隐式依赖表结构的列顺序，表结构变更会导致静默错误。
-// 显式指定列名使代码自文档化，且对表结构变更更鲁棒。
-
-let ast = context["ast"];
-
-if ast.has_parse_error() {
-    violations.push(#{
-        "message": "SQL parse error: " + ast.parse_error(),
-        "line": 1
-    });
-}
-
-for s in ast.statements() {
-    if s.has_insert() {
-        let ins = s.insert();
-        if !ins.has_columns() {
-            violations.push(#{
-                "message": "INSERT must specify target columns explicitly: INSERT INTO " + ins.table_name() + " (col1, col2, ...) VALUES (...)",
-                "line": s.line(),
-                "column": s.column()
-            });
-        }
-    }
-}
-"#
+    include_str!("../config/rules/dml/insert_columns_required.rhai")
 }
 
 fn get_subquery_alias_required_script() -> &'static str {
-    r#"// subquery_alias_required.rhai (DML004)
-// FROM 子句中的子查询必须起别名，否则所有数据库都会报错。
-// 基于 AST 检查 FROM 子句中的派生表（子查询）是否有别名。
-
-let ast = context["ast"];
-
-if ast.has_parse_error() {
-    violations.push(#{
-        "message": "SQL parse error: " + ast.parse_error(),
-        "line": 1
-    });
-}
-
-for s in ast.statements() {
-    if s.has_select() {
-        let sel = s.select();
-        if sel.has_subquery_in_from() && !sel.from_subquery_has_alias() {
-            violations.push(#{
-                "message": "Subquery in FROM clause must have an alias: SELECT ... FROM (SELECT ...) AS alias",
-                "line": s.line(),
-                "column": s.column()
-            });
-        }
-    }
-}
-"#
+    include_str!("../config/rules/dml/subquery_alias_required.rhai")
 }
 
 fn get_column_references_qualified_script() -> &'static str {
-    r#"// column_references_qualified.rhai (DML005)
-// 多表查询中，列引用必须带表名限定（t.col），避免歧义。
-// 原因：当查询涉及多张表时，未限定的列名可能导致歧义或意外绑定，
-// 且降低可读性。SQLFluff RF02 等效规则。
-// 基于 AST 检查多表 SELECT 中是否存在裸列引用。
-
-let ast = context["ast"];
-
-if ast.has_parse_error() {
-    violations.push(#{
-        "message": "SQL parse error: " + ast.parse_error(),
-        "line": 1
-    });
-}
-
-for s in ast.statements() {
-    if s.has_select() {
-        let sel = s.select();
-        if sel.has_unqualified_column() {
-            violations.push(#{
-                "message": "Column reference should be qualified with table name in multi-table query. Use table.column syntax.",
-                "line": s.line(),
-                "column": s.column()
-            });
-        }
-    }
-}
-"#
+    include_str!("../config/rules/dml/column_references_qualified.rhai")
 }
 
 fn get_no_join_without_condition_script() -> &'static str {
-    r#"// no_join_without_condition.rhai (DML006)
-// JOIN 必须带 ON 条件，防止产生无意的笛卡尔积。
-// 原因：无条件的 JOIN（CROSS JOIN 除外）通常是编码错误，
-// 会导致大量无用数据行。SQLFluff AM05 等效规则。
-// 基于 AST 检查 JOIN 子句是否包含 ON 或 USING 条件。
-
-let ast = context["ast"];
-
-if ast.has_parse_error() {
-    violations.push(#{
-        "message": "SQL parse error: " + ast.parse_error(),
-        "line": 1
-    });
-}
-
-for s in ast.statements() {
-    if s.has_select() {
-        let sel = s.select();
-        if sel.has_join_without_condition() {
-            violations.push(#{
-                "message": "JOIN without ON or USING condition causes a Cartesian product. Add an explicit join condition.",
-                "line": s.line(),
-                "column": s.column()
-            });
-        }
-    }
-}
-"#
+    include_str!("../config/rules/dml/no_join_without_condition.rhai")
 }
 
 fn get_no_unused_join_script() -> &'static str {
-    r#"// no_unused_join.rhai (DML101)
-// 检测可能未使用的 JOIN 关系。
-// 启发式：如果 JOIN 的表没有列在 SELECT 投影列表中（通过表名判断），可能未使用。
-// 注意：此规则基于字符串匹配，可能存在误报，需人工复核。
-
-let ast = context["ast"];
-
-if ast.has_parse_error() {
-    violations.push(#{
-        "message": "SQL parse error: " + ast.parse_error(),
-        "line": 1
-    });
-}
-
-for s in ast.statements() {
-    if s.has_select() {
-        let sel = s.select();
-        if sel.has_joins() {
-            let projection_text = "";
-            for col in sel.projection() {
-                projection_text += col;
-            }
-            let upper_proj = projection_text.to_upper();
-
-            for j in sel.joins() {
-                let jt = j.table_name().to_upper();
-                if !upper_proj.contains(jt) && j.join_type() != "CROSS" && j.join_type() != "" {
-                    violations.push(#{
-                        "message": "Possible unused JOIN to table '" + j.table_name() + "'. The table columns are not referenced in SELECT list.",
-                        "line": s.line(),
-                        "column": s.column()
-                    });
-                }
-            }
-        }
-    }
-}
-"#
+    include_str!("../config/rules/dml/no_unused_join.rhai")
 }
 
 fn get_no_unused_cte_script() -> &'static str {
-    r#"// no_unused_cte.rhai (DML102)
-// 检测未使用的 CTE（WITH 子句）。
-// 启发式：如果 CTE 的名称没有在主查询中被引用，则该 CTE 未使用。
-
-let sql = context["sql_content"];
-let upper = sql.to_upper();
-
-let with_pattern = "WITH ";
-let cte_start = upper.find(with_pattern);
-if cte_start != () {
-    let after_with = upper.sub_string(cte_start.len());
-    let parts = after_with.split(" AS (");
-    let first_cte_name = "";
-    if parts.len() > 0 {
-        let first_part = parts[0].trim();
-        let name_end = first_part.find(" ");
-        if name_end != () {
-            first_cte_name = first_part.sub_string(0, name_end).trim();
-        } else {
-            first_cte_name = first_part;
-        }
-    }
-
-    if first_cte_name != "" {
-        let main_query_start = after_with.find(") ");
-        if main_query_start != () {
-            let main_query = after_with.sub_string(main_query_start);
-            if !main_query.to_upper().contains(first_cte_name) {
-                violations.push(#{
-                    "message": "CTE '" + first_cte_name + "' is defined but not used in the main query. Remove unused CTE.",
-                    "line": 1
-                });
-            }
-        }
-    }
-}
-"#
+    include_str!("../config/rules/dml/no_unused_cte.rhai")
 }
 
 fn get_use_is_null_script() -> &'static str {
-    r#"// use_is_null.rhai (DML103)
-// 使用 IS NULL / IS NOT NULL 而非 = NULL / <> NULL。
-// 原因：SQL 中 NULL = NULL 的结果是 NULL（不是 TRUE），
-// WHERE name = NULL 永远不会返回任何行，这是常见编码错误。
-
-let ast = context["ast"];
-
-if ast.has_parse_error() {
-    violations.push(#{
-        "message": "SQL parse error: " + ast.parse_error(),
-        "line": 1
-    });
-}
-
-let sql = context["sql_content"];
-let lines = sql.split("\n");
-let mut line_num = 1;
-for line in lines {
-    let uline = line.to_upper();
-    if (uline.contains("= NULL") || uline.contains("=NULL")) && !uline.contains("IS NULL") && !uline.contains("IS NOT NULL") {
-        violations.push(#{
-            "message": "Use 'IS NULL' instead of '= NULL'. NULL comparisons always return FALSE with '='.",
-            "line": line_num
-        });
-    }
-    if (uline.contains("<> NULL") || uline.contains("<>NULL") || uline.contains("!= NULL") || uline.contains("!=NULL")) && !uline.contains("IS NOT NULL") {
-        violations.push(#{
-            "message": "Use 'IS NOT NULL' instead of '<> NULL' or '!= NULL'. NULL comparisons always return FALSE with '<>'.",
-            "line": line_num
-        });
-    }
-    line_num += 1;
-}
-"#
+    include_str!("../config/rules/dml/use_is_null.rhai")
 }
 
 fn get_use_coalesce_script() -> &'static str {
-    r#"// use_coalesce.rhai (DML104)
-// 优先使用标准的 COALESCE 而非数据库专有的 NVL 或 ISNULL。
-// COALESCE 是 SQL 标准函数，NVL（Oracle）和 ISNULL（SQL Server）是专有函数。
-
-let sql = context["sql_content"];
-let upper = sql.to_upper();
-
-if upper.contains("NVL(") {
-    violations.push(#{
-        "message": "Use standard COALESCE() instead of Oracle-specific NVL(). COALESCE is cross-database compatible.",
-        "line": 1
-    });
-}
-
-if upper.contains("ISNULL(") {
-    violations.push(#{
-        "message": "Use standard COALESCE() instead of T-SQL-specific ISNULL(). COALESCE is cross-database compatible.",
-        "line": 1
-    });
-}
-"#
+    include_str!("../config/rules/dml/use_coalesce.rhai")
 }
 
 fn get_no_order_by_in_subquery_script() -> &'static str {
-    r#"// no_order_by_in_subquery.rhai (DML105)
-// 子查询中的 ORDER BY 通常无效（除非使用 LIMIT/OFFSET）。
-// SQL 标准中，子查询是逻辑无序的，ORDER BY 在内层通常被优化器忽略。
-
-let sql = context["sql_content"];
-let lines = sql.split("\n");
-let mut paren_depth = 0;
-let mut found_issue = false;
-
-for line in lines {
-    let uline = line.to_upper();
-    for ch in uline.chars() {
-        if ch == '(' { paren_depth += 1; }
-        if ch == ')' { paren_depth -= 1; if paren_depth < 0 { paren_depth = 0; } }
-    }
-    if paren_depth > 0 && uline.contains("ORDER BY") && !uline.contains("LIMIT") && !found_issue {
-        violations.push(#{
-            "message": "ORDER BY in subquery is typically ignored unless combined with LIMIT/OFFSET. Consider moving ORDER BY to the outer query.",
-            "line": 1
-        });
-        found_issue = true;
-    }
-}
-"#
+    include_str!("../config/rules/dml/no_order_by_in_subquery.rhai")
 }
 
 fn get_union_all_preferred_script() -> &'static str {
-    r#"// union_all_preferred.rhai (DML106)
-// 除非需要去重，否则优先使用 UNION ALL 而非 UNION。
-// UNION 会执行隐式 DISTINCT（排序去重），性能低于 UNION ALL。
-
-let ast = context["ast"];
-
-if ast.has_parse_error() {
-    violations.push(#{
-        "message": "SQL parse error: " + ast.parse_error(),
-        "line": 1
-    });
-}
-
-for s in ast.statements() {
-    if s.has_select() {
-        let sel = s.select();
-        if sel.is_union() && !sel.is_union_all() {
-            violations.push(#{
-                "message": "UNION performs implicit DISTINCT. Use UNION ALL if duplicate elimination is not required, or explicitly use UNION DISTINCT for clarity.",
-                "line": s.line(),
-                "column": s.column()
-            });
-        }
-    }
-}
-"#
+    include_str!("../config/rules/dml/union_all_preferred.rhai")
 }
 
 fn get_no_nested_case_script() -> &'static str {
-    r#"// no_nested_case.rhai (DML107)
-// 避免嵌套 CASE 表达式，优先使用简单 CASE。
-// 嵌套 CASE（CASE WHEN ... CASE WHEN ...）可读性差且易出错。
-
-let sql = context["sql_content"];
-let upper = sql.to_upper();
-
-let mut case_count = 0;
-let mut search_pos = 0;
-while search_pos < upper.len() {
-    let pos = upper.find_at("CASE", search_pos);
-    if pos == () { break; }
-    case_count += 1;
-    search_pos = pos + 4;
-}
-
-if case_count > 1 {
-    violations.push("Nested CASE expressions reduce readability. Consider rewriting with simple CASE or extracting into subqueries.");
-}
-"#
+    include_str!("../config/rules/dml/no_nested_case.rhai")
 }
 
 fn get_no_constant_where_script() -> &'static str {
-    r#"// no_constant_where.rhai (DML108)
-// 避免 WHERE 子句中使用常量条件（WHERE 1=1, WHERE true 等）。
-// 通常是动态 SQL 拼接的产物或调试遗留代码。
-
-let sql = context["sql_content"];
-let upper = sql.to_upper();
-
-let patterns = [
-    "WHERE 1=1",
-    "WHERE 1 = 1",
-    "WHERE 1=0",
-    "WHERE 1 = 0",
-    "WHERE TRUE",
-    "WHERE TRUE ",
-    "WHERE FALSE",
-    "WHERE FALSE ",
-    "WHERE 1<>1",
-    "WHERE 1 <> 1"
-];
-
-let lines = sql.split("\n");
-let mut line_num = 1;
-for line in lines {
-    let uline = line.to_upper();
-    for pat in patterns {
-        if uline.contains(pat) {
-            violations.push(#{
-                "message": "Constant condition '" + pat + "' found in WHERE clause. This is likely dead code or a debugging artifact. Remove it.",
-                "line": line_num
-            });
-        }
-    }
-    line_num += 1;
-}
-"#
+    include_str!("../config/rules/dml/no_constant_where.rhai")
 }

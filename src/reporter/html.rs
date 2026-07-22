@@ -21,7 +21,6 @@ pub fn generate_html_report(
     let has_dir_issues = !missing.is_empty() || !unexpected.is_empty();
     let passed = violations.is_empty() && missing.is_empty();
 
-    let _status_color = if passed { "#22c55e" } else { "#ef4444" };
     let status_text = if passed { "PASSED" } else { "FAILED" };
 
     let mut dir_issues_rows = String::new();
