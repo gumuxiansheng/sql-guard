@@ -1,6 +1,28 @@
-use std::path::Path;
-
 use crate::error::{DirectoryIssue, Violation};
+use crate::reporter::Reporter;
+
+/// JSON reporter — 写入 `sqlguard-report.json`。
+pub struct JsonReporter;
+
+impl Reporter for JsonReporter {
+    fn name(&self) -> &str {
+        "json"
+    }
+
+    fn needs_file_output(&self) -> bool {
+        true
+    }
+
+    fn generate(
+        &self,
+        violations: &[Violation],
+        missing: &[DirectoryIssue],
+        unexpected: &[DirectoryIssue],
+        files_checked: usize,
+    ) -> String {
+        generate_json_report(violations, missing, unexpected, files_checked)
+    }
+}
 
 #[derive(serde::Serialize)]
 pub struct JsonReport {
@@ -93,18 +115,4 @@ pub fn generate_json_report(
     };
 
     serde_json::to_string_pretty(&report).unwrap_or_else(|_| "{}".to_string())
-}
-
-pub fn save_json_report(
-    output_dir: &Path,
-    violations: &[Violation],
-    missing: &[DirectoryIssue],
-    unexpected: &[DirectoryIssue],
-    files_checked: usize,
-) -> Result<String, String> {
-    let json_content = generate_json_report(violations, missing, unexpected, files_checked);
-    let report_path = output_dir.join("sqlguard-report.json");
-    std::fs::write(&report_path, &json_content)
-        .map_err(|e| format!("Failed to write JSON report: {}", e))?;
-    Ok(report_path.to_string_lossy().to_string())
 }

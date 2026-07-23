@@ -1,6 +1,30 @@
 use colored::Colorize;
 
 use crate::error::{DirectoryIssue, Violation};
+use crate::reporter::Reporter;
+
+/// Plain text reporter — 打印到 stdout。
+pub struct PlainReporter;
+
+impl Reporter for PlainReporter {
+    fn name(&self) -> &str {
+        "plain"
+    }
+
+    fn needs_file_output(&self) -> bool {
+        false
+    }
+
+    fn generate(
+        &self,
+        violations: &[Violation],
+        missing: &[DirectoryIssue],
+        unexpected: &[DirectoryIssue],
+        files_checked: usize,
+    ) -> String {
+        generate_plain_report(violations, missing, unexpected, files_checked)
+    }
+}
 
 pub fn generate_plain_report(
     violations: &[Violation],
@@ -98,14 +122,4 @@ pub fn generate_plain_report(
     output.push('\n');
 
     output
-}
-
-pub fn print_plain_report(
-    violations: &[Violation],
-    missing: &[DirectoryIssue],
-    unexpected: &[DirectoryIssue],
-    files_checked: usize,
-) {
-    let report = generate_plain_report(violations, missing, unexpected, files_checked);
-    println!("{}", report);
 }

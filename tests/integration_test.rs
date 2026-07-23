@@ -9,6 +9,25 @@ fn binary_abs_path() -> String {
     cwd.join(BINARY).to_string_lossy().to_string()
 }
 
+/// 检测 git 是否可用；不可用时测试应跳过而非 panic。
+/// CI 环境或精简容器可能未安装 git，此时 diff 相关测试无意义。
+fn git_available() -> bool {
+    Command::new("git")
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+/// 在 diff 测试开头调用：git 不可用时打印提示并 early return（测试标记为通过）。
+fn require_git() -> bool {
+    if !git_available() {
+        eprintln!("Skipping test: git is not installed");
+        return false;
+    }
+    true
+}
+
 fn setup_test_project(dir: &str) {
     std::fs::create_dir_all(format!("{}/sql/ddl", dir)).unwrap();
     std::fs::create_dir_all(format!("{}/sql/dml", dir)).unwrap();
@@ -656,6 +675,7 @@ fn test_mapper_disabled_by_default() {
 #[test]
 fn test_check_diff_only_changed_statements() {
     // 验证 check-diff 只校验改动语句，未改动语句的违规被过滤掉
+    if !require_git() { return; }
     let dir = "/tmp/sqlguard-test-diff";
     let _ = std::fs::remove_dir_all(dir);
 
@@ -758,6 +778,7 @@ fn test_check_diff_only_changed_statements() {
 #[test]
 fn test_check_diff_detects_new_violation_in_changed_line() {
     // 验证 check-diff 能检测到改动行新增的违规
+    if !require_git() { return; }
     let dir = "/tmp/sqlguard-test-diff-new";
     let _ = std::fs::remove_dir_all(dir);
 
@@ -817,6 +838,7 @@ fn test_check_diff_detects_new_violation_in_changed_line() {
 #[test]
 fn test_check_diff_new_file_all_checked() {
     // 验证新增文件整体算改动，所有违规都被保留
+    if !require_git() { return; }
     let dir = "/tmp/sqlguard-test-diff-newfile";
     let _ = std::fs::remove_dir_all(dir);
 
@@ -1248,6 +1270,7 @@ formats = ["json"]
 #[test]
 fn test_check_diff_no_changes() {
     // 验证无改动时正常退出，输出空报告
+    if !require_git() { return; }
     let dir = "/tmp/sqlguard-test-diff-empty";
     let _ = std::fs::remove_dir_all(dir);
 

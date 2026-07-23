@@ -1,6 +1,28 @@
-use std::path::Path;
-
 use crate::error::{DirectoryIssue, Violation};
+use crate::reporter::Reporter;
+
+/// HTML reporter — 写入 `sqlguard-report.html`。
+pub struct HtmlReporter;
+
+impl Reporter for HtmlReporter {
+    fn name(&self) -> &str {
+        "html"
+    }
+
+    fn needs_file_output(&self) -> bool {
+        true
+    }
+
+    fn generate(
+        &self,
+        violations: &[Violation],
+        missing: &[DirectoryIssue],
+        unexpected: &[DirectoryIssue],
+        files_checked: usize,
+    ) -> String {
+        generate_html_report(violations, missing, unexpected, files_checked)
+    }
+}
 
 fn escape_html(s: &str) -> String {
     s.replace('&', "&amp;")
@@ -234,18 +256,4 @@ pub fn generate_html_report(
         dir_section = dir_section,
         violation_section = violation_section,
     )
-}
-
-pub fn save_html_report(
-    output_dir: &Path,
-    violations: &[Violation],
-    missing: &[DirectoryIssue],
-    unexpected: &[DirectoryIssue],
-    files_checked: usize,
-) -> Result<String, String> {
-    let html = generate_html_report(violations, missing, unexpected, files_checked);
-    let report_path = output_dir.join("sqlguard-report.html");
-    std::fs::write(&report_path, &html)
-        .map_err(|e| format!("Failed to write HTML report: {}", e))?;
-    Ok(report_path.to_string_lossy().to_string())
 }

@@ -7,7 +7,7 @@ mod reporter;
 mod mapper;
 mod git_diff;
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::fs;
 
 use clap::Parser;
@@ -19,7 +19,6 @@ use crate::checker::directory;
 use crate::checker::classification;
 use crate::checker::encoding;
 use crate::rule::engine;
-use crate::reporter::{plain, json, html};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
@@ -77,6 +76,103 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+// ===== 公共辅助函数（任务 3：消除 run_check / run_check_diff 重复逻辑）=====
+
+fn load_config(config_path: &Path) -> Result<(Config, PathBuf), SqlGuardError> {
+    let config_dir = config_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .canonicalize()
+        .unwrap_or_else(|_| config_path.parent().unwrap_or_else(|| Path::new(".")).to_path_buf());
+    let config = if config_path.exists() {
+        Config::load(config_path)?
+    } else {
+        Config::load(&config_dir.join("sqlguard.toml"))
+            .unwrap_or_else(|_| generate_default_config())
+    };
+    Ok((config, config_dir))
+}
+
+fn resolve_absolute_path(path: &Path) -> PathBuf {
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map(|cwd| cwd.join(path))
+            .unwrap_or_else(|_| path.to_path_buf())
+    }
+}
+
+fn resolve_output_dir(output_dir: Option<&Path>, target_dir: &Path) -> PathBuf {
+    output_dir
+        .map(|p| {
+            if p.is_absolute() {
+                p.to_path_buf()
+            } else {
+                std::env::current_dir()
+                    .map(|cwd| cwd.join(p))
+                    .unwrap_or_else(|_| p.to_path_buf())
+            }
+        })
+        .unwrap_or_else(|| target_dir.to_path_buf())
+}
+
+fn parse_formats(format: &str) -> Vec<&str> {
+    match format {
+        "all" => vec!["plain", "json", "html"],
+        f => f.split(',').map(|s| s.trim()).collect(),
+    }
+}
+
+fn check_files(
+    config: &Config,
+    config_dir: &Path,
+    filter: &engine::RuleFilter,
+    engine_instance: &rhai::Engine,
+    sql_files: &[PathBuf],
+    mapper_files: &[PathBuf],
+) -> Result<(Vec<Violation>, usize), SqlGuardError> {
+    let mut all_violations = Vec::new();
+    let files_checked = sql_files.len() + mapper_files.len();
+
+    // 脚本模式
+    for file_path in sql_files {
+        let classification_result = classification::classify_file(file_path, &config.classification)?;
+        all_violations.extend(encoding::check_file(file_path, &classification_result.script_type, &config.file_check, filter));
+        let sql_content = fs::read_to_string(file_path)
+            .map_err(|e| SqlGuardError::CheckError(format!("Failed to read '{}': {}", file_path.display(), e)))?;
+        let violations = engine::run_rules_for_file(engine_instance, file_path, &sql_content, &classification_result.script_type, config, config_dir, filter, 0)?;
+        all_violations.extend(violations);
+    }
+
+    // Mapper 模式
+    if config.mapper.enabled {
+        for file_path in mapper_files {
+            let mapper_script_type = classification::classify_file(file_path, &config.classification)
+                .map(|r| r.script_type)
+                .unwrap_or_else(|_| "mapper".to_string());
+            all_violations.extend(encoding::check_file(file_path, &mapper_script_type, &config.file_check, filter));
+            let extracted = match mapper::extract_sql_from_xml(file_path) {
+                Ok(v) => v,
+                Err(e) => {
+                    eprintln!("Warning: failed to parse mapper XML '{}': {}", file_path.display(), e);
+                    continue;
+                }
+            };
+            for sql in extracted {
+                let script_type = mapper::map_statement_type(&sql.statement_type);
+                let line_offset = sql.raw_xml_line.saturating_sub(1);
+                let violations = engine::run_rules_for_file(engine_instance, file_path, &sql.processed_sql, script_type, config, config_dir, filter, line_offset)?;
+                all_violations.extend(violations);
+            }
+        }
+    }
+
+    Ok((all_violations, files_checked))
+}
+
+// ===== run_check =====
+
 fn run_check(
     target_dir: &Path,
     config_path: &Path,
@@ -87,18 +183,7 @@ fn run_check(
     exclude_rules: &Option<String>,
     exclude_groups: &Option<String>,
 ) -> Result<(), SqlGuardError> {
-    let config_dir = config_path
-        .parent()
-        .unwrap_or_else(|| Path::new("."))
-        .canonicalize()
-        .unwrap_or_else(|_| config_path.parent().unwrap_or_else(|| Path::new(".")).to_path_buf());
-
-    let config = if config_path.exists() {
-        Config::load(config_path)?
-    } else {
-        Config::load(&config_dir.join("sqlguard.toml"))
-            .unwrap_or_else(|_| generate_default_config())
-    };
+    let (config, config_dir) = load_config(config_path)?;
 
     let filter = engine::RuleFilter::from_cli(rules, groups, exclude_rules, exclude_groups);
     if !filter.is_empty() {
@@ -108,15 +193,8 @@ fn run_check(
         );
     }
 
-    let absolute_target = if target_dir.is_absolute() {
-        target_dir.to_path_buf()
-    } else {
-        std::env::current_dir()
-            .map(|cwd| cwd.join(target_dir))
-            .unwrap_or_else(|_| target_dir.to_path_buf())
-    };
+    let absolute_target = resolve_absolute_path(target_dir);
 
-    // 计算有效扫描白名单：scan.paths 优先，回退到 structure.paths，仍为空则扫描整个 target_dir
     let effective_scan_paths: Vec<String> = if !config.scan.paths.is_empty() {
         config.scan.paths.clone()
     } else {
@@ -129,134 +207,14 @@ fn run_check(
 
     let sql_files = classification::collect_sql_files(&absolute_target, &effective_scan_paths, exclude_dirs);
     let mapper_files = mapper::collect_mapper_files(&absolute_target, &config.mapper, exclude_dirs);
-    let files_checked = sql_files.len() + mapper_files.len();
 
-    // 构建一次 Rhai 引擎，全文件/全片段复用（mapper 模式可能产生大量片段，
-    // 每片段重建引擎会导致性能问题）
     let engine_instance = engine::build_engine();
+    let (all_violations, files_checked) = check_files(&config, &config_dir, &filter, &engine_instance, &sql_files, &mapper_files)?;
 
-    let mut all_violations: Vec<Violation> = Vec::new();
-
-    // ===== 脚本模式：.sql/.ddl/.dml 文件，每个文件作为单 SQL 单元 =====
-    for file_path in &sql_files {
-        let classification_result = classification::classify_file(file_path, &config.classification)?;
-
-        // 文件级检查（编码 / 换行符），独立于 SQL 语法规则
-        all_violations.extend(encoding::check_file(
-            file_path,
-            &classification_result.script_type,
-            &config.file_check,
-            &filter,
-        ));
-
-        let sql_content = fs::read_to_string(file_path)
-            .map_err(|e| SqlGuardError::CheckError(format!("Failed to read '{}': {}", file_path.display(), e)))?;
-
-        let violations = engine::run_rules_for_file(
-            &engine_instance,
-            file_path,
-            &sql_content,
-            &classification_result.script_type,
-            &config,
-            &config_dir,
-            &filter,
-            0,
-        )?;
-
-        all_violations.extend(violations);
-    }
-
-    // ===== Mapper 模式：MyBatis XML，每个文件提取多条 SQL，逐条检查 =====
-    if config.mapper.enabled {
-        for file_path in &mapper_files {
-            // 文件级检查（编码 / 换行符），对 XML 文件整体生效
-            let mapper_script_type = classification::classify_file(file_path, &config.classification)
-                .map(|r| r.script_type)
-                .unwrap_or_else(|_| "mapper".to_string());
-            all_violations.extend(encoding::check_file(
-                file_path,
-                &mapper_script_type,
-                &config.file_check,
-                &filter,
-            ));
-
-            // 容错：单文件解析失败不影响其他文件
-            let extracted = match mapper::extract_sql_from_xml(file_path) {
-                Ok(v) => v,
-                Err(e) => {
-                    eprintln!(
-                        "Warning: failed to parse mapper XML '{}': {}",
-                        file_path.display(),
-                        e
-                    );
-                    continue;
-                }
-            };
-
-            for sql in extracted {
-                let script_type = mapper::map_statement_type(&sql.statement_type);
-                // line_offset 把规则产出的"SQL 内行号"映射回 XML 行号：
-                // raw_xml_line 是 `<select>` 标签起始行（1-indexed），偏移为 raw_xml_line - 1
-                let line_offset = sql.raw_xml_line.saturating_sub(1);
-
-                let violations = engine::run_rules_for_file(
-                    &engine_instance,
-                    file_path,
-                    &sql.processed_sql,
-                    script_type,
-                    &config,
-                    &config_dir,
-                    &filter,
-                    line_offset,
-                )?;
-
-                all_violations.extend(violations);
-            }
-        }
-    }
-
-    let formats: Vec<&str> = match format {
-        "all" => vec!["plain", "json", "html"],
-        f => f.split(',').map(|s| s.trim()).collect(),
-    };
-
-    let output_dir_path = output_dir
-        .map(|p| {
-            if p.is_absolute() {
-                p.to_path_buf()
-            } else {
-                std::env::current_dir()
-                    .map(|cwd| cwd.join(p))
-                    .unwrap_or_else(|_| p.to_path_buf())
-            }
-        })
-        .unwrap_or_else(|| absolute_target.clone());
-
-    if !output_dir_path.exists() {
-        fs::create_dir_all(&output_dir_path)
-            .map_err(|e| SqlGuardError::IoError(e))?;
-    }
-
-    for fmt in &formats {
-        match *fmt {
-            "plain" => {
-                plain::print_plain_report(&all_violations, &missing, &unexpected, files_checked);
-            }
-            "json" => {
-                match json::save_json_report(&output_dir_path, &all_violations, &missing, &unexpected, files_checked) {
-                    Ok(path) => eprintln!("JSON report saved: {}", path),
-                    Err(e) => eprintln!("Error saving JSON report: {}", e),
-                }
-            }
-            "html" => {
-                match html::save_html_report(&output_dir_path, &all_violations, &missing, &unexpected, files_checked) {
-                    Ok(path) => eprintln!("HTML report saved: {}", path),
-                    Err(e) => eprintln!("Error saving HTML report: {}", e),
-                }
-            }
-            _ => eprintln!("Unknown format: {}", fmt),
-        }
-    }
+    let formats = parse_formats(format);
+    let output_dir_path = resolve_output_dir(output_dir, &absolute_target);
+    reporter::output_reports(&all_violations, &missing, &unexpected, files_checked, &formats, &output_dir_path)
+        .map_err(SqlGuardError::CheckError)?;
 
     let has_errors = all_violations.iter().any(|v| v.severity == "error");
     let has_missing = !missing.is_empty();
@@ -267,6 +225,8 @@ fn run_check(
         Ok(())
     }
 }
+
+// ===== run_check_diff =====
 
 fn run_check_diff(
     base: &str,
@@ -279,18 +239,7 @@ fn run_check_diff(
     exclude_rules: &Option<String>,
     exclude_groups: &Option<String>,
 ) -> Result<(), SqlGuardError> {
-    let config_dir = config_path
-        .parent()
-        .unwrap_or_else(|| Path::new("."))
-        .canonicalize()
-        .unwrap_or_else(|_| config_path.parent().unwrap_or_else(|| Path::new(".")).to_path_buf());
-
-    let config = if config_path.exists() {
-        Config::load(config_path)?
-    } else {
-        Config::load(&config_dir.join("sqlguard.toml"))
-            .unwrap_or_else(|_| generate_default_config())
-    };
+    let (config, config_dir) = load_config(config_path)?;
 
     let filter = engine::RuleFilter::from_cli(rules, groups, exclude_rules, exclude_groups);
     if !filter.is_empty() {
@@ -316,25 +265,10 @@ fn run_check_diff(
 
     if diffs.is_empty() {
         eprintln!("No SQL changes detected since {}", base);
-        // 仍输出空报告
-        let output_dir_path = output_dir
-            .map(|p| p.to_path_buf())
-            .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
-        if !output_dir_path.exists() {
-            let _ = fs::create_dir_all(&output_dir_path);
-        }
-        let empty: Vec<Violation> = Vec::new();
-        for fmt in format.split(',').map(|s| s.trim()) {
-            match fmt {
-                "plain" => plain::print_plain_report(&empty, &[], &[], 0),
-                "json" => {
-                    if let Ok(p) = json::save_json_report(&output_dir_path, &empty, &[], &[], 0) {
-                        eprintln!("JSON report saved: {}", p);
-                    }
-                }
-                _ => {}
-            }
-        }
+        let formats = parse_formats(format);
+        let output_dir_path = resolve_output_dir(output_dir, &std::env::current_dir().unwrap_or_default());
+        reporter::output_reports(&[], &[], &[], 0, &formats, &output_dir_path)
+            .map_err(SqlGuardError::CheckError)?;
         return Ok(());
     }
 
@@ -344,13 +278,7 @@ fn run_check_diff(
         base
     );
 
-    let absolute_target = if target_dir.is_absolute() {
-        target_dir.to_path_buf()
-    } else {
-        std::env::current_dir()
-            .map(|cwd| cwd.join(target_dir))
-            .unwrap_or_else(|_| target_dir.to_path_buf())
-    };
+    let absolute_target = resolve_absolute_path(target_dir);
 
     // 2. 对每个改动文件跑规则，按 hunk 范围过滤
     let engine_instance = engine::build_engine();
@@ -437,56 +365,11 @@ fn run_check_diff(
         }
     }
 
-    // 3. 输出报告（复用现有 reporter）
-    let formats: Vec<&str> = match format {
-        "all" => vec!["plain", "json", "html"],
-        f => f.split(',').map(|s| s.trim()).collect(),
-    };
-
-    let output_dir_path = output_dir
-        .map(|p| {
-            if p.is_absolute() {
-                p.to_path_buf()
-            } else {
-                std::env::current_dir()
-                    .map(|cwd| cwd.join(p))
-                    .unwrap_or_else(|_| p.to_path_buf())
-            }
-        })
-        .unwrap_or_else(|| absolute_target.clone());
-
-    if !output_dir_path.exists() {
-        fs::create_dir_all(&output_dir_path).map_err(SqlGuardError::IoError)?;
-    }
-
-    for fmt in &formats {
-        match *fmt {
-            "plain" => {
-                plain::print_plain_report(&all_violations, &[], &[], files_checked);
-            }
-            "json" => match json::save_json_report(
-                &output_dir_path,
-                &all_violations,
-                &[],
-                &[],
-                files_checked,
-            ) {
-                Ok(path) => eprintln!("JSON report saved: {}", path),
-                Err(e) => eprintln!("Error saving JSON report: {}", e),
-            },
-            "html" => match html::save_html_report(
-                &output_dir_path,
-                &all_violations,
-                &[],
-                &[],
-                files_checked,
-            ) {
-                Ok(path) => eprintln!("HTML report saved: {}", path),
-                Err(e) => eprintln!("Error saving HTML report: {}", e),
-            },
-            _ => eprintln!("Unknown format: {}", fmt),
-        }
-    }
+    // 3. 输出报告
+    let formats = parse_formats(format);
+    let output_dir_path = resolve_output_dir(output_dir, &absolute_target);
+    reporter::output_reports(&all_violations, &[], &[], files_checked, &formats, &output_dir_path)
+        .map_err(SqlGuardError::CheckError)?;
 
     let has_errors = all_violations.iter().any(|v| v.severity == "error");
     if has_errors {
@@ -523,46 +406,41 @@ fn filter_violations_by_diff(
         .collect()
 }
 
+// ===== run_init =====
+
 fn run_init(target_dir: &Path) -> Result<(), SqlGuardError> {
     let rules_dir = target_dir.join("config").join("rules");
-
-    let dirs = [
-        rules_dir.join("ddl"),
-        rules_dir.join("dml"),
-    ];
-    for dir in &dirs {
-        fs::create_dir_all(dir)
-            .map_err(|e| SqlGuardError::IoError(e))?;
+    for dir in &[rules_dir.join("ddl"), rules_dir.join("dml")] {
+        fs::create_dir_all(dir).map_err(SqlGuardError::IoError)?;
     }
 
     let config_content = get_default_config_content();
-    let config_path = target_dir.join("sqlguard.toml");
-    fs::write(&config_path, config_content)
-        .map_err(|e| SqlGuardError::IoError(e))?;
+    fs::write(target_dir.join("sqlguard.toml"), config_content)
+        .map_err(SqlGuardError::IoError)?;
 
-    let rules = vec![
-        ("no_drop_table", "ddl", get_no_drop_table_script()),
-        ("primary_key_required", "ddl", get_primary_key_script()),
-        ("no_select_all", "dml", get_no_select_all_script()),
-        ("no_delete_update_without_where", "dml", get_no_delete_update_without_where_script()),
-        ("insert_columns_required", "dml", get_insert_columns_required_script()),
-        ("subquery_alias_required", "dml", get_subquery_alias_required_script()),
-        ("column_references_qualified", "dml", get_column_references_qualified_script()),
-        ("no_join_without_condition", "dml", get_no_join_without_condition_script()),
-        ("no_unused_join", "dml", get_no_unused_join_script()),
-        ("no_unused_cte", "dml", get_no_unused_cte_script()),
-        ("use_is_null", "dml", get_use_is_null_script()),
-        ("use_coalesce", "dml", get_use_coalesce_script()),
-        ("no_order_by_in_subquery", "dml", get_no_order_by_in_subquery_script()),
-        ("union_all_preferred", "dml", get_union_all_preferred_script()),
-        ("no_nested_case", "dml", get_no_nested_case_script()),
-        ("no_constant_where", "dml", get_no_constant_where_script()),
+    // (name, subdir, content) — content 通过 include_str! 编译时嵌入
+    let rules: &[(&str, &str, &str)] = &[
+        ("no_drop_table", "ddl", include_str!("../config/rules/ddl/no_drop_table.rhai")),
+        ("primary_key_required", "ddl", include_str!("../config/rules/ddl/primary_key_required.rhai")),
+        ("no_select_all", "dml", include_str!("../config/rules/dml/no_select_all.rhai")),
+        ("no_delete_update_without_where", "dml", include_str!("../config/rules/dml/no_delete_update_without_where.rhai")),
+        ("insert_columns_required", "dml", include_str!("../config/rules/dml/insert_columns_required.rhai")),
+        ("subquery_alias_required", "dml", include_str!("../config/rules/dml/subquery_alias_required.rhai")),
+        ("column_references_qualified", "dml", include_str!("../config/rules/dml/column_references_qualified.rhai")),
+        ("no_join_without_condition", "dml", include_str!("../config/rules/dml/no_join_without_condition.rhai")),
+        ("no_unused_join", "dml", include_str!("../config/rules/dml/no_unused_join.rhai")),
+        ("no_unused_cte", "dml", include_str!("../config/rules/dml/no_unused_cte.rhai")),
+        ("use_is_null", "dml", include_str!("../config/rules/dml/use_is_null.rhai")),
+        ("use_coalesce", "dml", include_str!("../config/rules/dml/use_coalesce.rhai")),
+        ("no_order_by_in_subquery", "dml", include_str!("../config/rules/dml/no_order_by_in_subquery.rhai")),
+        ("union_all_preferred", "dml", include_str!("../config/rules/dml/union_all_preferred.rhai")),
+        ("no_nested_case", "dml", include_str!("../config/rules/dml/no_nested_case.rhai")),
+        ("no_constant_where", "dml", include_str!("../config/rules/dml/no_constant_where.rhai")),
     ];
 
     for (name, rule_type, content) in rules {
         let path = target_dir.join("config").join("rules").join(rule_type).join(format!("{}.rhai", name));
-        fs::write(&path, content)
-            .map_err(|e| SqlGuardError::IoError(e))?;
+        fs::write(&path, content).map_err(SqlGuardError::IoError)?;
     }
 
     println!("Initialized SqlGuard configuration in {}", target_dir.display());
@@ -572,7 +450,6 @@ fn run_init(target_dir: &Path) -> Result<(), SqlGuardError> {
     println!("  - config/rules/dml/ (13 rule files)");
     println!();
     println!("Run: sqlguard check <project_path>");
-
     Ok(())
 }
 
@@ -585,7 +462,7 @@ fn generate_default_config() -> Config {
                 "sql/others".to_string(),
             ],
             strict: true,
-            allow_extra: vec![".gitkeep".to_string()],
+            allow_extra: vec![".gitkeep".to_string(), "config/".to_string()],
         },
         classification: crate::config::ClassificationConfig {
             rules: vec![
@@ -786,7 +663,7 @@ paths = [
   "sql/others",
 ]
 strict = true
-allow_extra = [".gitkeep"]
+allow_extra = [".gitkeep", "config/"]
 
 [classification]
 default_type = "other"
@@ -1032,68 +909,4 @@ check_line_ending = true            # 换行符 LF 检查（FILE002）
 encoding_severity = "error"         # 编码违规级别（必须）
 line_ending_severity = "warning"    # 换行符违规级别（提示）
 "#
-}
-
-fn get_no_drop_table_script() -> &'static str {
-    include_str!("../config/rules/ddl/no_drop_table.rhai")
-}
-
-fn get_primary_key_script() -> &'static str {
-    include_str!("../config/rules/ddl/primary_key_required.rhai")
-}
-
-fn get_no_select_all_script() -> &'static str {
-    include_str!("../config/rules/dml/no_select_all.rhai")
-}
-
-fn get_no_delete_update_without_where_script() -> &'static str {
-    include_str!("../config/rules/dml/no_delete_update_without_where.rhai")
-}
-
-fn get_insert_columns_required_script() -> &'static str {
-    include_str!("../config/rules/dml/insert_columns_required.rhai")
-}
-
-fn get_subquery_alias_required_script() -> &'static str {
-    include_str!("../config/rules/dml/subquery_alias_required.rhai")
-}
-
-fn get_column_references_qualified_script() -> &'static str {
-    include_str!("../config/rules/dml/column_references_qualified.rhai")
-}
-
-fn get_no_join_without_condition_script() -> &'static str {
-    include_str!("../config/rules/dml/no_join_without_condition.rhai")
-}
-
-fn get_no_unused_join_script() -> &'static str {
-    include_str!("../config/rules/dml/no_unused_join.rhai")
-}
-
-fn get_no_unused_cte_script() -> &'static str {
-    include_str!("../config/rules/dml/no_unused_cte.rhai")
-}
-
-fn get_use_is_null_script() -> &'static str {
-    include_str!("../config/rules/dml/use_is_null.rhai")
-}
-
-fn get_use_coalesce_script() -> &'static str {
-    include_str!("../config/rules/dml/use_coalesce.rhai")
-}
-
-fn get_no_order_by_in_subquery_script() -> &'static str {
-    include_str!("../config/rules/dml/no_order_by_in_subquery.rhai")
-}
-
-fn get_union_all_preferred_script() -> &'static str {
-    include_str!("../config/rules/dml/union_all_preferred.rhai")
-}
-
-fn get_no_nested_case_script() -> &'static str {
-    include_str!("../config/rules/dml/no_nested_case.rhai")
-}
-
-fn get_no_constant_where_script() -> &'static str {
-    include_str!("../config/rules/dml/no_constant_where.rhai")
 }
