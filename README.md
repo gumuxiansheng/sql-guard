@@ -45,11 +45,13 @@
 │                          → mapper/placeholder.rs 标准化占位符  │
 │                          → mapper/include.rs 解析 <include>   │
 │                                                                 │
-│  3. 规则引擎       (rule/engine.rs)                            │
-│     ├── parse_sql_to_ast()    sqlparser → SqlAst 包装类型      │
-│     ├── build_engine()        构建 Rhai 引擎，注册方法          │
-│     ├── run_rules_for_file()  对每个 SQL 单元执行所有适用规则   │
-│     └── RuleFilter            按 id/group 筛选规则              │
+│  3. 规则引擎       (rule/engine/)                              │
+│     ├── mod.rs        模块入口                                │
+│     ├── ast.rs        SqlAst / StmtInfo / SelectInfo 等包装类型│
+│     ├── parser.rs     parse_sql_to_ast() → SqlAst             │
+│     ├── analyzer.rs   analyze_expr() / collect_comments() 等   │
+│     ├── scanner.rs    字符串扫描工具                          │
+│     └── runner.rs     构建 Rhai 引擎，prepend helpers，执行规则│
 │                                                                 │
 │  4. 报告输出       (reporter/)                                  │
 │     ├── plain.rs    终端彩色输出                                │
@@ -82,7 +84,7 @@ cp deploy/sqlguard-x86_64-apple-darwin /usr/local/bin/sqlguard
 sqlguard init .
 ```
 
-生成 `sqlguard.toml` 配置文件 + 3 条内置规则脚本 + 示例 SQL 目录结构。
+生成 `sqlguard.toml` 配置文件 + 16 条内置规则脚本（2 DDL + 14 DML）+ 示例 SQL 目录结构。
 
 ### 编写 SQL 脚本
 
@@ -152,11 +154,26 @@ SqlGuard/
 │       └── html.rs          # HTML 报告
 ├── config/
 │   └── rules/
+│       ├── lib/
+│       │   └── helpers.rhai      # 公共辅助函数（编译时嵌入，用户无需关心）
 │       ├── ddl/
 │       │   ├── no_drop_table.rhai
 │       │   └── primary_key_required.rhai
 │       └── dml/
-│           └── no_select_all.rhai
+│           ├── no_select_all.rhai
+│           ├── no_delete_update_without_where.rhai
+│           ├── insert_columns_required.rhai
+│           ├── subquery_alias_required.rhai
+│           ├── column_references_qualified.rhai
+│           ├── no_join_without_condition.rhai
+│           ├── no_unused_join.rhai
+│           ├── no_unused_cte.rhai
+│           ├── use_is_null.rhai
+│           ├── use_coalesce.rhai
+│           ├── no_order_by_in_subquery.rhai
+│           ├── union_all_preferred.rhai
+│           ├── no_nested_case.rhai
+│           └── no_constant_where.rhai
 ├── tests/
 │   └── integration_test.rs  # 集成测试（含 Mapper 模式）
 ├── sqlguard.toml.example    # 完整配置示例
@@ -380,28 +397,35 @@ sqlguard check ./sql --groups ddl-safety --exclude-rules DDL003
 规则使用 [Rhai](https://rhai.rs/) 编写，引擎为每个 SQL 单元注入两个全局变量：
 
 - `context` — 包含 `sql_content`、`file_path`、`script_type`、`ast` 等字段
-- `violations` — 空数组，脚本通过 `push()` 上报违规
+- `violations` — 空数组，脚本通过 `violations.push(...)` 上报违规
+
+**公共辅助函数**（`config/rules/lib/helpers.rhai`）由引擎编译时嵌入并在每条脚本执行前自动 prepend，规则脚本无需 import 即可直接调用：
+
+| 函数 | 返回值 | 说明 |
+|------|--------|------|
+| `guard_parse_error(context)` | bool | AST 是否有解析错误 |
+| `parse_error_violation(context)` | Map | 构建 parse error violation |
+| `violation(msg, line, col)` | Map | 构建带行列号的 violation |
+| `violation_line(msg, line)` | Map | 构建仅带行号的 violation |
+| `violation_msg(msg)` | String | 构建纯消息 violation |
 
 ### 最小示例
 
 ```rhai
-let ast = context["ast"];
-
-if ast.has_parse_error() {
-    violations.push(#{
-        "message": "SQL parse error: " + ast.parse_error(),
-        "line": 1
-    });
+// 检查解析错误 + 遍历语句
+if guard_parse_error(context) {
+    violations.push(parse_error_violation(context));
+    return;
 }
 
+let ast = context["ast"];
 for s in ast.statements() {
     if s.kind() == "DROP_TABLE" {
         let d = s.drop_object();
-        violations.push(#{
-            "message": "DROP TABLE not allowed: " + d.name(),
-            "line": s.line(),
-            "column": s.column()
-        });
+        violations.push(violation(
+            "DROP TABLE not allowed: " + d.name(),
+            s.line(), s.column()
+        ));
     }
 }
 ```
