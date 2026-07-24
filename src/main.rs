@@ -447,7 +447,7 @@ fn run_init(target_dir: &Path) -> Result<(), SqlGuardError> {
     println!("  - sqlguard.toml");
     println!("  - config/rules/ddl/no_drop_table.rhai");
     println!("  - config/rules/ddl/primary_key_required.rhai");
-    println!("  - config/rules/dml/ (13 rule files)");
+    println!("  - config/rules/dml/ (14 rule files)");
     println!();
     println!("Run: sqlguard check <project_path>");
     Ok(())
