@@ -4,29 +4,22 @@
 // !has_limit() && !has_offset() && !has_fetch()。
 // 修复了旧版字符串扫描的两个误报：
 //   1. OVER(ORDER BY ...) 窗口函数 —— AST 中窗口函数的 ORDER BY 不在子查询层
-//   2. ") ORDER BY" 模式在括号外（最外层查询，本就允许）
+//   2. ") ORDER BY" 模式在括号外（最外层查询，本来就允许）
 // SQLFluff AM03 等效规则。
 
-let ast = context["ast"];
-
-if ast.has_parse_error() {
-    violations.push(#{
-        "message": "SQL parse error: " + ast.parse_error(),
-        "line": 1
-    });
+if guard_parse_error(context) {
+    violations.push(parse_error_violation(context));
+    return;
 }
+
+let ast = context["ast"];
 
 // 递归检查单个 SelectInfo 及其子查询
 fn check_subquery(sel) {
     for sub in sel.subqueries() {
         if sub.has_order_by() && !sub.has_limit() && !sub.has_offset() && !sub.has_fetch() {
-            violations.push(#{
-                "message": "ORDER BY in subquery is typically ignored unless combined with LIMIT/OFFSET. Consider moving ORDER BY to the outer query.",
-                "line": 1
-            });
             return true;
         }
-        // 递归下钻
         if check_subquery(sub) {
             return true;
         }
@@ -36,6 +29,9 @@ fn check_subquery(sel) {
 
 for s in ast.statements() {
     if s.has_select() {
-        check_subquery(s.select());
+        let found = check_subquery(s.select());
+        if found {
+            violations.push(violation_line("ORDER BY in subquery is typically ignored unless combined with LIMIT/OFFSET. Consider moving ORDER BY to the outer query.", 1));
+        }
     }
 }

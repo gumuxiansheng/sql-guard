@@ -5,9 +5,7 @@
 // SQLFluff ST10 等效规则。
 
 let sql = context["sql_content"];
-let upper = sql.to_upper();
 
-// 检查 WHERE 后的常量条件
 let patterns = [
     "WHERE 1=1",
     "WHERE 1 = 1",
@@ -27,10 +25,7 @@ for line in lines {
     let uline = line.to_upper();
     for pat in patterns {
         if uline.contains(pat) {
-            violations.push(#{
-                "message": "Constant condition '" + pat + "' found in WHERE clause. This is likely dead code or a debugging artifact. Remove it.",
-                "line": line_num
-            });
+            violations.push(violation_line("Constant condition '" + pat + "' found in WHERE clause. This is likely dead code or a debugging artifact. Remove it.", line_num));
         }
     }
     line_num += 1;

@@ -3,23 +3,18 @@
 // 基于 AST：通过 sel.ctes() 提取所有 CTE 名称，再检查名称是否在
 // 主查询的 projection / where_clause / from_table / from_table_alias / joins
 // 中被引用。相比早期字符串 split(" AS (") 启发式，AST 方案能精确处理
-// 多 CTE、递归 CTE、列别名等场景。
-// SQLFluff ST03 等效规则。
+// 多 CTE、递归 CTE、列别名等场景。SQLFluff ST03 等效规则。
 
-let ast = context["ast"];
-
-if ast.has_parse_error() {
-    violations.push(#{
-        "message": "SQL parse error: " + ast.parse_error(),
-        "line": 1
-    });
+if guard_parse_error(context) {
+    violations.push(parse_error_violation(context));
+    return;
 }
 
+let ast = context["ast"];
 for s in ast.statements() {
     if s.has_select() {
         let sel = s.select();
         if sel.has_cte() {
-            // 收集主查询可见文本：projection + where + from + joins + having
             let visible = "";
             for col in sel.projection() {
                 visible += " " + col;
@@ -32,7 +27,6 @@ for s in ast.statements() {
                 visible += " " + j.alias();
                 visible += " " + j.condition_text();
             }
-            // 子查询中也算引用（CTE 可能被嵌套子查询用到）
             for sub in sel.subqueries() {
                 for col in sub.projection() {
                     visible += " " + col;
@@ -49,16 +43,11 @@ for s in ast.statements() {
 
             for cte in sel.ctes() {
                 let cte_name = cte.name().to_upper();
-                // 空名或递归 CTE 自引用场景跳过
                 if cte_name == "" {
                     continue;
                 }
                 if !upper_visible.contains(cte_name) {
-                    violations.push(#{
-                        "message": "CTE '" + cte.name() + "' is defined but not referenced in the main query or its subqueries. Remove unused CTE.",
-                        "line": s.line(),
-                        "column": s.column()
-                    });
+                    violations.push(violation("CTE '" + cte.name() + "' is defined but not referenced in the main query or its subqueries. Remove unused CTE.", s.line(), s.column()));
                 }
             }
         }
