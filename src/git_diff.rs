@@ -25,12 +25,17 @@ pub struct FileDiff {
 /// 调用 `git diff --unified=0 base...HEAD` 并解析。
 ///
 /// `path_patterns` 用于限制 diff 范围（如 `*.sql`、`src/main/resources/mapper/**/*.xml`）。
+///
+/// 显式指定 `--src-prefix=a/ --dst-prefix=b/`，强制 `+++ b/path` 前缀格式，
+/// 不受用户 `diff.noprefix` 等配置影响——解析器依赖此前缀提取文件路径。
 pub fn get_diff(base: &str, path_patterns: &[&str]) -> Result<Vec<FileDiff>, SqlGuardError> {
     let mut cmd = Command::new("git");
     cmd.args([
         "diff",
         "--unified=0",
         "--diff-filter=d",
+        "--src-prefix=a/",
+        "--dst-prefix=b/",
         &format!("{}...HEAD", base),
     ]);
     if !path_patterns.is_empty() {

@@ -892,6 +892,81 @@ fn test_check_diff_new_file_all_checked() {
 }
 
 #[test]
+fn test_check_diff_with_diff_noprefix_config() {
+    // 回归测试：用户设置 `git config diff.noprefix true` 后，
+    // git diff 输出 `+++ path` 而非 `+++ b/path`。
+    // 解析器依赖 `+++ b/` 前缀提取路径，若无前缀会返回空列表，
+    // 导致 check-diff 报 "No SQL changes detected" / files_checked = 0。
+    // 修复：get_diff 显式传 `--src-prefix=a/ --dst-prefix=b/` 强制前缀。
+    if !require_git() { return; }
+    let dir = "/tmp/sqlguard-test-diff-noprefix";
+    let _ = std::fs::remove_dir_all(dir);
+
+    Command::new("git").args(["init", dir]).output().expect("git init");
+    Command::new("git").current_dir(dir).args(["config", "user.email", "t@t.com"]).output().expect("git config");
+    Command::new("git").current_dir(dir).args(["config", "user.name", "T"]).output().expect("git config");
+    // 关键：设置 noprefix，模拟用户全局配置
+    Command::new("git").current_dir(dir).args(["config", "diff.noprefix", "true"]).output().expect("git config diff.noprefix");
+
+    Command::new(&binary_abs_path()).args(["init", dir]).output().expect("sqlguard init");
+
+    // 初始：规范查询
+    std::fs::create_dir_all(format!("{}/sql/dml", dir)).unwrap();
+    std::fs::write(
+        format!("{}/sql/dml/001.sql", dir),
+        "SELECT id FROM users;\n",
+    ).unwrap();
+    Command::new("git").current_dir(dir).args(["add", "."]).output().expect("git add");
+    Command::new("git").current_dir(dir).args(["commit", "-m", "initial"]).output().expect("git commit");
+
+    // 改动：引入 SELECT * 违规
+    std::fs::write(
+        format!("{}/sql/dml/001.sql", dir),
+        "SELECT * FROM users;\n",
+    ).unwrap();
+    Command::new("git").current_dir(dir).args(["add", "."]).output().expect("git add");
+    Command::new("git").current_dir(dir).args(["commit", "-m", "add violation"]).output().expect("git commit");
+
+    let output = Command::new(&binary_abs_path())
+        .current_dir(dir)
+        .args([
+            "check-diff",
+            "--base", "HEAD~1",
+            "-c", &format!("{}/sqlguard.toml", dir),
+            "-f", "json",
+            "-o", dir,
+        ])
+        .output()
+        .expect("sqlguard check-diff");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("No SQL changes detected"),
+        "noprefix=true should not cause empty diff (fix: --src-prefix/--dst-prefix): {}",
+        stderr
+    );
+    assert!(stderr.contains("JSON report saved"), "JSON report should be saved: {}", stderr);
+
+    let report_path = format!("{}/sqlguard-report.json", dir);
+    let content = std::fs::read_to_string(&report_path).unwrap();
+    let json: serde_json::Value = serde_json::from_str(&content).unwrap();
+    let files_checked = json["files_checked"].as_u64().unwrap_or(0);
+    let total = json["summary"]["total_violations"].as_u64().unwrap_or(0);
+    assert_eq!(
+        files_checked, 1,
+        "noprefix=true: should still detect 1 changed file: {}",
+        content
+    );
+    assert!(
+        total >= 1,
+        "noprefix=true: should still detect SELECT * violation: {}",
+        content
+    );
+
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn test_check_ast_capability_upgrades() {
     // 验证 AST 能力补全（P0-P3）后三条规则脚本的升级效果：
     //   DML102 no_unused_cte：基于 AST 的 ctes() 检测
