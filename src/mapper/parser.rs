@@ -95,7 +95,8 @@ fn extract_statements(
                     continue;
                 }
                 let with_includes = resolve_includes(&raw_sql, fragments)?;
-                let processed = normalize_placeholders(&with_includes);
+                let with_where = process_where_markers(&with_includes);
+                let processed = normalize_placeholders(&with_where);
                 results.push(ExtractedSql {
                     statement_id: stmt_id,
                     statement_type: name,
@@ -197,8 +198,13 @@ impl<'a> XmlScanner<'a> {
                         return Ok(out);
                     }
                 }
-                Event::Start(_) => {
-                    // 动态标签开始：剥离标签本身，其内部文本由后续 Text 事件收集
+                Event::Start(e) => {
+                    // <where> 标签：MyBatis 会自动插入 WHERE 关键字并去掉首个 AND/OR，
+                    // 这里先埋 marker，后续 process_where_markers 统一处理
+                    if lowercased_name(&e) == "where" {
+                        out.push_str("__WHERE__");
+                    }
+                    // 其他动态标签（if/foreach/set/trim 等）：剥离标签本身，内部文本保留
                 }
                 _ => {}
             }
@@ -232,6 +238,52 @@ fn extract_attr(
         }
     }
     Ok(None)
+}
+
+/// 将 `__WHERE__` marker 替换为 `WHERE `，并去除紧跟在后的第一个 `AND`/`OR`。
+///
+/// MyBatis 的 `<where>` 标签行为：
+/// - 若内部内容非空，插入 `WHERE` 关键字
+/// - 去除内容开头的 `AND` 或 `OR`（忽略前导空白）
+fn process_where_markers(s: &str) -> String {
+    const MARKER: &str = "__WHERE__";
+    let mut result = String::with_capacity(s.len() + 16);
+    let mut remaining = s;
+    loop {
+        match remaining.find(MARKER) {
+            None => {
+                result.push_str(remaining);
+                break;
+            }
+            Some(pos) => {
+                result.push_str(&remaining[..pos]);
+                result.push_str("WHERE ");
+                let after_marker = &remaining[pos + MARKER.len()..];
+                let after_ws = after_marker.trim_start();
+                // Strip leading AND or OR (case-insensitive, after optional whitespace)
+                let upper_4: String = after_ws.chars().take(4).flat_map(|c| c.to_uppercase()).collect();
+                let stripped = if upper_4.starts_with("AND ") {
+                    Some(4)
+                } else if upper_4.starts_with("OR ") {
+                    Some(3)
+                } else if after_ws.len() <= 3 && upper_4.trim_end().eq_ignore_ascii_case("AND") {
+                    Some(after_ws.len())
+                } else if after_ws.len() <= 2 && upper_4.trim_end().eq_ignore_ascii_case("OR") {
+                    Some(after_ws.len())
+                } else {
+                    None
+                };
+                if let Some(skip) = stripped {
+                    // Strip whitespace AND the AND/OR keyword
+                    remaining = &after_ws[skip..];
+                } else {
+                    // No AND/OR to strip; whitespace already consumed by "WHERE " suffix
+                    remaining = after_ws;
+                }
+            }
+        }
+    }
+    result
 }
 
 #[cfg(test)]
@@ -289,8 +341,10 @@ mod tests {
         std::fs::write(&path, xml).unwrap();
         let result = extract_sql_from_xml(&path).unwrap();
         assert_eq!(result.len(), 1);
-        // 动态标签应被剥离，文本保留
-        assert!(result[0].processed_sql.contains("AND name LIKE ?"));
+        // 动态标签应被剥离，文本保留；<where> 会插入 WHERE 并去除首个 AND
+        assert!(result[0].processed_sql.contains("WHERE"));
+        assert!(result[0].processed_sql.contains("name LIKE ?"));
+        assert!(!result[0].processed_sql.contains("AND name LIKE ?"));
         assert!(!result[0].processed_sql.contains("<if"));
         assert!(!result[0].processed_sql.contains("<where"));
     }
@@ -309,6 +363,80 @@ mod tests {
         assert_eq!(result.len(), 1);
         assert!(result[0].processed_sql.contains("id, name, email"));
         assert!(!result[0].processed_sql.contains("<include"));
+    }
+
+    #[test]
+    fn where_tag_inserts_where_keyword() {
+        let xml = r#"<mapper>
+  <delete id="deleteByCond">
+    DELETE FROM users
+    <where>
+      <if test="name != null">AND name LIKE #{name}</if>
+    </where>
+  </delete>
+</mapper>"#;
+        let path = std::env::temp_dir().join("sqlguard_parser_test_where1.xml");
+        std::fs::write(&path, xml).unwrap();
+        let result = extract_sql_from_xml(&path).unwrap();
+        assert_eq!(result.len(), 1);
+        let sql = result[0].processed_sql.trim();
+        // Must contain WHERE keyword (inserted by the fix)
+        assert!(sql.contains("WHERE"), "processed_sql should contain WHERE: {}", sql);
+        // First AND after WHERE should be stripped
+        assert!(!sql.contains("WHERE AND"), "WHERE AND should not appear: {}", sql);
+        assert!(!sql.contains("WHERE\nAND"), "WHERE\\nAND should not appear: {}", sql);
+    }
+
+    #[test]
+    fn where_tag_with_include_preserves_where() {
+        let xml = r#"<mapper>
+  <sql id="cond">AND status = #{status}</sql>
+  <delete id="deleteByInclude">
+    DELETE FROM users
+    <where>
+      <include refid="cond"/>
+    </where>
+  </delete>
+</mapper>"#;
+        let path = std::env::temp_dir().join("sqlguard_parser_test_where2.xml");
+        std::fs::write(&path, xml).unwrap();
+        let result = extract_sql_from_xml(&path).unwrap();
+        assert_eq!(result.len(), 1);
+        let sql = result[0].processed_sql.trim();
+        assert!(sql.contains("WHERE"), "processed_sql should contain WHERE: {}", sql);
+        // The AND from the include should be stripped
+        assert!(!sql.contains("WHERE AND"), "WHERE AND should not appear: {}", sql);
+        assert!(sql.contains("WHERE status"), "should have WHERE status: {}", sql);
+    }
+
+    #[test]
+    fn where_tag_no_and_or() {
+        let xml = r#"<mapper>
+  <select id="findByStatus">
+    SELECT * FROM users
+    <where>
+      status = #{status}
+    </where>
+  </select>
+</mapper>"#;
+        let path = std::env::temp_dir().join("sqlguard_parser_test_where3.xml");
+        std::fs::write(&path, xml).unwrap();
+        let result = extract_sql_from_xml(&path).unwrap();
+        assert_eq!(result.len(), 1);
+        let sql = result[0].processed_sql.trim();
+        assert!(sql.contains("WHERE"), "processed_sql should contain WHERE: {}", sql);
+        assert!(sql.contains("status = ?"), "should have status = ?: {}", sql);
+    }
+
+    #[test]
+    fn process_where_markers_strips_first_and() {
+        assert_eq!(process_where_markers("__WHERE__ AND name = ?"), "WHERE name = ?");
+        assert_eq!(process_where_markers("__WHERE__AND name = ?"), "WHERE name = ?");
+        assert_eq!(process_where_markers("__WHERE__\n  AND name = ?"), "WHERE name = ?");
+        assert_eq!(process_where_markers("__WHERE__ OR name = ?"), "WHERE name = ?");
+        assert_eq!(process_where_markers("__WHERE__ name = ?"), "WHERE name = ?");
+        assert_eq!(process_where_markers("__WHERE__ and name = ?"), "WHERE name = ?");
+        assert_eq!(process_where_markers("__WHERE__"), "WHERE ");
     }
 
     #[test]
