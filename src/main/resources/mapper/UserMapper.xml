@@ -4,4 +4,7 @@
     <select id="selectAll">
         SELECT * FROM users
     </select>
+    <insert id="insertBad">
+        INSERT INTO users VALUES (1, 'a')
+    </insert>
 </mapper>
