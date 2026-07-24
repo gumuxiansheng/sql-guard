@@ -1,0 +1,22 @@
+[structure]
+paths = ["src/main/resources/mapper"]
+
+[classification]
+default_type = "sql"
+
+[[rules]]
+id = "DML001"
+name = "no_select_all"
+group = "dml-safety"
+enabled = true
+script_path = "config/rules/dml/no_select_all.rhai"
+applies_to = ["dml"]
+severity = "error"
+
+[mapper]
+enabled = true
+paths = ["src/main/resources/mapper"]
+patterns = ["**/*Mapper.xml"]
+
+[output]
+formats = ["json"]
