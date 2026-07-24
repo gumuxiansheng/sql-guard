@@ -6,6 +6,7 @@ mod rule;
 mod reporter;
 mod mapper;
 mod git_diff;
+mod replay_export;
 
 use std::path::{Path, PathBuf};
 use std::fs;
@@ -70,6 +71,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 &exclude_rules,
                 &exclude_groups,
             )?;
+        }
+        Commands::ReplayExport {
+            path,
+            config: config_path,
+            output_dir,
+            types,
+        } => {
+            run_replay_export(&path, &config_path, &output_dir, &types)?;
         }
     }
 
@@ -224,6 +233,57 @@ fn run_check(
     } else {
         Ok(())
     }
+}
+
+// ===== run_replay_export =====
+
+fn run_replay_export(
+    target_dir: &Path,
+    config_path: &Path,
+    output_dir: &Path,
+    types: &Option<String>,
+) -> Result<(), SqlGuardError> {
+    let (config, _config_dir) = load_config(config_path)?;
+
+    let absolute_target = resolve_absolute_path(target_dir);
+
+    let effective_scan_paths: Vec<String> = if !config.scan.paths.is_empty() {
+        config.scan.paths.clone()
+    } else {
+        config.structure.paths.clone()
+    };
+    let exclude_dirs: &[String] = &config.scan.exclude_dirs;
+
+    let sql_files = classification::collect_sql_files(&absolute_target, &effective_scan_paths, exclude_dirs);
+    let mapper_files = mapper::collect_mapper_files(&absolute_target, &config.mapper, exclude_dirs);
+
+    let type_filter = replay_export::parse_type_filter(types);
+
+    let manifest = replay_export::build_manifest(
+        &absolute_target,
+        &sql_files,
+        &mapper_files,
+        &type_filter,
+    )?;
+
+    let json = replay_export::manifest_to_json(&manifest)?;
+
+    let output_dir_abs = resolve_absolute_path(output_dir);
+    if !output_dir_abs.exists() {
+        fs::create_dir_all(&output_dir_abs).map_err(SqlGuardError::IoError)?;
+    }
+    let manifest_path = output_dir_abs.join("sql-manifest.json");
+    fs::write(&manifest_path, &json).map_err(SqlGuardError::IoError)?;
+
+    eprintln!(
+        "Replay manifest exported: {} ({} statements, {} sql files, {} mapper files)",
+        manifest_path.display(),
+        manifest.statement_count,
+        sql_files.len(),
+        mapper_files.len(),
+    );
+
+    Ok(())
 }
 
 // ===== run_check_diff =====
@@ -422,6 +482,10 @@ fn run_init(target_dir: &Path) -> Result<(), SqlGuardError> {
     let rules: &[(&str, &str, &str)] = &[
         ("no_drop_table", "ddl", include_str!("../config/rules/ddl/no_drop_table.rhai")),
         ("primary_key_required", "ddl", include_str!("../config/rules/ddl/primary_key_required.rhai")),
+        ("no_reserved_keyword_naming", "ddl", include_str!("../config/rules/ddl/no_reserved_keyword_naming.rhai")),
+        ("backup_table_naming", "ddl", include_str!("../config/rules/ddl/backup_table_naming.rhai")),
+        ("index_naming_convention", "ddl", include_str!("../config/rules/ddl/index_naming_convention.rhai")),
+        ("no_redundant_index", "ddl", include_str!("../config/rules/ddl/no_redundant_index.rhai")),
         ("no_select_all", "dml", include_str!("../config/rules/dml/no_select_all.rhai")),
         ("no_delete_update_without_where", "dml", include_str!("../config/rules/dml/no_delete_update_without_where.rhai")),
         ("insert_columns_required", "dml", include_str!("../config/rules/dml/insert_columns_required.rhai")),
@@ -445,8 +509,7 @@ fn run_init(target_dir: &Path) -> Result<(), SqlGuardError> {
 
     println!("Initialized SqlGuard configuration in {}", target_dir.display());
     println!("  - sqlguard.toml");
-    println!("  - config/rules/ddl/no_drop_table.rhai");
-    println!("  - config/rules/ddl/primary_key_required.rhai");
+    println!("  - config/rules/ddl/ (6 rule files)");
     println!("  - config/rules/dml/ (14 rule files)");
     println!();
     println!("Run: sqlguard check <project_path>");
@@ -500,6 +563,46 @@ fn generate_default_config() -> Config {
                 description: Some("CREATE TABLE must have a PRIMARY KEY".to_string()),
                 enabled: true,
                 script_path: "config/rules/ddl/primary_key_required.rhai".into(),
+                applies_to: vec!["ddl".to_string()],
+                severity: "warning".to_string(),
+            },
+            crate::config::RuleConfig {
+                id: "DDL003".to_string(),
+                name: "no_reserved_keyword_naming".to_string(),
+                group: Some("ddl-safety".to_string()),
+                description: Some("Database object names must not use SQL reserved keywords".to_string()),
+                enabled: true,
+                script_path: "config/rules/ddl/no_reserved_keyword_naming.rhai".into(),
+                applies_to: vec!["ddl".to_string()],
+                severity: "error".to_string(),
+            },
+            crate::config::RuleConfig {
+                id: "DDL004".to_string(),
+                name: "backup_table_naming".to_string(),
+                group: Some("ddl-convention".to_string()),
+                description: Some("Backup tables created via CREATE TABLE AS SELECT must be prefixed with 'bks_'".to_string()),
+                enabled: true,
+                script_path: "config/rules/ddl/backup_table_naming.rhai".into(),
+                applies_to: vec!["ddl".to_string()],
+                severity: "warning".to_string(),
+            },
+            crate::config::RuleConfig {
+                id: "DDL005".to_string(),
+                name: "index_naming_convention".to_string(),
+                group: Some("ddl-convention".to_string()),
+                description: Some("Indexes follow idx_/uk_/pk_ naming convention based on type and columns".to_string()),
+                enabled: true,
+                script_path: "config/rules/ddl/index_naming_convention.rhai".into(),
+                applies_to: vec!["ddl".to_string()],
+                severity: "warning".to_string(),
+            },
+            crate::config::RuleConfig {
+                id: "DDL006".to_string(),
+                name: "no_redundant_index".to_string(),
+                group: Some("ddl-performance".to_string()),
+                description: Some("Avoid redundant indexes (duplicate PK indexes and leftmost-prefix duplicates)".to_string()),
+                enabled: true,
+                script_path: "config/rules/ddl/no_redundant_index.rhai".into(),
                 applies_to: vec!["ddl".to_string()],
                 severity: "warning".to_string(),
             },
@@ -713,6 +816,46 @@ group = "ddl-safety"
 description = "CREATE TABLE must have a PRIMARY KEY"
 enabled = true
 script_path = "config/rules/ddl/primary_key_required.rhai"
+applies_to = ["ddl"]
+severity = "warning"
+
+[[rules]]
+id = "DDL003"
+name = "no_reserved_keyword_naming"
+group = "ddl-safety"
+description = "Database object names must not use SQL reserved keywords"
+enabled = true
+script_path = "config/rules/ddl/no_reserved_keyword_naming.rhai"
+applies_to = ["ddl"]
+severity = "error"
+
+[[rules]]
+id = "DDL004"
+name = "backup_table_naming"
+group = "ddl-convention"
+description = "Backup tables created via CREATE TABLE AS SELECT must be prefixed with 'bks_'"
+enabled = true
+script_path = "config/rules/ddl/backup_table_naming.rhai"
+applies_to = ["ddl"]
+severity = "warning"
+
+[[rules]]
+id = "DDL005"
+name = "index_naming_convention"
+group = "ddl-convention"
+description = "Indexes follow idx_/uk_/pk_ naming convention based on type and columns"
+enabled = true
+script_path = "config/rules/ddl/index_naming_convention.rhai"
+applies_to = ["ddl"]
+severity = "warning"
+
+[[rules]]
+id = "DDL006"
+name = "no_redundant_index"
+group = "ddl-performance"
+description = "Avoid redundant indexes (duplicate PK indexes and leftmost-prefix duplicates)"
+enabled = true
+script_path = "config/rules/ddl/no_redundant_index.rhai"
 applies_to = ["ddl"]
 severity = "warning"
 

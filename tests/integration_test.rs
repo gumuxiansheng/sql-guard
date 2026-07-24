@@ -1385,3 +1385,383 @@ fn test_check_diff_no_changes() {
 
     let _ = std::fs::remove_dir_all(dir);
 }
+
+#[test]
+fn test_check_dml007_order_by_required_for_pagination() {
+    let dir = "/tmp/sqlguard-test-dml007";
+    let _ = std::fs::remove_dir_all(dir);
+
+    std::fs::create_dir_all(format!("{}/sql/dml", dir)).unwrap();
+    std::fs::create_dir_all(format!("{}/config/rules/dml", dir)).unwrap();
+
+    let rule_src = std::env::current_dir()
+        .unwrap()
+        .join("config/rules/dml/order_by_required_for_pagination.rhai");
+    std::fs::write(
+        format!("{}/config/rules/dml/order_by_required_for_pagination.rhai", dir),
+        std::fs::read_to_string(&rule_src).unwrap(),
+    )
+    .unwrap();
+
+    // A: LIMIT + ORDER BY → 合规
+    std::fs::write(
+        format!("{}/sql/dml/a_limit_with_order.sql", dir),
+        "SELECT id, name FROM users ORDER BY id LIMIT 10;\n",
+    )
+    .unwrap();
+    // B: LIMIT 无 ORDER BY → 违规
+    std::fs::write(
+        format!("{}/sql/dml/b_limit_no_order.sql", dir),
+        "SELECT id, name FROM users LIMIT 10;\n",
+    )
+    .unwrap();
+    // C: OFFSET + FETCH 无 ORDER BY → 违规
+    std::fs::write(
+        format!("{}/sql/dml/c_offset_fetch_no_order.sql", dir),
+        "SELECT id, name FROM users OFFSET 5 ROWS FETCH NEXT 10 ROWS ONLY;\n",
+    )
+    .unwrap();
+    // D: LIMIT 无 ORDER BY + RANDOM_ORDER 注释 → 合规（豁免）
+    std::fs::write(
+        format!("{}/sql/dml/d_random_order_hint.sql", dir),
+        "-- RANDOM_ORDER\nSELECT id, name FROM users LIMIT 10;\n",
+    )
+    .unwrap();
+    // E: LIMIT + ORDER BY + OFFSET → 合规
+    std::fs::write(
+        format!("{}/sql/dml/e_full_pagination.sql", dir),
+        "SELECT id, name FROM users ORDER BY id LIMIT 10 OFFSET 20;\n",
+    )
+    .unwrap();
+    // F: 无 LIMIT/OFFSET → 合规
+    std::fs::write(
+        format!("{}/sql/dml/f_no_pagination.sql", dir),
+        "SELECT id, name FROM users;\n",
+    )
+    .unwrap();
+
+    std::fs::write(
+        format!("{}/sqlguard.toml", dir),
+        r#"
+[structure]
+paths = ["sql/dml"]
+strict = false
+
+[classification]
+default_type = "sql"
+
+[[classification.rules]]
+name = "dml-by-dir"
+pattern = "**/dml/**"
+type = "dml"
+priority = 10
+
+[[rules]]
+id = "DML007"
+name = "order_by_required_for_pagination"
+group = "dml-safety"
+enabled = true
+script_path = "config/rules/dml/order_by_required_for_pagination.rhai"
+applies_to = ["dml"]
+severity = "error"
+
+[output]
+formats = ["json"]
+"#,
+    )
+    .unwrap();
+
+    let output = Command::new(&binary_abs_path())
+        .args([
+            "check",
+            dir,
+            "-c",
+            &format!("{}/sqlguard.toml", dir),
+            "-f",
+            "json",
+            "-o",
+            dir,
+        ])
+        .output()
+        .expect("Failed to run sqlguard check");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("JSON report saved"),
+        "JSON report should be saved: {}",
+        stderr
+    );
+
+    let report_path = format!("{}/sqlguard-report.json", dir);
+    let content = std::fs::read_to_string(&report_path).unwrap();
+    let report: serde_json::Value = serde_json::from_str(&content).unwrap();
+
+    let mut by_file: std::collections::HashMap<String, std::collections::HashSet<String>> =
+        std::collections::HashMap::new();
+    if let Some(violations) = report["violations"].as_array() {
+        for v in violations {
+            let f = v["file"].as_str().unwrap().to_string();
+            let rid = v["rule_id"].as_str().unwrap().to_string();
+            by_file.entry(f).or_default().insert(rid);
+        }
+    }
+    let rules_of = |name: &str| -> std::collections::HashSet<String> {
+        by_file
+            .iter()
+            .find(|(f, _)| f.contains(name))
+            .map(|(_, s)| s.clone())
+            .unwrap_or_default()
+    };
+
+    assert!(
+        !rules_of("a_limit_with_order.sql").contains("DML007"),
+        "LIMIT with ORDER BY should NOT trigger DML007: {:?}",
+        rules_of("a_limit_with_order.sql")
+    );
+    assert!(
+        rules_of("b_limit_no_order.sql").contains("DML007"),
+        "LIMIT without ORDER BY should trigger DML007: {:?}",
+        rules_of("b_limit_no_order.sql")
+    );
+    assert!(
+        rules_of("c_offset_fetch_no_order.sql").contains("DML007"),
+        "OFFSET/FETCH without ORDER BY should trigger DML007: {:?}",
+        rules_of("c_offset_fetch_no_order.sql")
+    );
+    assert!(
+        !rules_of("d_random_order_hint.sql").contains("DML007"),
+        "RANDOM_ORDER comment should suppress DML007: {:?}",
+        rules_of("d_random_order_hint.sql")
+    );
+    assert!(
+        !rules_of("e_full_pagination.sql").contains("DML007"),
+        "Full pagination with ORDER BY should NOT trigger DML007: {:?}",
+        rules_of("e_full_pagination.sql")
+    );
+    assert!(
+        !rules_of("f_no_pagination.sql").contains("DML007"),
+        "Non-pagination query should NOT trigger DML007: {:?}",
+        rules_of("f_no_pagination.sql")
+    );
+
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn test_check_ddl003_to_ddl006_rules() {
+    // 验证四条新 DDL 规则：
+    //   DDL003 禁止使用 SQL 关键字命名数据库对象
+    //   DDL004 CTAS 备份表必须以 bks_ 开头（有注释说明的非备份表例外）
+    //   DDL005 索引命名规范 idx_/uk_/pk_
+    //   DDL006 避免冗余索引（与主键重复 / 最左前缀重复）
+    let dir = "/tmp/sqlguard-test-ddl003-006";
+    let _ = std::fs::remove_dir_all(dir);
+
+    std::fs::create_dir_all(format!("{}/sql/ddl", dir)).unwrap();
+    std::fs::create_dir_all(format!("{}/config/rules/ddl", dir)).unwrap();
+
+    // 从仓库复制四条规则脚本（集成测试在 crate 根目录运行）
+    let rule_dir = std::env::current_dir().unwrap().join("config/rules/ddl");
+    for r in [
+        "no_reserved_keyword_naming",
+        "backup_table_naming",
+        "index_naming_convention",
+        "no_redundant_index",
+    ] {
+        std::fs::write(
+            format!("{}/config/rules/ddl/{}.rhai", dir, r),
+            std::fs::read_to_string(rule_dir.join(format!("{}.rhai", r))).unwrap(),
+        )
+        .unwrap();
+    }
+
+    // 1) DDL003: 用关键字 `order`/`select` 命名表与列 → 应触发
+    std::fs::write(
+        format!("{}/sql/ddl/keyword_naming.sql", dir),
+        "CREATE TABLE `order` (`select` INT, id INT PRIMARY KEY);\n",
+    )
+    .unwrap();
+
+    // 2) DDL004: CTAS 无 bks_ 前缀且无注释 → 应触发；有 bks_ 前缀 → 不触发
+    std::fs::write(
+        format!("{}/sql/ddl/backup_naming.sql", dir),
+        "CREATE TABLE tmp_log AS SELECT 1 AS id;\n\
+         CREATE TABLE bks_log AS SELECT 1 AS id;\n",
+    )
+    .unwrap();
+
+    // 3) DDL005: 索引命名不符合 idx_/uk_/pk_ 规范 → 应触发
+    std::fs::write(
+        format!("{}/sql/ddl/index_naming.sql", dir),
+        "CREATE TABLE orders (\n\
+         id INT,\n\
+         user_id INT,\n\
+         CONSTRAINT wrong_pk PRIMARY KEY (id),\n\
+         KEY foo (user_id)\n\
+         );\n",
+    )
+    .unwrap();
+
+    // 4) DDL006: 与主键完全相同的索引 / 主键前缀索引 → 应触发
+    std::fs::write(
+        format!("{}/sql/ddl/redundant_index.sql", dir),
+        "CREATE TABLE products (\n\
+         a INT,\n\
+         b INT,\n\
+         c INT,\n\
+         PRIMARY KEY (a, b),\n\
+         KEY idx_a (a),\n\
+         KEY idx_ab (a, b)\n\
+         );\n",
+    )
+    .unwrap();
+
+    std::fs::write(
+        format!("{}/sqlguard.toml", dir),
+        r#"
+[structure]
+paths = ["sql/ddl"]
+strict = false
+
+[classification]
+default_type = "ddl"
+
+[[classification.rules]]
+name = "ddl-by-dir"
+pattern = "**/ddl/**"
+type = "ddl"
+priority = 10
+
+[[rules]]
+id = "DDL003"
+name = "no_reserved_keyword_naming"
+group = "ddl-safety"
+enabled = true
+script_path = "config/rules/ddl/no_reserved_keyword_naming.rhai"
+applies_to = ["ddl"]
+severity = "error"
+
+[[rules]]
+id = "DDL004"
+name = "backup_table_naming"
+group = "ddl-convention"
+enabled = true
+script_path = "config/rules/ddl/backup_table_naming.rhai"
+applies_to = ["ddl"]
+severity = "warning"
+
+[[rules]]
+id = "DDL005"
+name = "index_naming_convention"
+group = "ddl-convention"
+enabled = true
+script_path = "config/rules/ddl/index_naming_convention.rhai"
+applies_to = ["ddl"]
+severity = "warning"
+
+[[rules]]
+id = "DDL006"
+name = "no_redundant_index"
+group = "ddl-performance"
+enabled = true
+script_path = "config/rules/ddl/no_redundant_index.rhai"
+applies_to = ["ddl"]
+severity = "warning"
+
+[output]
+formats = ["json"]
+"#,
+    )
+    .unwrap();
+
+    let output = Command::new(&binary_abs_path())
+        .args([
+            "check",
+            dir,
+            "-c",
+            &format!("{}/sqlguard.toml", dir),
+            "-f",
+            "json",
+            "-o",
+            dir,
+        ])
+        .output()
+        .expect("Failed to run sqlguard check");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("JSON report saved"),
+        "JSON report should be saved: {}",
+        stderr
+    );
+
+    let report_path = format!("{}/sqlguard-report.json", dir);
+    let content = std::fs::read_to_string(&report_path).unwrap();
+    let report: serde_json::Value = serde_json::from_str(&content).unwrap();
+
+    // 收集每个文件触发的规则 id 集合
+    use std::collections::HashSet;
+    let mut rules_by_file: std::collections::HashMap<String, HashSet<String>> =
+        std::collections::HashMap::new();
+    if let Some(violations) = report["violations"].as_array() {
+        for v in violations {
+            if let (Some(file), Some(rule_id)) =
+                (v["file"].as_str(), v["rule_id"].as_str())
+            {
+                rules_by_file
+                    .entry(file.to_string())
+                    .or_default()
+                    .insert(rule_id.to_string());
+            }
+        }
+    }
+
+    let has_rule = |file_substr: &str, rule_id: &str| -> bool {
+        rules_by_file
+            .iter()
+            .any(|(f, rules)| f.contains(file_substr) && rules.contains(rule_id))
+    };
+
+    // DDL003: keyword_naming.sql 应触发
+    assert!(
+        has_rule("keyword_naming.sql", "DDL003"),
+        "keyword_naming.sql should trigger DDL003: {:?}",
+        rules_by_file
+    );
+
+    // DDL004: tmp_log(无 bks_) 应触发；bks_log(有 bks_) 不应触发
+    assert!(
+        has_rule("backup_naming.sql", "DDL004"),
+        "backup_naming.sql (tmp_log without bks_) should trigger DDL004: {:?}",
+        rules_by_file
+    );
+
+    // DDL005: index_naming.sql 应触发
+    assert!(
+        has_rule("index_naming.sql", "DDL005"),
+        "index_naming.sql should trigger DDL005: {:?}",
+        rules_by_file
+    );
+
+    // DDL006: redundant_index.sql 应触发
+    assert!(
+        has_rule("redundant_index.sql", "DDL006"),
+        "redundant_index.sql should trigger DDL006: {:?}",
+        rules_by_file
+    );
+
+    // 验证规则脚本未抛出执行错误（error 消息中不应含 "Rule execution error"）
+    if let Some(violations) = report["violations"].as_array() {
+        for v in violations {
+            if let Some(msg) = v["message"].as_str() {
+                assert!(
+                    !msg.contains("Rule execution error"),
+                    "Rule script error detected: {}",
+                    msg
+                );
+            }
+        }
+    }
+
+    let _ = std::fs::remove_dir_all(dir);
+}

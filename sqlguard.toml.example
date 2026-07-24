@@ -59,6 +59,46 @@ applies_to = ["ddl"]
 severity = "warning"
 
 [[rules]]
+id = "DDL003"
+name = "no_reserved_keyword_naming"
+group = "ddl-safety"
+description = "Database object names must not use SQL reserved keywords"
+enabled = true
+script_path = "config/rules/ddl/no_reserved_keyword_naming.rhai"
+applies_to = ["ddl"]
+severity = "error"
+
+[[rules]]
+id = "DDL004"
+name = "backup_table_naming"
+group = "ddl-convention"
+description = "Backup tables created via CREATE TABLE AS SELECT must be prefixed with 'bks_'"
+enabled = true
+script_path = "config/rules/ddl/backup_table_naming.rhai"
+applies_to = ["ddl"]
+severity = "warning"
+
+[[rules]]
+id = "DDL005"
+name = "index_naming_convention"
+group = "ddl-convention"
+description = "Indexes follow idx_/uk_/pk_ naming convention based on type and columns"
+enabled = true
+script_path = "config/rules/ddl/index_naming_convention.rhai"
+applies_to = ["ddl"]
+severity = "warning"
+
+[[rules]]
+id = "DDL006"
+name = "no_redundant_index"
+group = "ddl-performance"
+description = "Avoid redundant indexes (duplicate PK indexes and leftmost-prefix duplicates)"
+enabled = true
+script_path = "config/rules/ddl/no_redundant_index.rhai"
+applies_to = ["ddl"]
+severity = "warning"
+
+[[rules]]
 id = "DML001"
 name = "no_select_all"
 group = "dml-safety"
@@ -115,6 +155,16 @@ group = "dml-safety"
 description = "JOIN must have ON or USING condition"
 enabled = true
 script_path = "config/rules/dml/no_join_without_condition.rhai"
+applies_to = ["dml"]
+severity = "error"
+
+[[rules]]
+id = "DML007"
+name = "order_by_required_for_pagination"
+group = "dml-safety"
+description = "Pagination queries (LIMIT/OFFSET) must have ORDER BY"
+enabled = true
+script_path = "config/rules/dml/order_by_required_for_pagination.rhai"
 applies_to = ["dml"]
 severity = "error"
 

@@ -330,7 +330,12 @@ pub fn build_engine() -> Engine {
         c.columns().into_iter().map(|col| Dynamic::from(col)).collect()
     });
     engine.register_fn("has_primary_key", |c: &mut CreateInfo| c.has_primary_key());
+    engine.register_fn("primary_key_columns", |c: &mut CreateInfo| -> Array {
+        c.primary_key_columns().into_iter().map(Dynamic::from).collect()
+    });
+    engine.register_fn("primary_key_name", |c: &mut CreateInfo| c.primary_key_name());
     engine.register_fn("if_not_exists", |c: &mut CreateInfo| c.if_not_exists());
+    engine.register_fn("is_create_as", |c: &mut CreateInfo| c.is_create_as());
     engine.register_fn("column_names", |c: &mut CreateInfo| -> Array {
         c.column_names().into_iter().map(Dynamic::from).collect()
     });
@@ -474,6 +479,12 @@ pub fn build_engine() -> Engine {
     engine.register_fn("table_name", |a: &mut AlterTableInfo| a.table_name());
     engine.register_fn("adds_primary_key", |a: &mut AlterTableInfo| a.adds_primary_key());
     engine.register_fn("drops_primary_key", |a: &mut AlterTableInfo| a.drops_primary_key());
+    engine.register_fn("added_primary_key_columns", |a: &mut AlterTableInfo| -> Array {
+        a.added_primary_key_columns()
+            .into_iter()
+            .map(Dynamic::from)
+            .collect()
+    });
     engine.register_fn("operations", |a: &mut AlterTableInfo| -> Array {
         a.operations()
             .into_iter()

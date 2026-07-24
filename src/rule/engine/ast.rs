@@ -166,7 +166,16 @@ pub struct CreateInfo {
     pub table_name: String,
     pub columns: Vec<ColumnInfo>,
     pub has_primary_key: bool,
+    /// 主键列名列表（来自列级或表级 PRIMARY KEY 约束）。
+    /// 供冗余索引等规则判断"某索引是否与主键重复"。
+    pub primary_key_columns: Vec<String>,
+    /// 表级 PRIMARY KEY 约束名（如 `CONSTRAINT pk_xxx PRIMARY KEY (...)` 中的 `pk_xxx`）。
+    /// 列级 PK 或无名表级 PK 时为空字符串。
+    pub primary_key_name: String,
     pub if_not_exists: bool,
+    /// 是否为 `CREATE TABLE ... AS SELECT ...`（CTAS）。
+    /// 此类语句无显式列定义，列由 SELECT 结果决定。
+    pub is_create_as: bool,
     /// 表级 + 列级外键约束合并列表。
     pub foreign_keys: Vec<ForeignKeyInfo>,
     /// 表级 + 列级 CHECK 约束合并列表。
@@ -224,6 +233,8 @@ pub struct AlterTableInfo {
     pub adds_primary_key: bool,
     /// 是否包含 `DROP PRIMARY KEY`（移除已有主键）
     pub drops_primary_key: bool,
+    /// `ADD PRIMARY KEY (cols)` 中的列名列表，供冗余索引规则判断。
+    pub added_primary_key_columns: Vec<String>,
     pub operations: Vec<AlterOpInfo>,
 }
 
@@ -601,8 +612,20 @@ impl CreateInfo {
     pub fn has_primary_key(&self) -> bool {
         self.has_primary_key
     }
+    /// 主键列名列表（列级或表级 PRIMARY KEY 约束的列）。
+    pub fn primary_key_columns(&self) -> Vec<String> {
+        self.primary_key_columns.clone()
+    }
+    /// 表级 PRIMARY KEY 约束名，无名时返回空字符串。
+    pub fn primary_key_name(&self) -> String {
+        self.primary_key_name.clone()
+    }
     pub fn if_not_exists(&self) -> bool {
         self.if_not_exists
+    }
+    /// 是否为 `CREATE TABLE ... AS SELECT ...`（CTAS）。
+    pub fn is_create_as(&self) -> bool {
+        self.is_create_as
     }
     pub fn column_names(&self) -> Vec<String> {
         self.columns.iter().map(|c| c.name.clone()).collect()
@@ -891,6 +914,10 @@ impl AlterTableInfo {
     }
     pub fn drops_primary_key(&self) -> bool {
         self.drops_primary_key
+    }
+    /// `ADD PRIMARY KEY (cols)` 中的列名列表。
+    pub fn added_primary_key_columns(&self) -> Vec<String> {
+        self.added_primary_key_columns.clone()
     }
     pub fn operations(&self) -> Vec<AlterOpInfo> {
         self.operations.clone()

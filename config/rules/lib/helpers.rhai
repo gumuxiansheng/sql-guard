@@ -50,3 +50,17 @@ fn violation_line(message, line) {
 fn violation_msg(message) {
     message
 }
+
+/// 用分隔符把字符串数组拼接成单个字符串。
+/// Rhai 标准库的 Array 没有 `.join()` 方法，规则脚本统一调用本函数。
+/// 用法：join_strs(["a", "b"], "_") == "a_b"
+fn join_strs(arr, sep) {
+    let s = "";
+    let i = 0;
+    while i < arr.len() {
+        if i > 0 { s = s + sep; }
+        s = s + arr[i];
+        i = i + 1;
+    }
+    return s;
+}

@@ -125,11 +125,14 @@ pub(crate) fn convert_statement(stmt: &Statement, line: i64, column: i64, end_li
             columns,
             constraints,
             if_not_exists,
+            query,
             ..
         } => {
             let table_name = name.to_string();
             let mut cols = Vec::new();
             let mut pk_in_column = false;
+            let mut pk_columns: Vec<String> = Vec::new();
+            let mut pk_name = String::new();
             // 表级约束收集
             let mut foreign_keys = Vec::new();
             let mut checks = Vec::new();
@@ -164,6 +167,7 @@ pub(crate) fn convert_statement(stmt: &Statement, line: i64, column: i64, end_li
                             if *is_primary {
                                 info.is_primary_key = true;
                                 pk_in_column = true;
+                                pk_columns.push(col_def.name.to_string());
                             }
                         }
                         ColumnOption::Comment(s) => {
@@ -288,13 +292,15 @@ pub(crate) fn convert_statement(stmt: &Statement, line: i64, column: i64, end_li
                             column: None,
                         });
                     }
+                    TableConstraint::PrimaryKey { name, columns, .. } => {
+                        pk_columns = columns.iter().map(|i| i.to_string()).collect();
+                        pk_name = name.as_ref().map(|i| i.to_string()).unwrap_or_default();
+                    }
                     _ => {}
                 }
             }
 
-            let pk_in_constraint = constraints
-                .iter()
-                .any(|con| matches!(con, TableConstraint::PrimaryKey { .. }));
+            let pk_in_constraint = !pk_columns.is_empty();
 
             StmtInfo {
                 kind: "CREATE_TABLE".to_string(),
@@ -305,7 +311,10 @@ pub(crate) fn convert_statement(stmt: &Statement, line: i64, column: i64, end_li
                     table_name,
                     columns: cols,
                     has_primary_key: pk_in_column || pk_in_constraint,
+                    primary_key_columns: pk_columns,
+                    primary_key_name: pk_name,
                     if_not_exists: *if_not_exists,
+                    is_create_as: query.is_some(),
                     has_foreign_key: !foreign_keys.is_empty(),
                     has_check: !checks.is_empty(),
                     has_index: !indexes.is_empty(),
@@ -483,6 +492,7 @@ pub(crate) fn convert_statement(stmt: &Statement, line: i64, column: i64, end_li
             let table_name = name.to_string();
             let mut adds_primary_key = false;
             let mut drops_primary_key = false;
+            let mut added_pk_cols: Vec<String> = Vec::new();
             let mut op_infos = Vec::new();
 
             for op in operations {
@@ -490,7 +500,9 @@ pub(crate) fn convert_statement(stmt: &Statement, line: i64, column: i64, end_li
                     match op {
                         AlterTableOperation::AddConstraint(tc) => {
                             let (t, detail_str, is_pk) = match tc {
-                                TableConstraint::PrimaryKey { name, columns, .. } => (
+                                TableConstraint::PrimaryKey { name, columns, .. } => {
+                                    added_pk_cols = columns.iter().map(|i| i.to_string()).collect();
+                                    (
                                     "ADD_CONSTRAINT",
                                     format!(
                                         "ADD{} PRIMARY KEY ({})",
@@ -502,7 +514,8 @@ pub(crate) fn convert_statement(stmt: &Statement, line: i64, column: i64, end_li
                                             .join(", ")
                                     ),
                                     true,
-                                ),
+                                    )
+                                },
                                 TableConstraint::Unique { name, columns, .. } => (
                                     "ADD_CONSTRAINT",
                                     format!(
@@ -668,6 +681,7 @@ pub(crate) fn convert_statement(stmt: &Statement, line: i64, column: i64, end_li
                     table_name,
                     adds_primary_key,
                     drops_primary_key,
+                    added_primary_key_columns: added_pk_cols,
                     operations: op_infos,
                 }),
                 truncate: None,
