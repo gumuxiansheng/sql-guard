@@ -1,17 +1,20 @@
 // backup_table_naming.rhai (DDL004)
 // 通过 CREATE TABLE AS SELECT 创建的备份表表名必须以 bks_ 开头。
-// 如确有该语句生成的非备份表，需在该语句附近（同行或上一行）显式注释说明。
+// 如确有该语句生成的非备份表，必须在语句同行或上一行加显式注释 NOT_BACKUP 方可豁免
+// （仅写普通注释不足以豁免，防止随意绕过校验）。
 //
 // 反面案例（会被拦截）：
-//   -- 备份表却未以 bks_ 开头，且附近无豁免注释
+//   -- 非 bks_ 前缀，且无 NOT_BACKUP 豁免注释
 //   CREATE TABLE tmp_users AS SELECT * FROM users;
-//   CREATE TABLE users_20240101 AS SELECT * FROM users;
+//   -- 附近有普通注释但非 NOT_BACKUP，仍拦截
+//   -- 这是物化中间结果
+//   CREATE TABLE report_snapshot AS SELECT * FROM users;
 //
 // 正面案例（放行）：
 //   -- 以 bks_ 开头的备份表
 //   CREATE TABLE bks_users_20240101 AS SELECT * FROM users;
-//   -- 非备份用途：同行/上一行加注释说明即可豁免
-//   -- 物化中间结果，非备份表
+//   -- 同行/上一行显式 NOT_BACKUP 注释豁免
+//   -- NOT_BACKUP: 物化中间结果，非备份表
 //   CREATE TABLE report_snapshot AS SELECT * FROM users;
 
 if guard_parse_error(context) {
@@ -22,11 +25,13 @@ if guard_parse_error(context) {
 let ast = context["ast"];
 let comments = ast.comments();
 
-/// 检查指定行号附近（同行或上一行）是否存在注释。
-fn has_nearby_comment(stmt_line, comment_list) {
+/// 检查指定行号附近（同行或上一行）是否存在显式豁免注释（含 NOT_BACKUP，大小写不敏感）。
+fn has_nearby_not_backup_comment(stmt_line, comment_list) {
     for c in comment_list {
         if c.line() == stmt_line || c.line() == stmt_line - 1 {
-            return true;
+            if c.text().to_upper().contains("NOT_BACKUP") {
+                return true;
+            }
         }
     }
     return false;
@@ -51,8 +56,8 @@ for s in ast.statements() {
             }
             let lower = name.to_lower();
             if !lower.starts_with("bks_") {
-                if !has_nearby_comment(s.line(), comments) {
-                    violations.push(violation("Backup table created via CREATE TABLE AS SELECT must be named with 'bks_' prefix, or add a comment explaining it is not a backup table: " + tname, s.line(), s.column()));
+                if !has_nearby_not_backup_comment(s.line(), comments) {
+                    violations.push(violation("Backup table created via CREATE TABLE AS SELECT must be named with 'bks_' prefix, or add a comment containing 'NOT_BACKUP' on the same or previous line to mark it as not a backup table: " + tname, s.line(), s.column()));
                 }
             }
         }
