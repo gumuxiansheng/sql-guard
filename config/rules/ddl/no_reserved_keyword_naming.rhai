@@ -1,6 +1,17 @@
 // no_reserved_keyword_naming.rhai (DDL003)
 // 禁止使用 SQL 关键字进行数据库对象命名（表名、列名、索引名、视图名等）。
 // 使用关键字作为标识符会导致歧义、可移植性问题，并在某些数据库中需要转义。
+//
+// 反面案例（会被拦截）：
+//   -- SELECT / ORDER 等都是 SQL 关键字，作标识符需转义且易出错
+//   CREATE TABLE SELECT (id INT, name VARCHAR(100));
+//   CREATE TABLE users (order INT, group VARCHAR(100));
+//   CREATE INDEX INDEX ON users (id);
+//
+// 正面案例（放行）：
+//   CREATE TABLE user_orders (order_id INT, group_no VARCHAR(100));
+//   CREATE TABLE users (order_no INT, group_name VARCHAR(100));
+//   CREATE INDEX idx_users_id ON users (id);
 
 if guard_parse_error(context) {
     violations.push(parse_error_violation(context));

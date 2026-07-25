@@ -3,6 +3,14 @@
 // 原因：SQL 中 NULL = NULL 的结果是 NULL（不是 TRUE），
 // WHERE name = NULL 永远不会返回任何行，这是常见编码错误。
 // SQLFluff CV05 等效规则。
+//
+// 反面案例（会被拦截）：
+//   SELECT * FROM users WHERE name = NULL;     -- 永远返回空结果
+//   SELECT * FROM users WHERE name <> NULL;    -- 永远返回空结果
+//
+// 正面案例（放行）：
+//   SELECT * FROM users WHERE name IS NULL;
+//   SELECT * FROM users WHERE name IS NOT NULL;
 
 // 基于字符串匹配检查 "= NULL" / "<> NULL" / "!= NULL"
 let sql = context["sql_content"];

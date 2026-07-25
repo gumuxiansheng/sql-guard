@@ -1,6 +1,18 @@
 // backup_table_naming.rhai (DDL004)
 // 通过 CREATE TABLE AS SELECT 创建的备份表表名必须以 bks_ 开头。
-// 如确有该语句生成的非备份表，需在该语句附近（同行或上一行）显示注释说明。
+// 如确有该语句生成的非备份表，需在该语句附近（同行或上一行）显式注释说明。
+//
+// 反面案例（会被拦截）：
+//   -- 备份表却未以 bks_ 开头，且附近无豁免注释
+//   CREATE TABLE tmp_users AS SELECT * FROM users;
+//   CREATE TABLE users_20240101 AS SELECT * FROM users;
+//
+// 正面案例（放行）：
+//   -- 以 bks_ 开头的备份表
+//   CREATE TABLE bks_users_20240101 AS SELECT * FROM users;
+//   -- 非备份用途：同行/上一行加注释说明即可豁免
+//   -- 物化中间结果，非备份表
+//   CREATE TABLE report_snapshot AS SELECT * FROM users;
 
 if guard_parse_error(context) {
     violations.push(parse_error_violation(context));

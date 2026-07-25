@@ -4,6 +4,18 @@
 // 主查询的 projection / where_clause / from_table / from_table_alias / joins
 // 中被引用。相比早期字符串 split(" AS (") 启发式，AST 方案能精确处理
 // 多 CTE、递归 CTE、列别名等场景。SQLFluff ST03 等效规则。
+//
+// 反面案例（会被拦截）：
+//   WITH unused_cte AS (
+//       SELECT * FROM orders WHERE total > 100
+//   )
+//   SELECT id, name FROM users;            -- unused_cte 定义后从未被引用
+//
+// 正面案例（放行）：
+//   WITH active_users AS (
+//       SELECT id, name FROM users WHERE status = 'active'
+//   )
+//   SELECT * FROM active_users;
 
 if guard_parse_error(context) {
     violations.push(parse_error_violation(context));

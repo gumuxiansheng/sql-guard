@@ -4,6 +4,16 @@
 //   -- RANDOM_ORDER
 // 或
 //   /* RANDOM_ORDER */
+//
+// 反面案例（会被拦截）：
+//   SELECT id FROM users LIMIT 10;            -- 分页却无 ORDER BY，结果不确定
+//   SELECT id FROM users OFFSET 20;           -- OFFSET 分页同样需要 ORDER BY
+//
+// 正面案例（放行）：
+//   SELECT id FROM users ORDER BY id LIMIT 10;       -- 带 ORDER BY
+//   -- 明确需要随机顺序时，加注释豁免
+//   -- RANDOM_ORDER
+//   SELECT id FROM users ORDER BY RANDOM() LIMIT 10;
 
 if guard_parse_error(context) {
     violations.push(parse_error_violation(context));

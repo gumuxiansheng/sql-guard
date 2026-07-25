@@ -3,6 +3,16 @@
 //   非唯一索引：idx_字段名_字段名[_字段名]
 //   唯一索引：  uk_字段名_字段名[_字段名]
 //   主键：      pk_表名称
+//
+// 反面案例（会被拦截）：
+//   CREATE TABLE t (a INT, b INT, INDEX my_idx (a, b));      -- 应为 idx_a_b
+//   CREATE UNIQUE INDEX my_uk ON t (b);                      -- 应为 uk_b
+//   CREATE TABLE t2 (id INT, PRIMARY KEY pk_t (id));         -- 应为 pk_t2
+//
+// 正面案例（放行）：
+//   CREATE TABLE t (a INT, b INT, INDEX idx_a_b (a, b));
+//   CREATE UNIQUE INDEX uk_b ON t (b);
+//   CREATE TABLE t2 (id INT, PRIMARY KEY pk_t2 (id));
 
 if guard_parse_error(context) {
     violations.push(parse_error_violation(context));

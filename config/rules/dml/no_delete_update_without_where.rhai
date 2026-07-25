@@ -1,6 +1,14 @@
 // no_delete_update_without_where.rhai (DML002)
 // DELETE 和 UPDATE 语句必须带 WHERE 条件，防止全表误操作。
 // 基于 AST 精确判断 WHERE 子句是否存在。
+//
+// 反面案例（会被拦截）：
+//   DELETE FROM users;                       -- 删除全表
+//   UPDATE users SET status = 'inactive';    -- 更新全表
+//
+// 正面案例（放行）：
+//   DELETE FROM users WHERE id = 100;
+//   UPDATE users SET status = 'inactive' WHERE last_login IS NULL;
 
 if guard_parse_error(context) {
     violations.push(parse_error_violation(context));

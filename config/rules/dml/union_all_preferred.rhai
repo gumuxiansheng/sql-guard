@@ -1,6 +1,13 @@
 // union_all_preferred.rhai (DML106)
 // 除非需要去重，否则优先使用 UNION ALL 而非 UNION。
 // UNION 会执行隐式 DISTINCT（排序去重），性能低于 UNION ALL。
+//
+// 反面案例（会被拦截）：
+//   SELECT id FROM users UNION SELECT user_id FROM orders;     -- 隐式去重，性能差
+//
+// 正面案例（放行）：
+//   SELECT id FROM users UNION ALL SELECT user_id FROM orders;  -- 不去重，性能更好
+//   SELECT id FROM users UNION DISTINCT SELECT user_id FROM orders;  -- 确需去重时显式写明
 
 if guard_parse_error(context) {
     violations.push(parse_error_violation(context));

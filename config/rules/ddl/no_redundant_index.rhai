@@ -5,6 +5,17 @@
 //      例如已存在 idx(a,b) 时，idx(a) 即为冗余。
 // 唯一索引（UNIQUE）出于约束语义不视为冗余，不参与判断。
 // 跨语句收集 CREATE TABLE 表级 INDEX + CREATE INDEX，按表聚合后统一判定，避免重复报告。
+//
+// 反面案例（会被拦截）：
+//   -- idx_a 是 idx_a_b 的最左前缀，冗余
+//   CREATE TABLE t (id INT PRIMARY KEY, a INT, b INT, INDEX idx_a (a), INDEX idx_a_b (a, b));
+//   -- idx_id 与主键列完全相同，冗余
+//   CREATE TABLE t2 (id INT PRIMARY KEY, a INT, INDEX idx_id (id));
+//
+// 正面案例（放行）：
+//   CREATE TABLE t (id INT PRIMARY KEY, a INT, b INT, INDEX idx_a_b (a, b));
+//   -- 唯一索引出于约束语义，不视为冗余
+//   CREATE TABLE t3 (id INT PRIMARY KEY, a INT, UNIQUE KEY uk_a (a));
 
 if guard_parse_error(context) {
     violations.push(parse_error_violation(context));

@@ -2,8 +2,24 @@
 // 每张表最终必须定义主键。主键可出现在 CREATE TABLE 内（列级/表级约束），
 // 也可在后续 ALTER TABLE ... ADD PRIMARY KEY 中补建。
 // 基于 AST 跨语句判断：
-//   - 避免把 CREATE 无内联 PK + ALTER ADD PRIMARY KEY 补建"误判为违规（此前漏测）；
-//   - 同时识别"CREATE 有 PK 但 ALTER DROP PRIMARY KEY"导致最终无主键的情况。
+//   - 避免把 CREATE 无内联 PK + ALTER ADD PRIMARY KEY 补建误判为违规（此前漏测）；
+//   - 同时识别 CREATE 有 PK 但 ALTER DROP PRIMARY KEY 导致最终无主键的情况。
+//
+// 反面案例（会被拦截）：
+//   -- 无内联主键，且同文件无 ALTER ADD PRIMARY KEY 补建
+//   CREATE TABLE users (id INT, name VARCHAR(100));
+//   -- 有主键但被同文件 ALTER DROP PRIMARY KEY 移除，最终无主键
+//   CREATE TABLE t (id INT PRIMARY KEY);
+//   ALTER TABLE t DROP PRIMARY KEY;
+//
+// 正面案例（放行）：
+//   -- 列级主键
+//   CREATE TABLE users (id INT PRIMARY KEY, name VARCHAR(100));
+//   -- 表级主键
+//   CREATE TABLE order_items (order_id INT, item_id INT, PRIMARY KEY (order_id, item_id));
+//   -- CREATE 无内联 PK，但同文件 ALTER ADD PRIMARY KEY 补建（跨语句识别，不误报）
+//   CREATE TABLE sessions (token VARCHAR(255), user_id INT);
+//   ALTER TABLE sessions ADD PRIMARY KEY (token);
 
 if guard_parse_error(context) {
     violations.push(parse_error_violation(context));
