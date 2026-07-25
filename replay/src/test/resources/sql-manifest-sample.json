@@ -1,0 +1,120 @@
+{
+  "version": 1,
+  "generator": "sqlguard replay-export",
+  "generated_at": "1784909525",
+  "statement_count": 10,
+  "statements": [
+    {
+      "id": "sql/ddl/create.sql#1",
+      "sql": "CREATE TABLE orders (\n    id INT PRIMARY KEY,\n    user_id INT\n)",
+      "type": "ddl",
+      "source": "sql/ddl/create.sql",
+      "source_type": "sql",
+      "line": 1,
+      "end_line": 4
+    },
+    {
+      "id": "sql/dml/query.sql#1",
+      "sql": "SELECT id, name FROM users WHERE id = ?",
+      "type": "select",
+      "source": "sql/dml/query.sql",
+      "source_type": "sql",
+      "line": 1,
+      "end_line": 1
+    },
+    {
+      "id": "mapper/UserMapper.xml#selectById",
+      "sql": "SELECT id, name FROM users WHERE id = ?",
+      "type": "select",
+      "source": "mapper/UserMapper.xml",
+      "source_type": "mapper",
+      "line": 4,
+      "end_line": 4,
+      "statement_id": "selectById"
+    },
+    {
+      "id": "mapper/UserMapper.xml#findByCond#v1",
+      "sql": "SELECT id, name FROM users WHERE name LIKE ? AND age > ?",
+      "type": "select",
+      "source": "mapper/UserMapper.xml",
+      "source_type": "mapper",
+      "line": 15,
+      "end_line": 15,
+      "statement_id": "findByCond",
+      "variant_of": "mapper/UserMapper.xml#findByCond",
+      "variant_label": "if:name!=null=true,if:age!=null=true"
+    },
+    {
+      "id": "mapper/UserMapper.xml#findByCond#v2",
+      "sql": "SELECT id, name FROM users WHERE name LIKE ?",
+      "type": "select",
+      "source": "mapper/UserMapper.xml",
+      "source_type": "mapper",
+      "line": 15,
+      "end_line": 15,
+      "statement_id": "findByCond",
+      "variant_of": "mapper/UserMapper.xml#findByCond",
+      "variant_label": "if:name!=null=true,if:age!=null=false"
+    },
+    {
+      "id": "mapper/UserMapper.xml#findByCond#v3",
+      "sql": "SELECT id, name FROM users WHERE age > ?",
+      "type": "select",
+      "source": "mapper/UserMapper.xml",
+      "source_type": "mapper",
+      "line": 15,
+      "end_line": 15,
+      "statement_id": "findByCond",
+      "variant_of": "mapper/UserMapper.xml#findByCond",
+      "variant_label": "if:name!=null=false,if:age!=null=true"
+    },
+    {
+      "id": "mapper/UserMapper.xml#findByCond#v4",
+      "sql": "SELECT id, name FROM users",
+      "type": "select",
+      "source": "mapper/UserMapper.xml",
+      "source_type": "mapper",
+      "line": 15,
+      "end_line": 15,
+      "statement_id": "findByCond",
+      "variant_of": "mapper/UserMapper.xml#findByCond",
+      "variant_label": "if:name!=null=false,if:age!=null=false"
+    },
+    {
+      "id": "mapper/UserMapper.xml#findByIds#v1",
+      "sql": "SELECT id, name FROM users WHERE id IN",
+      "type": "select",
+      "source": "mapper/UserMapper.xml",
+      "source_type": "mapper",
+      "line": 26,
+      "end_line": 26,
+      "statement_id": "findByIds",
+      "variant_of": "mapper/UserMapper.xml#findByIds",
+      "variant_label": "foreach:0elem"
+    },
+    {
+      "id": "mapper/UserMapper.xml#findByIds#v2",
+      "sql": "SELECT id, name FROM users WHERE id IN (?)",
+      "type": "select",
+      "source": "mapper/UserMapper.xml",
+      "source_type": "mapper",
+      "line": 26,
+      "end_line": 26,
+      "statement_id": "findByIds",
+      "variant_of": "mapper/UserMapper.xml#findByIds",
+      "variant_label": "foreach:1elem"
+    },
+    {
+      "id": "mapper/UserMapper.xml#findByIds#v3",
+      "sql": "SELECT id, name FROM users WHERE id IN (?, ?, ?)",
+      "type": "select",
+      "source": "mapper/UserMapper.xml",
+      "source_type": "mapper",
+      "line": 26,
+      "end_line": 26,
+      "statement_id": "findByIds",
+      "variant_of": "mapper/UserMapper.xml#findByIds",
+      "variant_label": "foreach:3elem"
+    }
+  ]
+}

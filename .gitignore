@@ -6,3 +6,8 @@ Cargo.lock
 .tools
 /examples
 .workbuddy/
+
+# Java sub-module (sqlguard-replay)
+/replay/target
+# 专有 JDBC 驱动不入库（GaussDB/openGauss 驱动需手动放到 replay/lib/）
+/replay/lib/*.jar

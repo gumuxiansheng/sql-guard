@@ -15,6 +15,7 @@ use globset::{Glob, GlobSetBuilder};
 
 use crate::config::MapperConfig;
 
+pub mod dynamic;
 pub mod include;
 pub mod parser;
 pub mod placeholder;
