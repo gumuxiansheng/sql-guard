@@ -427,18 +427,42 @@ for s in ast.statements() {
 }
 ```
 
-## 8. 在 `sqlguard.toml` 中注册规则
+## 8. 在配置文件中注册规则
 
-参考 [`sqlguard.toml.example`](../sqlguard.toml.example)：
+参考 [`sqlguard.toml.example`](../sqlguard.toml.example) 与 [`sqlguard.rules.toml.example`](../sqlguard.rules.toml.example)。
+
+### 8.1 单文件 vs 双文件
+
+随着规则增多，所有 `[[rules]]` 堆在一个文件里会让配置越来越长。SqlGuard 支持把**规则配置**和**其它配置**拆成两个文件：
+
+- **主配置** `sqlguard.toml`：结构、分类、输出、Mapper、扫描、文件检查等（不含 `[[rules]]`）。
+- **规则配置** `sqlguard.rules.toml`：只含 `[[rules]]` 数组。
+
+在主配置中通过 `rules_file` 指向规则文件即可：
 
 ```toml
+# sqlguard.toml
+rules_file = "sqlguard.rules.toml"
+```
+
+也可以**不写 `rules_file`**——工具会**自动在同目录查找 `sqlguard.rules.toml`**。
+两条规则来源解析优先级（高 → 低）：
+
+1. 显式 `rules_file` → 从该文件加载（覆盖主配置内联的 `[[rules]]`）。
+2. 同级 `sqlguard.rules.toml` 存在 → 从该文件加载。
+3. 否则沿用主配置内联的 `[[rules]]`（向后兼容旧的单文件配置）。
+
+### 8.2 `[[rules]]` 字段
+
+```toml
+# sqlguard.rules.toml
 [[rules]]
 id = "DDL001"                                    # 规则编号，必填且全局唯一
 name = "no_drop_table"                            # 规则名（出现在报告中）
 group = "ddl-safety"                              # 规则分组，可选
 description = "Disallow DROP TABLE in DDL scripts" # 可选，描述
 enabled = true                                    # 是否启用
-script_path = "config/rules/ddl/no_drop_table.rhai"  # 相对配置文件所在目录
+script_path = "config/rules/ddl/no_drop_table.rhai"  # 相对规则文件所在目录
 applies_to = ["ddl"]                              # 仅对这些 script_type 生效
 severity = "error"                                # "error" 会让 check 返回非零；"warning" 不会
 ```
@@ -452,7 +476,7 @@ severity = "error"                                # "error" 会让 check 返回�
 | `group` | 否 | 规则分组名。CLI 通过 `--groups` / `--exclude-groups` 用它筛选 |
 | `description` | 否 | 规则描述 |
 | `enabled` | 否（默认 `true`） | 是否启用 |
-| `script_path` | 是 | Rhai 脚本路径，相对配置文件所在目录 |
+| `script_path` | 是 | Rhai 脚本路径，相对规则文件所在目录 |
 | `applies_to` | 是 | 仅对这些 `script_type` 生效（与 `[[classification.rules]]` 的 `type` 对应） |
 | `severity` | 否（默认 `"error"`） | `error` 让 `check` 退出码非 0；`warning` 不阻断 |
 
@@ -660,7 +684,7 @@ if upper.contains("DROP TABLE") {
    - `warning` —— 仅提示，不阻断
 5. **`applies_to` 精确限定**：DDL 规则只对 `ddl` 类型生效，避免误报。
 6. **脚本错误处理**：脚本运行时抛错会被引擎捕获并上报为该规则的一条违规，但语法错误会导致规则整体失败。
-7. **脚本路径**：`script_path` 相对 `sqlguard.toml` 所在目录解析，也支持绝对路径。
+7. **脚本路径**：`script_path` 相对规则文件（`sqlguard.rules.toml` 或含 `[[rules]]` 的主配置）所在目录解析，也支持绝对路径。
 8. **递归遍历子查询**：用顶层 `fn` 定义函数，在 `for s in sel.subqueries()` 中自调用——Rhai 不支持闭包捕获外部可变引用，但 `violations.push()` 在函数体内可正常调用。
 
 ## 12. 限制与注意事项

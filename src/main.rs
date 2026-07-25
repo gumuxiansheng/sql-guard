@@ -478,6 +478,10 @@ fn run_init(target_dir: &Path) -> Result<(), SqlGuardError> {
     fs::write(target_dir.join("sqlguard.toml"), config_content)
         .map_err(SqlGuardError::IoError)?;
 
+    let rules_content = get_default_rules_content();
+    fs::write(target_dir.join("sqlguard.rules.toml"), rules_content)
+        .map_err(SqlGuardError::IoError)?;
+
     // (name, subdir, content) — content 通过 include_str! 编译时嵌入
     let rules: &[(&str, &str, &str)] = &[
         ("no_drop_table", "ddl", include_str!("../config/rules/ddl/no_drop_table.rhai")),
@@ -508,7 +512,8 @@ fn run_init(target_dir: &Path) -> Result<(), SqlGuardError> {
     }
 
     println!("Initialized SqlGuard configuration in {}", target_dir.display());
-    println!("  - sqlguard.toml");
+    println!("  - sqlguard.toml          # 主配置（结构/分类/输出/扫描/文件检查）");
+    println!("  - sqlguard.rules.toml    # 规则配置（[[rules]] 单独拆分，避免文件过长）");
     println!("  - config/rules/ddl/ (6 rule files)");
     println!("  - config/rules/dml/ (14 rule files)");
     println!();
@@ -748,6 +753,8 @@ fn generate_default_config() -> Config {
                 severity: "warning".to_string(),
             },
         ],
+        rules_file: None,
+        rules_dir: PathBuf::new(),
         output: crate::config::OutputConfig {
             formats: vec!["plain".to_string()],
             output_dir: None,
@@ -794,6 +801,76 @@ name = "sql-by-ext"
 pattern = "*.sql"
 type = "sql"
 priority = 0
+
+# ================================================================================
+# 规则配置：单独拆分到 sqlguard.rules.toml，避免主配置文件随规则增多而过长。
+# 不写本行时，工具也会自动在同目录查找 sqlguard.rules.toml。
+# ================================================================================
+rules_file = "sqlguard.rules.toml"
+
+[output]
+formats = ["plain", "json", "html"]
+
+# MyBatis Mapper 模式：扫描 XML 中的 <select>/<insert>/<update>/<delete>。
+# 缺省或 enabled = false 时完全保持现有行为（仅扫描 .sql/.ddl/.dml）。
+# [mapper]
+# enabled = true
+# paths = ["src/main/resources/mapper"]
+# patterns = ["**/*Mapper.xml", "**/*.xml"]
+
+# ================================================================================
+# 文件扫描行为配置 [scan]
+# ================================================================================
+# 控制白名单扫描根与黑名单跳过目录，避免递归进入 .git/target/node_modules 等大目录。
+#
+# exclude_dirs：递归扫描时跳过的目录名（按名称匹配，任意层级生效）。
+#   默认值见下，未配置 [scan] 段时也按默认黑名单生效。
+#   适用于：SQL 脚本扫描、Mapper XML 扫描、目录结构校验三个场景。
+#
+# paths：SQL 脚本扫描白名单（相对配置文件目录或绝对路径）。
+#   为空时回退到 [structure].paths，仍为空则扫描整个 target_dir（兜底）。
+#   指定后只扫描这些目录下的 .sql/.ddl/.dml，散落在白名单外的 SQL 会被忽略。
+#
+# [scan]
+# paths = []
+# exclude_dirs = [
+#   ".git", ".svn", ".hg", ".bzr",       # 版本控制元数据
+#   "target", "node_modules", "build", "dist", "out",  # 构建产物
+#   ".idea", ".vscode",                   # IDE 配置
+# ]
+
+# ================================================================================
+# 文件格式检查 [file_check]
+# ================================================================================
+# 对扫描到的每个文件做字节级检查（独立于 SQL 语法规则）：
+#   FILE001  编码必须为 UTF-8 且不带 BOM（severity = error，必须）
+#   FILE002  换行符应为 LF（severity = warning，提示）
+# 两条检查归入 file-format 分组，可用 --exclude-rules FILE001,FILE002
+# 或 --exclude-groups file-format 临时关闭。
+# 缺省（未写 [file_check] 段）时按下方默认值启用。
+
+[file_check]
+enabled = true
+check_encoding = true               # UTF-8 无 BOM 检查（FILE001）
+check_line_ending = true            # 换行符 LF 检查（FILE002）
+encoding_severity = "error"         # 编码违规级别（必须）
+line_ending_severity = "warning"    # 换行符违规级别（提示）
+"#
+}
+
+/// 默认规则配置内容（独立文件 sqlguard.rules.toml）。
+///
+/// 仅含 `[[rules]]` 数组；脚本路径（script_path）相对本文件所在目录解析。
+fn get_default_rules_content() -> &'static str {
+    r#"# ================================================================================
+# 规则配置（独立文件）
+#
+# 每条 [[rules]] 对应一个 Rhai 脚本。脚本路径（script_path）相对本文件
+# 所在目录解析，也支持绝对路径。
+#
+# 在 sqlguard.toml 中用 rules_file = "sqlguard.rules.toml" 引用本文件；
+# 不写该行时，工具也会自动在同目录查找 sqlguard.rules.toml。
+# ================================================================================
 
 # ================================================================================
 # P0 规则：默认启用，建议 CI 中保持开启
@@ -921,7 +998,7 @@ severity = "error"
 
 # ================================================================================
 # P1 规则：默认禁用，建议评估后启用
-# 在 sqlguard.toml 中将 enabled = false 改为 true 即可启用
+# 在 sqlguard.rules.toml 中将 enabled = false 改为 true 即可启用
 # ================================================================================
 
 [[rules]]
@@ -1003,53 +1080,5 @@ enabled = false
 script_path = "config/rules/dml/no_constant_where.rhai"
 applies_to = ["dml"]
 severity = "warning"
-
-[output]
-formats = ["plain", "json", "html"]
-
-# MyBatis Mapper 模式：扫描 XML 中的 <select>/<insert>/<update>/<delete>。
-# 缺省或 enabled = false 时完全保持现有行为（仅扫描 .sql/.ddl/.dml）。
-# [mapper]
-# enabled = true
-# paths = ["src/main/resources/mapper"]
-# patterns = ["**/*Mapper.xml", "**/*.xml"]
-
-# ================================================================================
-# 文件扫描行为配置 [scan]
-# ================================================================================
-# 控制白名单扫描根与黑名单跳过目录，避免递归进入 .git/target/node_modules 等大目录。
-#
-# exclude_dirs：递归扫描时跳过的目录名（按名称匹配，任意层级生效）。
-#   默认值见下，未配置 [scan] 段时也按默认黑名单生效。
-#   适用于：SQL 脚本扫描、Mapper XML 扫描、目录结构校验三个场景。
-#
-# paths：SQL 脚本扫描白名单（相对配置文件目录或绝对路径）。
-#   为空时回退到 [structure].paths，仍为空则扫描整个 target_dir（兜底）。
-#   指定后只扫描这些目录下的 .sql/.ddl/.dml，散落在白名单外的 SQL 会被忽略。
-#
-# [scan]
-# paths = []
-# exclude_dirs = [
-#   ".git", ".svn", ".hg", ".bzr",       # 版本控制元数据
-#   "target", "node_modules", "build", "dist", "out",  # 构建产物
-#   ".idea", ".vscode",                   # IDE 配置
-# ]
-
-# ================================================================================
-# 文件格式检查 [file_check]
-# ================================================================================
-# 对扫描到的每个文件做字节级检查（独立于 SQL 语法规则）：
-#   FILE001  编码必须为 UTF-8 且不带 BOM（severity = error，必须）
-#   FILE002  换行符应为 LF（severity = warning，提示）
-# 两条检查归入 file-format 分组，可用 --exclude-rules FILE001,FILE002
-# 或 --exclude-groups file-format 临时关闭。
-# 缺省（未写 [file_check] 段）时按下方默认值启用。
-
-[file_check]
-enabled = true
-check_encoding = true               # UTF-8 无 BOM 检查（FILE001）
-check_line_ending = true            # 换行符 LF 检查（FILE002）
-encoding_severity = "error"         # 编码违规级别（必须）
-line_ending_severity = "warning"    # 换行符违规级别（提示）
 "#
 }

@@ -84,7 +84,7 @@ cp deploy/sqlguard-x86_64-apple-darwin /usr/local/bin/sqlguard
 sqlguard init .
 ```
 
-生成 `sqlguard.toml` 配置文件 + 16 条内置规则脚本（2 DDL + 14 DML）+ 示例 SQL 目录结构。
+生成 `sqlguard.toml`（主配置）+ `sqlguard.rules.toml`（规则配置）+ 16 条内置规则脚本（2 DDL + 14 DML）+ 示例 SQL 目录结构。规则配置单独拆分到 `sqlguard.rules.toml`，避免主配置文件随规则增多而过长。
 
 ### 编写 SQL 脚本
 
@@ -176,7 +176,8 @@ SqlGuard/
 │           └── no_constant_where.rhai
 ├── tests/
 │   └── integration_test.rs  # 集成测试（含 Mapper 模式）
-├── sqlguard.toml.example    # 完整配置示例
+├── sqlguard.toml.example    # 主配置示例（不含规则）
+├── sqlguard.rules.toml.example  # 规则配置示例（[[rules]]）
 ├── docs/
 │   └── rule-scripting.md    # 规则脚本编写手册
 ├── deploy/
@@ -190,7 +191,7 @@ SqlGuard/
 
 ## 配置
 
-完整配置见 [sqlguard.toml.example](sqlguard.toml.example)。六个主要区块：
+完整配置见 [sqlguard.toml.example](sqlguard.toml.example) 与 [sqlguard.rules.toml.example](sqlguard.rules.toml.example)。主配置（结构 / 分类 / 输出 / Mapper / 扫描 / 文件检查）与规则配置（`[[rules]]`，拆到 `sqlguard.rules.toml`）分开维护；主配置通过 `rules_file = "sqlguard.rules.toml"` 引用规则文件，不写该字段时工具会自动在同目录查找 `sqlguard.rules.toml`。
 
 ### `[structure]` 目录结构约束
 
@@ -456,7 +457,7 @@ for s in ast.statements() {
 
 ### 启用方式
 
-在 `sqlguard.toml` 中配置：
+在 `sqlguard.toml` 中配置（规则写在 `sqlguard.rules.toml`）：
 
 ```toml
 [mapper]

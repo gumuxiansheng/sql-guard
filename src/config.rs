@@ -8,7 +8,16 @@ use crate::error::SqlGuardError;
 pub struct Config {
     pub structure: StructureConfig,
     pub classification: ClassificationConfig,
+    #[serde(default)]
     pub rules: Vec<RuleConfig>,
+    /// 可选：外部规则文件路径。指定时从该文件加载规则（覆盖内联 `[[rules]]`）。
+    /// 相对路径基于主配置文件所在目录解析。
+    #[serde(default)]
+    pub rules_file: Option<PathBuf>,
+    /// 规则脚本相对路径的解析基准目录（规则文件所在目录）。
+    /// 不序列化，加载时根据规则来源设置；为空时回退到主配置目录（config_dir）。
+    #[serde(skip)]
+    pub rules_dir: PathBuf,
     #[serde(default)]
     pub output: OutputConfig,
     /// MyBatis Mapper 模式配置。缺失或 `enabled = false` 时完全保持现有行为。
@@ -229,10 +238,68 @@ impl Config {
     pub fn load(path: &Path) -> Result<Self, SqlGuardError> {
         let content = fs::read_to_string(path)
             .map_err(|e| SqlGuardError::ConfigError(format!("Failed to read config file '{}': {}", path.display(), e)))?;
-        let config: Config = toml::from_str(&content)
+        let mut config: Config = toml::from_str(&content)
             .map_err(|e| SqlGuardError::ConfigError(format!("Failed to parse config file '{}': {}", path.display(), e)))?;
+
+        let config_dir = path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .to_path_buf();
+
+        // 规则来源解析（优先级由高到低）：
+        //   1) 显式 `rules_file` -> 从该文件加载（覆盖内联 `[[rules]]`）
+        //   2) 同级 `sqlguard.rules.toml` 存在 -> 从该文件加载
+        //   3) 否则沿用主配置内联的 `[[rules]]`（保持向后兼容）
+        if let Some(rf) = &config.rules_file {
+            let rules_path = if rf.is_absolute() {
+                rf.clone()
+            } else {
+                config_dir.join(rf)
+            };
+            let loaded = Self::load_rules_file(&rules_path)?;
+            config.rules = loaded;
+            config.rules_dir = rules_path
+                .parent()
+                .unwrap_or(&config_dir)
+                .to_path_buf();
+        } else {
+            let sibling = config_dir.join("sqlguard.rules.toml");
+            if sibling.exists() {
+                let loaded = Self::load_rules_file(&sibling)?;
+                config.rules = loaded;
+                config.rules_dir = sibling
+                    .parent()
+                    .unwrap_or(&config_dir)
+                    .to_path_buf();
+            }
+            // 否则沿用内联 rules，rules_dir 保持空（回退到主配置目录）
+        }
+
         config.validate_rule_ids()?;
         Ok(config)
+    }
+
+    /// 从独立的规则文件（仅含 `[[rules]]` 数组）加载规则列表。
+    fn load_rules_file(path: &Path) -> Result<Vec<RuleConfig>, SqlGuardError> {
+        let content = fs::read_to_string(path).map_err(|e| {
+            SqlGuardError::ConfigError(format!(
+                "Failed to read rules file '{}': {}",
+                path.display(),
+                e
+            ))
+        })?;
+        #[derive(Deserialize)]
+        struct RulesFile {
+            rules: Vec<RuleConfig>,
+        }
+        let rf: RulesFile = toml::from_str(&content).map_err(|e| {
+            SqlGuardError::ConfigError(format!(
+                "Failed to parse rules file '{}': {}",
+                path.display(),
+                e
+            ))
+        })?;
+        Ok(rf.rules)
     }
 
     /// 校验规则 id 必填且全局唯一。
@@ -259,7 +326,14 @@ impl Config {
         if script_path.is_absolute() {
             script_path.to_path_buf()
         } else {
-            config_dir.join(script_path)
+            // 若规则来自独立规则文件，则脚本路径相对规则文件所在目录解析；
+            // 否则（内联规则）相对主配置目录解析。
+            let base: &Path = if self.rules_dir.as_os_str().is_empty() {
+                config_dir
+            } else {
+                &self.rules_dir
+            };
+            base.join(script_path)
         }
     }
 }

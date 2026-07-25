@@ -488,7 +488,10 @@ SELECT * FROM users WHERE 1=1 AND status = 'active';  -- 动态 SQL 拼接时"�
 
 ### 在配置文件中
 
+`[[rules]]` 写在规则配置文件 `sqlguard.rules.toml` 中（由主配置 `sqlguard.toml` 的 `rules_file` 引用，或自动同目录发现）。将对应规则的 `enabled` 改为 `true` 即可启用：
+
 ```toml
+# sqlguard.rules.toml
 [[rules]]
 id = "DML103"
 enabled = true  # 从 false 改为 true 即可启用

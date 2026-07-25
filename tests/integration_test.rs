@@ -66,8 +66,26 @@ fn test_init_creates_config() {
 
     assert!(output.status.success());
     assert!(Path::new(dir).join("sqlguard.toml").exists());
+    // init 现在将规则拆分到独立文件
+    assert!(Path::new(dir).join("sqlguard.rules.toml").exists());
     assert!(Path::new(dir).join("config/rules/ddl/no_drop_table.rhai").exists());
     assert!(Path::new(dir).join("config/rules/dml/no_select_all.rhai").exists());
+
+    // 端到端：init 生成的主配置通过 rules_file 引用 sqlguard.rules.toml，
+    // check 应能基于拆分后的规则发现违规。
+    setup_test_project(dir);
+    let config_path = format!("{}/sqlguard.toml", dir);
+    let check_output = Command::new(&binary_abs_path())
+        .args(["check", dir, "-c", &config_path, "-f", "plain"])
+        .output()
+        .expect("Failed to run sqlguard check");
+    let stdout = String::from_utf8_lossy(&check_output.stdout);
+    let stderr = String::from_utf8_lossy(&check_output.stderr);
+    assert!(
+        stdout.contains("no_drop_table") || stderr.contains("no_drop_table"),
+        "init 生成的拆分配置应发现 DROP TABLE 违规\nstdout: {}\nstderr: {}",
+        stdout, stderr
+    );
 
     let _ = std::fs::remove_dir_all(dir);
 }
@@ -103,6 +121,191 @@ fn test_check_finds_violations() {
     assert!(
         stdout.contains("no_select_all") || stderr.contains("no_select_all"),
         "Should find SELECT * violation\nstdout: {}\nstderr: {}",
+        stdout,
+        stderr
+    );
+
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// 验证规则配置拆分到独立文件（显式 rules_file）时可被正确加载：
+/// 主配置不含 [[rules]]，仅通过 rules_file 指向 sqlguard.rules.toml。
+#[test]
+fn test_split_rules_config_explicit_file() {
+    let dir = "/tmp/sqlguard-test-split-explicit";
+    let _ = std::fs::remove_dir_all(dir);
+
+    setup_test_project(dir);
+
+    // 主配置：引用独立规则文件，本身不含 [[rules]]
+    std::fs::write(
+        format!("{}/sqlguard.toml", dir),
+        r#"
+[structure]
+paths = ["sql/ddl", "sql/dml"]
+strict = false
+
+[classification]
+default_type = "sql"
+
+[[classification.rules]]
+name = "ddl-by-dir"
+pattern = "**/ddl/**"
+type = "ddl"
+priority = 10
+
+[[classification.rules]]
+name = "dml-by-dir"
+pattern = "**/dml/**"
+type = "dml"
+priority = 10
+
+rules_file = "sqlguard.rules.toml"
+"#,
+    )
+    .unwrap();
+
+    // 独立规则文件：脚本路径相对本文件所在目录解析
+    std::fs::write(
+        format!("{}/sqlguard.rules.toml", dir),
+        r#"
+[[rules]]
+id = "DDL001"
+name = "no_drop_table"
+group = "ddl-safety"
+enabled = true
+script_path = "config/rules/ddl/no_drop_table.rhai"
+applies_to = ["ddl"]
+severity = "error"
+
+[[rules]]
+id = "DML001"
+name = "no_select_all"
+group = "dml-safety"
+enabled = true
+script_path = "config/rules/dml/no_select_all.rhai"
+applies_to = ["dml"]
+severity = "error"
+"#,
+    )
+    .unwrap();
+
+    std::fs::create_dir_all(format!("{}/config/rules/ddl", dir)).unwrap();
+    std::fs::create_dir_all(format!("{}/config/rules/dml", dir)).unwrap();
+    std::fs::write(
+        format!("{}/config/rules/ddl/no_drop_table.rhai", dir),
+        "let sql = context[\"sql_content\"];\nlet upper = sql.to_upper();\nif upper.contains(\"DROP TABLE\") { violations.push(\"DROP TABLE not allowed\"); }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        format!("{}/config/rules/dml/no_select_all.rhai", dir),
+        "let sql = context[\"sql_content\"];\nlet upper = sql.to_upper();\nif upper.contains(\"SELECT *\") { violations.push(\"SELECT * not allowed\"); }\n",
+    )
+    .unwrap();
+
+    let output = Command::new(&binary_abs_path())
+        .args([
+            "check",
+            dir,
+            "-c",
+            &format!("{}/sqlguard.toml", dir),
+            "-f",
+            "plain",
+        ])
+        .output()
+        .expect("Failed to run sqlguard check with split config");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stdout.contains("no_drop_table") || stderr.contains("no_drop_table"),
+        "拆分配置（显式 rules_file）应发现 DROP TABLE 违规\nstdout: {}\nstderr: {}",
+        stdout,
+        stderr
+    );
+    assert!(
+        stdout.contains("no_select_all") || stderr.contains("no_select_all"),
+        "拆分配置（显式 rules_file）应发现 SELECT * 违规\nstdout: {}\nstderr: {}",
+        stdout,
+        stderr
+    );
+
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// 验证未写 rules_file 时，工具自动在同目录发现 sqlguard.rules.toml。
+#[test]
+fn test_split_rules_config_auto_discovery() {
+    let dir = "/tmp/sqlguard-test-split-auto";
+    let _ = std::fs::remove_dir_all(dir);
+
+    setup_test_project(dir);
+
+    // 主配置：不写 rules_file，但同目录存在 sqlguard.rules.toml
+    std::fs::write(
+        format!("{}/sqlguard.toml", dir),
+        r#"
+[structure]
+paths = ["sql/ddl", "sql/dml"]
+strict = false
+
+[classification]
+default_type = "sql"
+
+[[classification.rules]]
+name = "ddl-by-dir"
+pattern = "**/ddl/**"
+type = "ddl"
+priority = 10
+
+[[classification.rules]]
+name = "dml-by-dir"
+pattern = "**/dml/**"
+type = "dml"
+priority = 10
+"#,
+    )
+    .unwrap();
+
+    std::fs::write(
+        format!("{}/sqlguard.rules.toml", dir),
+        r#"
+[[rules]]
+id = "DDL001"
+name = "no_drop_table"
+group = "ddl-safety"
+enabled = true
+script_path = "config/rules/ddl/no_drop_table.rhai"
+applies_to = ["ddl"]
+severity = "error"
+"#,
+    )
+    .unwrap();
+
+    std::fs::create_dir_all(format!("{}/config/rules/ddl", dir)).unwrap();
+    std::fs::write(
+        format!("{}/config/rules/ddl/no_drop_table.rhai", dir),
+        "let sql = context[\"sql_content\"];\nlet upper = sql.to_upper();\nif upper.contains(\"DROP TABLE\") { violations.push(\"DROP TABLE not allowed\"); }\n",
+    )
+    .unwrap();
+
+    let output = Command::new(&binary_abs_path())
+        .args([
+            "check",
+            dir,
+            "-c",
+            &format!("{}/sqlguard.toml", dir),
+            "-f",
+            "plain",
+        ])
+        .output()
+        .expect("Failed to run sqlguard check with auto-discovered rules file");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stdout.contains("no_drop_table") || stderr.contains("no_drop_table"),
+        "自动发现 sqlguard.rules.toml 应发现 DROP TABLE 违规\nstdout: {}\nstderr: {}",
         stdout,
         stderr
     );
