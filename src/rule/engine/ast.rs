@@ -1136,3 +1136,176 @@ impl CommentInfo {
         self.kind.clone()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ===== matches_any =====
+
+    #[test]
+    fn test_matches_any_exact() {
+        let pats = vec!["DDL001".to_string(), "DML002".to_string()];
+        assert!(matches_any(&pats, "DDL001"));
+        assert!(matches_any(&pats, "DML002"));
+        assert!(!matches_any(&pats, "DDL002"));
+        assert!(!matches_any(&pats, "ddl001"), "matches_any is case-sensitive");
+    }
+
+    #[test]
+    fn test_matches_any_wildcard_suffix() {
+        let pats = vec!["DDL*".to_string()];
+        assert!(matches_any(&pats, "DDL001"));
+        assert!(matches_any(&pats, "DDLXXX"));
+        assert!(!matches_any(&pats, "DML001"));
+        // "DDL*" 的 prefix 是 "DDL"，"DDL".starts_with("DDL") == true，所以 "DDL" 也命中
+        assert!(matches_any(&pats, "DDL"), "prefix wildcard matches the prefix itself");
+    }
+
+    #[test]
+    fn test_matches_any_empty() {
+        let pats: Vec<String> = vec![];
+        assert!(!matches_any(&pats, "anything"));
+        // value 为空字符串
+        let pats2 = vec!["DDL001".to_string()];
+        assert!(!matches_any(&pats2, ""));
+    }
+
+    #[test]
+    fn test_matches_any_wildcard_takes_priority() {
+        // 模式同时含精确与通配：通配命中即可
+        let pats = vec!["DDL001".to_string(), "DDL*".to_string()];
+        assert!(matches_any(&pats, "DDL002"));
+        assert!(matches_any(&pats, "DDL001"));
+    }
+
+    #[test]
+    fn test_matches_any_star_only() {
+        // 模式为 "*" 时 prefix="" 匹配任意值
+        let pats = vec!["*".to_string()];
+        assert!(matches_any(&pats, "anything"));
+        assert!(matches_any(&pats, ""));
+    }
+
+    // ===== RuleFilter =====
+
+    #[test]
+    fn test_rule_filter_from_cli_empty() {
+        let f = RuleFilter::from_cli(&None, &None, &None, &None);
+        assert!(f.is_empty());
+        assert!(f.include_rules.is_empty());
+        assert!(f.include_groups.is_empty());
+    }
+
+    #[test]
+    fn test_rule_filter_from_cli_whitespace_handling() {
+        // 空字符串、纯空白、前后逗号都应被清理
+        let f = RuleFilter::from_cli(&Some("  ".to_string()), &None, &None, &None);
+        assert!(f.is_empty());
+
+        let f = RuleFilter::from_cli(&Some(",DDL001,,".to_string()), &None, &None, &None);
+        assert_eq!(f.include_rules, vec!["DDL001".to_string()]);
+    }
+
+    #[test]
+    fn test_rule_filter_from_cli_trims_items() {
+        let f = RuleFilter::from_cli(
+            &Some(" DDL001 , DML002 ".to_string()),
+            &Some(" ddl-safety ".to_string()),
+            &None,
+            &None,
+        );
+        assert_eq!(f.include_rules, vec!["DDL001".to_string(), "DML002".to_string()]);
+        assert_eq!(f.include_groups, vec!["ddl-safety".to_string()]);
+    }
+
+    #[test]
+    fn test_rule_filter_empty_allows_all() {
+        let f = RuleFilter::default();
+        assert!(f.matches_id_group("DDL001", Some("ddl-safety")));
+        assert!(f.matches_id_group("XYZ999", None));
+    }
+
+    #[test]
+    fn test_rule_filter_exclude_takes_priority() {
+        let f = RuleFilter::from_cli(
+            &Some("DDL*".to_string()),
+            &None,
+            &Some("DDL001".to_string()),
+            &None,
+        );
+        // 白名单匹配 DDL*，但黑名单显式排除 DDL001
+        assert!(!f.matches_id_group("DDL001", None), "blacklist must beat whitelist");
+        assert!(f.matches_id_group("DDL002", None));
+    }
+
+    #[test]
+    fn test_rule_filter_exclude_groups() {
+        let f = RuleFilter::from_cli(&None, &None, &None, &Some("experimental*".to_string()));
+        assert!(!f.matches_id_group("XYZ001", Some("experimental-rules")));
+        assert!(f.matches_id_group("XYZ002", Some("stable")));
+    }
+
+    #[test]
+    fn test_rule_filter_include_groups_excludes_no_group() {
+        // 白名单 include_groups 非空时，group=None 的规则应被排除
+        let f = RuleFilter::from_cli(&None, &Some("ddl-safety".to_string()), &None, &None);
+        assert!(f.matches_id_group("DDL001", Some("ddl-safety")));
+        assert!(!f.matches_id_group("DDL002", None), "no-group rule must be excluded when include_groups is non-empty");
+    }
+
+    #[test]
+    fn test_rule_filter_both_whitelists_non_empty() {
+        // 两个白名单都非空时，规则必须同时命中 id 和 group
+        let f = RuleFilter::from_cli(
+            &Some("DDL*".to_string()),
+            &Some("ddl-safety".to_string()),
+            &None,
+            &None,
+        );
+        assert!(f.matches_id_group("DDL001", Some("ddl-safety")));
+        // id 命中但 group 不命中
+        assert!(!f.matches_id_group("DDL001", Some("other")));
+        // group 命中但 id 不命中
+        assert!(!f.matches_id_group("XYZ001", Some("ddl-safety")));
+    }
+
+    // ===== SqlAst::statement_range_at =====
+
+    #[test]
+    fn test_statement_range_at_boundary() {
+        // 构造两条语句：(1,3) 和 (5,7)
+        let mut ast = SqlAst {
+            statements: Vec::new(),
+            parse_error: None,
+            has_comma_join_anywhere: false,
+            comments: Vec::new(),
+        };
+        ast.statements.push(StmtInfo {
+            kind: "OTHER".to_string(), line: 1, end_line: 3, column: 1,
+            create_table: None, drop_object: None, select: None, insert: None,
+            update: None, delete: None, alter_table: None, truncate: None,
+            create_view: None, create_index: None, transaction: None,
+        });
+        ast.statements.push(StmtInfo {
+            kind: "OTHER".to_string(), line: 5, end_line: 7, column: 1,
+            create_table: None, drop_object: None, select: None, insert: None,
+            update: None, delete: None, alter_table: None, truncate: None,
+            create_view: None, create_index: None, transaction: None,
+        });
+
+        // 边界：起点、终点
+        assert_eq!(ast.statement_range_at(1), Some((1, 3)));
+        assert_eq!(ast.statement_range_at(3), Some((1, 3)));
+        assert_eq!(ast.statement_range_at(5), Some((5, 7)));
+        assert_eq!(ast.statement_range_at(7), Some((5, 7)));
+        // 中间
+        assert_eq!(ast.statement_range_at(2), Some((1, 3)));
+        assert_eq!(ast.statement_range_at(6), Some((5, 7)));
+        // 间隙：第 4 行无语句覆盖
+        assert_eq!(ast.statement_range_at(4), None);
+        // 范围外
+        assert_eq!(ast.statement_range_at(0), None);
+        assert_eq!(ast.statement_range_at(100), None);
+    }
+}

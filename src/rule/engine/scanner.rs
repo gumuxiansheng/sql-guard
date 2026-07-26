@@ -259,3 +259,167 @@ pub(crate) fn collect_comments(sql: &str) -> Vec<CommentInfo> {
 
     comments
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ===== detect_comma_join_in_sql =====
+
+    #[test]
+    fn test_no_comma_join_simple_select() {
+        assert!(!detect_comma_join_in_sql("SELECT 1"));
+        assert!(!detect_comma_join_in_sql("SELECT id FROM users"));
+        assert!(!detect_comma_join_in_sql("SELECT id FROM users WHERE id = 1"));
+    }
+
+    #[test]
+    fn test_detect_basic_comma_join() {
+        assert!(detect_comma_join_in_sql("SELECT id FROM users, orders"));
+        assert!(detect_comma_join_in_sql(
+            "SELECT id FROM users u, orders o WHERE u.id = o.user_id"
+        ));
+    }
+
+    #[test]
+    fn test_comma_inside_string_literal_ignored() {
+        // 字符串里的逗号不应被识别为 JOIN
+        assert!(!detect_comma_join_in_sql(
+            "SELECT id FROM users WHERE name = 'a, b, c'"
+        ));
+        // 双引号字符串内的逗号也跳过
+        assert!(!detect_comma_join_in_sql(
+            "SELECT id FROM users WHERE name = \"a, b\""
+        ));
+    }
+
+    #[test]
+    fn test_comma_inside_subquery_ignored() {
+        // 子查询括号内的逗号（paren_depth > 0）不算隐式 JOIN
+        assert!(!detect_comma_join_in_sql(
+            "SELECT id FROM (SELECT a, b FROM t) sub"
+        ));
+        // 函数参数列表里的逗号也不算
+        assert!(!detect_comma_join_in_sql(
+            "SELECT CONCAT(a, b) FROM users"
+        ));
+    }
+
+    #[test]
+    fn test_comma_after_clause_terminator_ignored() {
+        // WHERE 子句后的逗号（如 IN 列表）不应触发
+        assert!(!detect_comma_join_in_sql(
+            "SELECT id FROM users WHERE id IN (1, 2, 3)"
+        ));
+        // GROUP BY 后的多个列用逗号分隔，也不应触发
+        assert!(!detect_comma_join_in_sql(
+            "SELECT dept, COUNT(*) FROM users GROUP BY dept, status"
+        ));
+    }
+
+    #[test]
+    fn test_semicolon_resets_from_state() {
+        // 多条语句：第一条有 FROM，分号后第二条的逗号不应继承 FROM 状态
+        assert!(!detect_comma_join_in_sql(
+            "SELECT id FROM users; SELECT 1, 2"
+        ));
+        // 但第二条若也有 FROM，则正常检测
+        assert!(detect_comma_join_in_sql(
+            "SELECT 1; SELECT id FROM a, b"
+        ));
+    }
+
+    #[test]
+    fn test_comma_in_comments_ignored() {
+        // 行注释里的逗号
+        assert!(!detect_comma_join_in_sql(
+            "SELECT id FROM users -- a, b\nWHERE 1=1"
+        ));
+        // 块注释里的逗号
+        assert!(!detect_comma_join_in_sql(
+            "SELECT id FROM /* a, b */ users"
+        ));
+    }
+
+    #[test]
+    fn test_backtick_identifier_comma_ignored() {
+        // MySQL 反引号标识符里的逗号
+        assert!(!detect_comma_join_in_sql(
+            "SELECT id FROM users WHERE `a,b` = 1"
+        ));
+    }
+
+    // ===== collect_comments =====
+
+    #[test]
+    fn test_collect_line_comments() {
+        let sql = "-- first comment\nSELECT 1\n-- second\n";
+        let comments = collect_comments(sql);
+        assert_eq!(comments.len(), 2);
+        assert_eq!(comments[0].kind, "LINE");
+        assert_eq!(comments[0].line, 1);
+        assert_eq!(comments[0].text, "-- first comment");
+        assert_eq!(comments[1].line, 3);
+        assert_eq!(comments[1].text, "-- second");
+    }
+
+    #[test]
+    fn test_collect_block_comment_single_line() {
+        let sql = "SELECT /* hint */ 1";
+        let comments = collect_comments(sql);
+        assert_eq!(comments.len(), 1);
+        assert_eq!(comments[0].kind, "BLOCK");
+        assert_eq!(comments[0].line, 1);
+        assert_eq!(comments[0].text, "/* hint */");
+    }
+
+    #[test]
+    fn test_collect_block_comment_multiline() {
+        let sql = "SELECT /* multi\nline\ncomment */ 1";
+        let comments = collect_comments(sql);
+        assert_eq!(comments.len(), 1);
+        assert_eq!(comments[0].kind, "BLOCK");
+        assert_eq!(comments[0].line, 1, "block comment line should be start line");
+        assert!(comments[0].text.contains("multi"));
+        assert!(comments[0].text.contains("comment"));
+    }
+
+    #[test]
+    fn test_collect_comments_skips_string_literals() {
+        // 字符串字面量里的 -- 不应被识别为行注释
+        let sql = "SELECT 'a -- not a comment' FROM t";
+        let comments = collect_comments(sql);
+        assert!(comments.is_empty(), "no comment should be collected from string literal");
+    }
+
+    #[test]
+    fn test_collect_comments_skips_string_with_block_marker() {
+        // 字符串里的 /* 不应被识别为块注释
+        let sql = "SELECT 'a /* not a comment' FROM t";
+        let comments = collect_comments(sql);
+        assert!(comments.is_empty());
+    }
+
+    #[test]
+    fn test_collect_comments_unterminated_block() {
+        // 未闭合的块注释：扫描到 EOF，仍应作为 BLOCK 注释收集
+        let sql = "SELECT /* never closed";
+        let comments = collect_comments(sql);
+        assert_eq!(comments.len(), 1);
+        assert_eq!(comments[0].kind, "BLOCK");
+        assert_eq!(comments[0].text, "/* never closed");
+    }
+
+    #[test]
+    fn test_collect_comments_mixed() {
+        let sql = "-- line one\n/* block */\nSELECT 'x' -- tail\n";
+        let comments = collect_comments(sql);
+        assert_eq!(comments.len(), 3);
+        assert_eq!(comments[0].kind, "LINE");
+        assert_eq!(comments[0].line, 1);
+        assert_eq!(comments[1].kind, "BLOCK");
+        assert_eq!(comments[1].line, 2);
+        assert_eq!(comments[2].kind, "LINE");
+        assert_eq!(comments[2].line, 3);
+    }
+}

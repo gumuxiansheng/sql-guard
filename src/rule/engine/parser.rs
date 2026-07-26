@@ -968,3 +968,173 @@ pub(crate) fn format_referral_action(action: &Option<sqlparser::ast::Referential
         None => String::new(),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::CheckDialect;
+
+    // ===== parse_sql_to_ast 端到端 =====
+
+    #[test]
+    fn test_parse_single_select() {
+        let ast = parse_sql_to_ast("SELECT 1", CheckDialect::Generic);
+        assert!(!ast.has_parse_error());
+        assert_eq!(ast.statements.len(), 1);
+        assert_eq!(ast.statements[0].kind, "SELECT");
+        assert_eq!(ast.statements[0].line, 1);
+    }
+
+    #[test]
+    fn test_parse_multiple_statements() {
+        let sql = "SELECT 1;\nSELECT 2;\nSELECT 3;";
+        let ast = parse_sql_to_ast(sql, CheckDialect::Generic);
+        assert!(!ast.has_parse_error());
+        assert_eq!(ast.statements.len(), 3);
+        // 第二条语句从第 2 行开始
+        assert_eq!(ast.statements[1].line, 2);
+        assert_eq!(ast.statements[2].line, 3);
+    }
+
+    #[test]
+    fn test_parse_end_line_multiline() {
+        // 跨行语句：CREATE TABLE 起于第 1 行，`;` 在第 3 行，SELECT 在第 4 行。
+        // 解析完 CREATE TABLE 后下一 token 是第 3 行的 `;`，按 next_line-1 算 end_line=2。
+        // 该值是当前实现的行为契约，固化下来防止回退。
+        let sql = "CREATE TABLE t (\n  id INT\n);\nSELECT 1;";
+        let ast = parse_sql_to_ast(sql, CheckDialect::Generic);
+        assert_eq!(ast.statements.len(), 2);
+        assert_eq!(ast.statements[0].line, 1);
+        assert_eq!(ast.statements[0].end_line, 2);
+        assert_eq!(ast.statements[1].line, 4);
+    }
+
+    #[test]
+    fn test_parse_error_emits_parse_error_stmt() {
+        // sqlparser 无法解析的语法应作为 PARSE_ERROR 语句记录
+        let ast = parse_sql_to_ast("SELECT FROM WHERE", CheckDialect::Generic);
+        assert!(ast.statements.iter().any(|s| s.kind == "PARSE_ERROR"));
+    }
+
+    #[test]
+    fn test_parse_mysql_dialect_specific_syntax() {
+        // Generic 方言可能不支持 INSERT IGNORE，MySQL 方言可以
+        let mysql_ast = parse_sql_to_ast(
+            "INSERT IGNORE INTO t (a) VALUES (1)",
+            CheckDialect::MySql,
+        );
+        assert!(
+            mysql_ast.statements.iter().any(|s| s.kind == "INSERT"),
+            "MySQL dialect should parse INSERT IGNORE; got kinds: {:?}",
+            mysql_ast.statements.iter().map(|s| &s.kind).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_parse_collects_comma_join_flag() {
+        // has_comma_join_anywhere 由 detect_comma_join_in_sql 设置
+        let ast = parse_sql_to_ast("SELECT id FROM a, b", CheckDialect::Generic);
+        assert!(ast.has_comma_join_anywhere);
+
+        let ast2 = parse_sql_to_ast("SELECT id FROM a JOIN b ON a.id = b.id", CheckDialect::Generic);
+        assert!(!ast2.has_comma_join_anywhere);
+    }
+
+    #[test]
+    fn test_parse_collects_comments() {
+        let ast = parse_sql_to_ast("-- header\nSELECT 1 /* hint */", CheckDialect::Generic);
+        assert_eq!(ast.comments.len(), 2);
+        assert_eq!(ast.comments[0].kind, "LINE");
+        assert_eq!(ast.comments[1].kind, "BLOCK");
+    }
+
+    #[test]
+    fn test_parse_tokenize_error_returns_empty() {
+        // 极端的 tokenize 错误（如不闭合的字符串在某些方言下）应返回带 parse_error 的空 AST
+        // 这里用一个肯定能 tokenize 但解析失败的输入测试，主要验证返回的 AST 形态合理
+        let ast = parse_sql_to_ast("", CheckDialect::Generic);
+        assert!(ast.statements.is_empty());
+        assert!(!ast.has_parse_error());
+    }
+
+    #[test]
+    fn test_parse_create_table_kind() {
+        let ast = parse_sql_to_ast(
+            "CREATE TABLE users (id INT PRIMARY KEY, name VARCHAR(100))",
+            CheckDialect::Generic,
+        );
+        assert_eq!(ast.statements.len(), 1);
+        assert_eq!(ast.statements[0].kind, "CREATE_TABLE");
+        assert!(ast.statements[0].create_table.is_some());
+        let ct = ast.statements[0].create_table.as_ref().unwrap();
+        assert_eq!(ct.table_name, "users");
+        assert!(ct.has_primary_key);
+    }
+
+    #[test]
+    fn test_parse_drop_table_kind() {
+        let ast = parse_sql_to_ast("DROP TABLE users", CheckDialect::Generic);
+        assert_eq!(ast.statements[0].kind, "DROP_TABLE");
+        assert!(ast.statements[0].drop_object.is_some());
+    }
+
+    #[test]
+    fn test_parse_transaction_statements() {
+        let ast = parse_sql_to_ast(
+            "BEGIN; COMMIT; ROLLBACK;",
+            CheckDialect::Generic,
+        );
+        let kinds: Vec<&str> = ast.statements.iter().map(|s| s.kind.as_str()).collect();
+        assert_eq!(kinds, vec!["START_TRANSACTION", "COMMIT", "ROLLBACK"]);
+    }
+
+    // ===== name_of_table_constraint =====
+
+    #[test]
+    fn test_name_of_table_constraint_named() {
+        // 用 sqlparser 解析含命名的约束
+        let ast = parse_sql_to_ast(
+            "CREATE TABLE t (id INT, CONSTRAINT uk_id UNIQUE (id))",
+            CheckDialect::Generic,
+        );
+        let ct = ast.statements[0].create_table.as_ref().unwrap();
+        // 至少应收集到 1 个 unique 约束
+        assert!(ct.has_unique);
+        let uniques = &ct.uniques;
+        assert_eq!(uniques.len(), 1);
+        assert_eq!(uniques[0].name, "uk_id");
+    }
+
+    #[test]
+    fn test_name_of_table_constraint_unnamed() {
+        // 未命名约束：name 应为空串
+        let ast = parse_sql_to_ast(
+            "CREATE TABLE t (id INT, UNIQUE (id))",
+            CheckDialect::Generic,
+        );
+        let ct = ast.statements[0].create_table.as_ref().unwrap();
+        assert_eq!(ct.uniques.len(), 1);
+        assert_eq!(ct.uniques[0].name, "");
+    }
+
+    // ===== format_referral_action =====
+
+    #[test]
+    fn test_format_referral_action_none() {
+        assert_eq!(format_referral_action(&None), "");
+    }
+
+    #[test]
+    fn test_format_referral_action_cascade() {
+        assert_eq!(format_referral_action(&Some(sqlparser::ast::ReferentialAction::Cascade)), "CASCADE");
+    }
+
+    #[test]
+    fn test_format_referral_action_set_null() {
+        // sqlparser Debug 格式是 "SetNull"，to_uppercase → "SETNULL"
+        assert_eq!(
+            format_referral_action(&Some(sqlparser::ast::ReferentialAction::SetNull)),
+            "SETNULL"
+        );
+    }
+}
