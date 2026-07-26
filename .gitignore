@@ -6,6 +6,7 @@ Cargo.lock
 .tools
 /examples
 .workbuddy/
+.vscode/
 
 # Java sub-module (sqlguard-replay)
 /replay/target

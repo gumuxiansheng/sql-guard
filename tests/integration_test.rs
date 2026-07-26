@@ -1,12 +1,13 @@
 use std::process::Command;
 use std::path::Path;
 
-const BINARY: &str = "target/release/sqlguard";
-
-/// 取 sqlguard 二进制的绝对路径（避免 current_dir 切换后相对路径失效）
+/// 取 sqlguard 二进制的绝对路径。
+///
+/// 使用 `CARGO_BIN_EXE_sqlguard` 让 cargo 在测试前自动构建并注入二进制路径，
+/// 避免 `cargo test` 不重建 `target/release/sqlguard` 导致测试跑旧二进制。
+/// 注入的路径已是绝对路径，`current_dir` 切换后仍然有效。
 fn binary_abs_path() -> String {
-    let cwd = std::env::current_dir().unwrap_or_default();
-    cwd.join(BINARY).to_string_lossy().to_string()
+    env!("CARGO_BIN_EXE_sqlguard").to_string()
 }
 
 /// 检测 git 是否可用；不可用时测试应跳过而非 panic。
