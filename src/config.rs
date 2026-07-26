@@ -168,6 +168,18 @@ pub struct MapperConfig {
     pub paths: Vec<String>,
     #[serde(default = "default_mapper_patterns")]
     pub patterns: Vec<String>,
+    /// MyBatis 语句标签 → SqlGuard script_type 的映射。
+    /// 缺省时使用 `default_statement_type_mapping()`（select/insert/update/delete → "dml"），
+    /// 保持向后兼容。配置示例：
+    /// ```toml
+    /// [mapper.statement_type_mapping]
+    /// select = "query"
+    /// insert = "dml"
+    /// update = "dml"
+    /// delete = "dml"
+    /// ```
+    #[serde(default = "default_statement_type_mapping")]
+    pub statement_type_mapping: std::collections::HashMap<String, String>,
 }
 
 impl Default for MapperConfig {
@@ -176,8 +188,20 @@ impl Default for MapperConfig {
             enabled: false,
             paths: default_mapper_paths(),
             patterns: default_mapper_patterns(),
+            statement_type_mapping: default_statement_type_mapping(),
         }
     }
+}
+
+/// 默认 statement_type 映射：所有 MyBatis 语句标签（select/insert/update/delete）→ "dml"。
+/// 与 P0 硬编码行为一致，保持向后兼容。
+fn default_statement_type_mapping() -> std::collections::HashMap<String, String> {
+    let mut m = std::collections::HashMap::new();
+    m.insert("select".to_string(), "dml".to_string());
+    m.insert("insert".to_string(), "dml".to_string());
+    m.insert("update".to_string(), "dml".to_string());
+    m.insert("delete".to_string(), "dml".to_string());
+    m
 }
 
 fn default_mapper_paths() -> Vec<String> {

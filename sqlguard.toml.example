@@ -49,6 +49,15 @@ formats = ["plain", "json", "html"]
 # enabled = true
 # paths = ["src/main/resources/mapper"]
 # patterns = ["**/*Mapper.xml", "**/*.xml"]
+#
+# statement_type_mapping：MyBatis 标签 → SqlGuard script_type 映射。
+# 缺省时所有标签映射到 "dml"（向后兼容）。可把 select 单独映射到 "query"，
+# 让 SELECT 走 query 类型规则，与 DML 分别治理：
+# [mapper.statement_type_mapping]
+# select = "query"
+# insert = "dml"
+# update = "dml"
+# delete = "dml"
 
 # ================================================================================
 # 文件扫描行为配置 [scan]

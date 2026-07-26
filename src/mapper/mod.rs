@@ -109,10 +109,19 @@ fn collect_xml_files(
 
 /// 把 MyBatis 语句标签映射到 SqlGuard 的 `script_type`。
 ///
-/// P0 硬编码：select/insert/update/delete → `"dml"`。
-/// 后续可通过 `[mapper.statement_type_mapping]` 配置化。
-pub fn map_statement_type(stmt_type: &str) -> &str {
-    match stmt_type {
+/// 默认映射（向后兼容）：select/insert/update/delete → `"dml"`。
+/// 可通过 `[mapper.statement_type_mapping]` 配置覆盖，例如把 select 映射到 `"query"`
+/// 让 SELECT 走 query 类型规则，与 DML 分别治理。
+///
+/// 未在 mapping 中配置的标签回退到 `"other"`。
+pub fn map_statement_type<'a>(stmt_type: &str, mapping: &'a std::collections::HashMap<String, String>) -> &'a str {
+    // 优先查配置映射（大小写不敏感：标签名转小写后匹配）
+    let lower = stmt_type.to_lowercase();
+    if let Some(t) = mapping.get(&lower) {
+        return t.as_str();
+    }
+    // 兼容旧调用方：未传 mapping 或 mapping 为空时，回退到硬编码默认
+    match lower.as_str() {
         "select" | "insert" | "update" | "delete" => "dml",
         _ => "other",
     }

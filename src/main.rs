@@ -198,7 +198,7 @@ fn check_files(
                 }
             };
             for sql in extracted {
-                let script_type = mapper::map_statement_type(&sql.statement_type);
+                let script_type = mapper::map_statement_type(&sql.statement_type, &config.mapper.statement_type_mapping);
                 let line_offset = sql.raw_xml_line.saturating_sub(1);
                 let violations = engine::run_rules_for_file(engine_instance, file_path, &sql.processed_sql, script_type, config, config_dir, filter, line_offset)?;
                 all_violations.extend(violations);
@@ -423,7 +423,7 @@ fn run_check_diff(
                 }
             };
             for sql in extracted {
-                let script_type = mapper::map_statement_type(&sql.statement_type);
+                let script_type = mapper::map_statement_type(&sql.statement_type, &config.mapper.statement_type_mapping);
                 let line_offset = sql.raw_xml_line.saturating_sub(1);
                 let violations = engine::run_rules_for_file(
                     &engine_instance,
