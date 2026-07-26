@@ -516,6 +516,33 @@ sqlguard check ./sql --groups ddl-safety --exclude-rules DDL003
 
 当任一筛选参数非空时，`sqlguard` 会在 stderr 打印一行激活的筛选条件，便于 CI 日志追溯。
 
+### 9.1 行内豁免（inline exemption）
+
+在 SQL 文件中加注释可豁免特定行的特定规则，避免全局禁用导致漏检。三种语法（不区分大小写）：
+
+```sql
+-- sqlguard-disable-next-line DML001
+SELECT * FROM users;  -- 被豁免，不报 DML001
+
+SELECT * FROM users; -- sqlguard-disable-line DML001  -- 同行豁免
+
+/* sqlguard-disable DML001, DML002 */  -- 块注释豁免（单行）
+```
+
+**规则 ID 通配**：
+
+- `*` 豁免全部规则：`-- sqlguard-disable-next-line *`
+- 前缀通配：`-- sqlguard-disable-next-line DML*` 豁免所有 DML 开头的规则
+
+**多规则**：逗号分隔，如 `-- sqlguard-disable-next-line DML001, DML002`
+
+**行为**：
+
+- 豁免仅过滤 violation 输出，不影响规则执行（规则仍会运行，只是结果被过滤）
+- 无行号的 violation（如规则脚本错误）不会被豁免
+- Mapper 模式下豁免行号自动偏移到 XML 坐标系
+- 被豁免的 violation 数量会在 stderr 打印 `Info: N violation(s) exempted by inline comments in <file>`
+
 ## 10. 完整示例
 
 ### 10.1 禁止 DROP TABLE（DDL）

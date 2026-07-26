@@ -2137,3 +2137,53 @@ fn test_gen_rollback_end_to_end() {
 
     let _ = std::fs::remove_dir_all(dir);
 }
+
+#[test]
+fn test_inline_exemption() {
+    // 验证行内豁免：-- sqlguard-disable-next-line / -- sqlguard-disable-line 过滤 violation
+    let dir = "/tmp/sqlguard-test-exemption";
+    let _ = std::fs::remove_dir_all(dir);
+
+    // init 生成完整规则配置
+    let init_output = Command::new(&binary_abs_path())
+        .args(["init", dir])
+        .output()
+        .expect("Failed to run sqlguard init");
+    assert!(init_output.status.success());
+
+    std::fs::create_dir_all(format!("{}/sql/dml", dir)).unwrap();
+    // 3 条 SELECT *：第 1 行无豁免（应报违规），第 3 行被 next-line 豁免，第 4 行被 disable-line 豁免
+    std::fs::write(
+        format!("{}/sql/dml/test.sql", dir),
+        "SELECT * FROM users;\n-- sqlguard-disable-next-line DML001\nSELECT * FROM users;\nSELECT * FROM users; -- sqlguard-disable-line DML001\n",
+    ).unwrap();
+
+    let output = Command::new(&binary_abs_path())
+        .args(["check", dir, "-c", &format!("{}/sqlguard.toml", dir), "-f", "json", "-o", dir])
+        .output()
+        .expect("Failed to run sqlguard check");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    // stderr 应提示 2 个 violation 被豁免
+    assert!(
+        stderr.contains("2 violation(s) exempted"),
+        "应豁免 2 个 violation，stderr: {}",
+        stderr
+    );
+
+    // JSON 报告应只剩 1 个 DML001 violation（第 1 行）
+    let report_text = std::fs::read_to_string(format!("{}/sqlguard-report.json", dir)).unwrap();
+    let report: serde_json::Value = serde_json::from_str(&report_text).expect("JSON report");
+    if let Some(violations) = report["violations"].as_array() {
+        let dml001_count = violations.iter().filter(|v| v["rule_id"].as_str() == Some("DML001")).count();
+        assert_eq!(
+            dml001_count, 1,
+            "应只剩 1 个 DML001 violation（第 1 行未豁免），实际: {}",
+            dml001_count
+        );
+    } else {
+        panic!("violations 应为数组");
+    }
+
+    let _ = std::fs::remove_dir_all(dir);
+}

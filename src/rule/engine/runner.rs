@@ -163,7 +163,144 @@ pub fn run_rules_for_file(
         }
     }
 
+    // 应用行内豁免：解析 -- sqlguard-disable-* 注释，过滤命中的 violation
+    let exemptions = parse_exemptions(sql_content);
+    if !exemptions.is_empty() {
+        // Mapper 模式下 violation 行号已加 line_offset，豁免行号也需对齐
+        let offset_exemptions: std::collections::HashMap<usize, Vec<String>> = exemptions
+            .into_iter()
+            .map(|(line, ids)| (line + line_offset, ids))
+            .collect();
+        let before = violations.len();
+        violations.retain(|v| !is_exempted(v, &offset_exemptions));
+        let filtered = before - violations.len();
+        if filtered > 0 {
+            eprintln!(
+                "Info: {} violation(s) exempted by inline comments in {}",
+                filtered,
+                file_path.display()
+            );
+        }
+    }
+
     Ok(violations)
+}
+
+/// 解析 SQL 内容中的行内豁免注释，返回 (行号 → 豁免的规则 ID 集合)。
+///
+/// 支持三种语法（不区分大小写）：
+/// - `-- sqlguard-disable-next-line RULE_ID,RULE_ID`：豁免下一行的指定规则
+///   （`*` 表示豁免全部规则）
+/// - `-- sqlguard-disable-line RULE_ID,RULE_ID`：豁免当前行的指定规则
+/// - `/* sqlguard-disable RULE_ID,RULE_ID */`：块注释，可跨行，豁免到
+///   `*/` 结束（实现简化：仅识别单行块注释，与下一行/同行等效）
+///
+/// 行号为 1-indexed。返回的 HashMap 中 `*` 表示通配（豁免所有规则）。
+fn parse_exemptions(sql_content: &str) -> std::collections::HashMap<usize, Vec<String>> {
+    let mut exemptions: std::collections::HashMap<usize, Vec<String>> = std::collections::HashMap::new();
+    let lines: Vec<&str> = sql_content.lines().collect();
+
+    for (idx, line) in lines.iter().enumerate() {
+        let line_no = idx + 1;
+        let lower = line.to_lowercase();
+
+        // -- sqlguard-disable-next-line RULE_ID,RULE_ID
+        if let Some(pos) = lower.find("sqlguard-disable-next-line") {
+            let after = &line[pos + "sqlguard-disable-next-line".len()..];
+            let rule_ids = parse_rule_ids(after);
+            if !rule_ids.is_empty() {
+                exemptions
+                    .entry(line_no + 1)
+                    .or_default()
+                    .extend(rule_ids);
+            }
+            continue;
+        }
+
+        // -- sqlguard-disable-line RULE_ID,RULE_ID
+        if let Some(pos) = lower.find("sqlguard-disable-line") {
+            let after = &line[pos + "sqlguard-disable-line".len()..];
+            let rule_ids = parse_rule_ids(after);
+            if !rule_ids.is_empty() {
+                exemptions
+                    .entry(line_no)
+                    .or_default()
+                    .extend(rule_ids);
+            }
+            continue;
+        }
+
+        // /* sqlguard-disable RULE_ID,RULE_ID */ （单行块注释）
+        if let Some(pos) = lower.find("sqlguard-disable") {
+            // 排除已匹配的 -next-line / -line（它们包含 sqlguard-disable 前缀）
+            if !lower[pos..].starts_with("sqlguard-disable-next-line")
+                && !lower[pos..].starts_with("sqlguard-disable-line")
+            {
+                let after = &line[pos + "sqlguard-disable".len()..];
+                let rule_ids = parse_rule_ids(after);
+                if !rule_ids.is_empty() {
+                    exemptions
+                        .entry(line_no)
+                        .or_default()
+                        .extend(rule_ids);
+                }
+            }
+        }
+    }
+
+    exemptions
+}
+
+/// 从注释文本中提取规则 ID 列表。
+/// 输入形如 ` DML001, DML002 */` 或 ` DML001, *`，返回 `["DML001", "DML002"]`。
+/// `*` 表示通配。识别到第一个非规则 ID 字符（如 `*/`、`--`、行尾）停止。
+fn parse_rule_ids(s: &str) -> Vec<String> {
+    let mut ids = Vec::new();
+    // 取到 `*/` 或行尾为止
+    let end = s.find("*/").unwrap_or(s.len());
+    let segment = &s[..end];
+    for part in segment.split(|c: char| c == ',' || c.is_whitespace()) {
+        let trimmed = part.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        // 规则 ID 形如 DML001 / DDL* / *，仅接受字母数字与通配符
+        if trimmed.chars().all(|c| c.is_ascii_alphanumeric() || c == '*' || c == '_' || c == '-') {
+            ids.push(trimmed.to_uppercase());
+        }
+    }
+    ids
+}
+
+/// 判断某条 violation 是否被豁免。
+fn is_exempted(v: &Violation, exemptions: &std::collections::HashMap<usize, Vec<String>>) -> bool {
+    let line = match v.line {
+        Some(l) => l,
+        None => return false, // 无行号的 violation 不豁免（如规则脚本错误）
+    };
+    match exemptions.get(&line) {
+        Some(ids) => {
+            // 通配 * 豁免所有规则
+            if ids.iter().any(|id| id == "*") {
+                return true;
+            }
+            // 精确匹配规则 ID
+            if ids.iter().any(|id| id == &v.rule_id) {
+                return true;
+            }
+            // 前缀通配匹配（如 DML* 匹配 DML001）
+            for id in ids {
+                if id.ends_with('*') {
+                    let prefix = &id[..id.len() - 1];
+                    if v.rule_id.starts_with(prefix) {
+                        return true;
+                    }
+                }
+            }
+            false
+        }
+        None => false,
+    }
 }
 
 fn run_single_rule(
