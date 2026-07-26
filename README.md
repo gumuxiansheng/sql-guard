@@ -66,18 +66,53 @@
 
 ### 安装
 
-从 [deploy](deploy/) 目录选取对应平台的二进制文件，放入 `PATH`：
+四种方式任选其一：
+
+#### 方式 1：`cargo install`（推荐，跨平台）
 
 ```bash
-# Linux x86_64
-cp deploy/sqlguard-x86_64-linux-musl /usr/local/bin/sqlguard
-chmod +x /usr/local/bin/sqlguard
+cargo install sqlguard
+```
 
-# Linux ARM64
-cp deploy/sqlguard-aarch64-linux-musl /usr/local/bin/sqlguard
+Rust 工具链会自动编译并安装到 `~/.cargo/bin/sqlguard`，加入 `PATH` 即可使用。
 
-# macOS
-cp deploy/sqlguard-x86_64-apple-darwin /usr/local/bin/sqlguard
+#### 方式 2：预编译二进制
+
+从 [GitHub Releases](../../releases) 下载对应平台的二进制：
+
+| 平台 | 文件 |
+|------|------|
+| Linux x86_64 (musl, 静态) | `sqlguard-x86_64-unknown-linux-musl` |
+| Linux aarch64 (musl, 静态) | `sqlguard-aarch64-unknown-linux-musl` |
+| macOS x86_64 (Intel) | `sqlguard-x86_64-apple-darwin` |
+| macOS aarch64 (Apple Silicon) | `sqlguard-aarch64-apple-darwin` |
+| Windows x86_64 | `sqlguard-x86_64-pc-windows-gnu.exe` |
+
+```bash
+# Linux / macOS
+chmod +x sqlguard-* && mv sqlguard-* /usr/local/bin/sqlguard
+
+# Windows
+# 重命名为 sqlguard.exe 并加入 PATH
+```
+
+二进制由 [Release 工作流](.github/workflows/release.yml) 在打 tag 时自动构建发布。
+
+#### 方式 3：Docker
+
+```bash
+docker run --rm -v "$PWD:/work" ghcr.io/sqlguard/sqlguard:latest check /work/sql
+```
+
+镜像见 [Dockerfile](Dockerfile)。
+
+#### 方式 4：从源码构建
+
+```bash
+git clone https://github.com/sqlguard/sqlguard.git
+cd sqlguard
+cargo build --release
+# 产物在 target/release/sqlguard
 ```
 
 ### 初始化项目
