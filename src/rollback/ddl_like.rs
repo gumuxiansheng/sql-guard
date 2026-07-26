@@ -133,33 +133,67 @@ pub fn gen_with_full_backup(
     }
 }
 
-/// 从 StmtInfo 推断 expected_schema.columns（M1 阶段仅 CREATE TABLE 上下文有值，其余空 Vec）。
+/// 从 StmtInfo 推断 expected_schema.columns。
+///
+/// M4 补全：
+/// - CREATE TABLE：从 create_table.columns 提取完整列定义（name + data_type）
+/// - ALTER TABLE DROP COLUMN：被 drop 的列名加入期望（data_type 空，表示"列存在即可"），
+///   用于 F13 回滚后校验该列是否被成功还原
+/// - ALTER TABLE MODIFY/ALTER COLUMN：被改的列名加入期望（data_type 空，因为旧类型静态不可知）
+/// - 其余场景（DROP TABLE/INDEX/VIEW）：原表完整列定义静态不可知（除非同脚本内有 CREATE TABLE
+///   上下文，跨语句上下文 M4 不做），返回空 Vec，依赖 row_count + table_exists 校验
 fn extract_expected_columns(stmt: &StmtInfo) -> Vec<super::ExpectedColumn> {
     if let Some(ci) = &stmt.create_table {
-        ci.columns.iter().map(|c| super::ExpectedColumn {
+        return ci.columns.iter().map(|c| super::ExpectedColumn {
             name: c.name.clone(),
             data_type: c.data_type.clone(),
-        }).collect()
-    } else {
-        Vec::new()
+        }).collect();
     }
+    // ALTER TABLE：从 operations 提取被 DROP/MODIFY 的列名
+    if let Some(alter) = &stmt.alter_table {
+        return alter.operations.iter()
+            .filter_map(|op| match op.operation_type.as_str() {
+                "DROP_COLUMN" | "ALTER_COLUMN" if !op.column_name.is_empty() => {
+                    Some(super::ExpectedColumn {
+                        name: op.column_name.clone(),
+                        data_type: String::new(),  // 旧类型静态不可知
+                    })
+                }
+                _ => None,
+            })
+            .collect();
+    }
+    Vec::new()
 }
 
 /// 检测语句涉及的表是否含 AUTO_INCREMENT（MySQL）/ SERIAL（PG）列。
-/// M1 阶段从 CREATE TABLE 上下文判断，无上下文返回 false（M4 阶段补全）。
+///
+/// M4 补全：
+/// - CREATE TABLE：检查列级 is_auto_increment 或 data_type 含 SERIAL
+/// - ALTER TABLE ADD COLUMN：检查 operation.detail 是否含 AUTO_INCREMENT/SERIAL
+///   （带 AUTO_INCREMENT 的 ADD COLUMN 会被 alter_op_has_constraints 判为 true，走 ddl_like 路径）
+/// - 其余场景：返回 false，counter_unrestored 由发布平台运行期校验
 fn has_auto_increment_or_serial(stmt: &StmtInfo) -> bool {
     if let Some(ci) = &stmt.create_table {
-        ci.columns.iter().any(|c| c.is_auto_increment || c.data_type.to_uppercase().contains("SERIAL"))
-    } else {
-        false
+        return ci.columns.iter().any(|c| c.is_auto_increment || c.data_type.to_uppercase().contains("SERIAL"));
     }
+    if let Some(alter) = &stmt.alter_table {
+        return alter.operations.iter().any(|op| {
+            if op.operation_type != "ADD_COLUMN" {
+                return false;
+            }
+            let d = op.detail.to_uppercase();
+            d.contains("AUTO_INCREMENT") || d.contains("SERIAL")
+        });
+    }
+    false
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::config::{Config, RollbackConfig};
-    use crate::rule::engine::ast::{StmtInfo, DropInfo, TruncateInfo};
+    use crate::rule::engine::ast::{StmtInfo, DropInfo, TruncateInfo, AlterTableInfo, AlterOpInfo, CreateInfo, ColumnInfo};
     use crate::rollback::{dialect::{MySqlRenderer, PostgreSqlRenderer}, RollbackGenerator};
 
     fn make_drop_table_stmt() -> StmtInfo {
@@ -184,9 +218,78 @@ mod tests {
         }
     }
 
+    fn make_cfg() -> Config {
+        Config { structure: crate::config::StructureConfig { paths: vec![], strict: false, allow_extra: vec![] }, classification: crate::config::ClassificationConfig { rules: vec![], default_type: "other".to_string() }, rules: vec![], rules_file: None, rules_dir: std::path::PathBuf::new(), output: crate::config::OutputConfig::default(), mapper: crate::config::MapperConfig::default(), scan: crate::config::ScanConfig::default(), file_check: crate::config::FileCheckConfig::default(), rollback: RollbackConfig::default() }
+    }
+
+    fn make_alter_drop_column_stmt() -> StmtInfo {
+        StmtInfo {
+            kind: "ALTER_TABLE".to_string(),
+            line: 1, end_line: 1, column: 0,
+            create_table: None, drop_object: None, select: None, insert: None,
+            update: None, delete: None, truncate: None, create_view: None,
+            create_index: None, transaction: None,
+            alter_table: Some(AlterTableInfo {
+                table_name: "users".to_string(),
+                operations: vec![AlterOpInfo {
+                    operation_type: "DROP_COLUMN".to_string(),
+                    column_name: "age".to_string(),
+                    table_name: String::new(),
+                    constraint_name: String::new(),
+                    detail: "DROP COLUMN age".to_string(),
+                }],
+                adds_primary_key: false,
+                drops_primary_key: false,
+                added_primary_key_columns: vec![],
+            }),
+        }
+    }
+
+    fn make_create_table_with_auto_increment_stmt() -> StmtInfo {
+        StmtInfo {
+            kind: "CREATE_TABLE".to_string(),
+            line: 1, end_line: 1, column: 0,
+            create_table: Some(CreateInfo {
+                table_name: "users".to_string(),
+                columns: vec![ColumnInfo {
+                    name: "id".to_string(),
+                    data_type: "BIGINT".to_string(),
+                    is_auto_increment: true,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }),
+            drop_object: None, select: None, insert: None, update: None, delete: None,
+            alter_table: None, truncate: None, create_view: None, create_index: None, transaction: None,
+        }
+    }
+
+    fn make_alter_add_auto_increment_column_stmt() -> StmtInfo {
+        StmtInfo {
+            kind: "ALTER_TABLE".to_string(),
+            line: 1, end_line: 1, column: 0,
+            create_table: None, drop_object: None, select: None, insert: None,
+            update: None, delete: None, truncate: None, create_view: None,
+            create_index: None, transaction: None,
+            alter_table: Some(AlterTableInfo {
+                table_name: "users".to_string(),
+                operations: vec![AlterOpInfo {
+                    operation_type: "ADD_COLUMN".to_string(),
+                    column_name: "seq".to_string(),
+                    table_name: String::new(),
+                    constraint_name: String::new(),
+                    detail: "ADD COLUMN seq INT AUTO_INCREMENT".to_string(),
+                }],
+                adds_primary_key: false,
+                drops_primary_key: false,
+                added_primary_key_columns: vec![],
+            }),
+        }
+    }
+
     #[test]
     fn drop_table_mysql_uses_rebuild_from_backup() {
-        let cfg = Config { structure: crate::config::StructureConfig { paths: vec![], strict: false, allow_extra: vec![] }, classification: crate::config::ClassificationConfig { rules: vec![], default_type: "other".to_string() }, rules: vec![], rules_file: None, rules_dir: std::path::PathBuf::new(), output: crate::config::OutputConfig::default(), mapper: crate::config::MapperConfig::default(), scan: crate::config::ScanConfig::default(), file_check: crate::config::FileCheckConfig::default(), rollback: RollbackConfig::default() };
+        let cfg = make_cfg();
         let rc = RollbackConfig::default();
         let mut gen = RollbackGenerator::new(&cfg, &rc, &MySqlRenderer);
         let stmt = make_drop_table_stmt();
@@ -206,7 +309,7 @@ mod tests {
 
     #[test]
     fn drop_table_pg_uses_rebuild_from_backup() {
-        let cfg = Config { structure: crate::config::StructureConfig { paths: vec![], strict: false, allow_extra: vec![] }, classification: crate::config::ClassificationConfig { rules: vec![], default_type: "other".to_string() }, rules: vec![], rules_file: None, rules_dir: std::path::PathBuf::new(), output: crate::config::OutputConfig::default(), mapper: crate::config::MapperConfig::default(), scan: crate::config::ScanConfig::default(), file_check: crate::config::FileCheckConfig::default(), rollback: RollbackConfig::default() };
+        let cfg = make_cfg();
         let rc = RollbackConfig::default();
         let mut gen = RollbackGenerator::new(&cfg, &rc, &PostgreSqlRenderer);
         let stmt = make_drop_table_stmt();
@@ -214,5 +317,86 @@ mod tests {
         let rollback = pair.rollback.unwrap();
         assert!(rollback.contains("CREATE TABLE \"users\" (LIKE \"bks_users_"));
         assert!(rollback.contains("INSERT INTO \"users\" SELECT * FROM \"bks_users_"));
+    }
+
+    // ===== M4 推断逻辑测试 =====
+
+    #[test]
+    fn alter_drop_column_includes_dropped_column_in_expected_schema() {
+        // M4：ALTER DROP COLUMN 的被 drop 列名应进入 expected_schema.columns（data_type 空）
+        let pair = {
+            let cfg = make_cfg();
+            let rc = RollbackConfig::default();
+            let mut gen = RollbackGenerator::new(&cfg, &rc, &MySqlRenderer);
+            let stmt = make_alter_drop_column_stmt();
+            gen_with_full_backup(&stmt, 1, SourceRef::placeholder(), "ALTER TABLE users DROP COLUMN age", &mut gen)
+        };
+        let schema = pair.expected_schema.expect("expected_schema should be Some");
+        assert_eq!(schema.columns.len(), 1);
+        assert_eq!(schema.columns[0].name, "age");
+        assert!(schema.columns[0].data_type.is_empty(), "data_type should be empty (旧类型静态不可知)");
+    }
+
+    #[test]
+    fn create_table_with_auto_increment_marks_counter_unrestored() {
+        // M4：CREATE TABLE 含 AUTO_INCREMENT 列时 counter_unrestored = true
+        let pair = {
+            let cfg = make_cfg();
+            let rc = RollbackConfig::default();
+            let mut gen = RollbackGenerator::new(&cfg, &rc, &MySqlRenderer);
+            let stmt = make_create_table_with_auto_increment_stmt();
+            gen_with_full_backup(&stmt, 1, SourceRef::placeholder(), "CREATE TABLE users (id BIGINT AUTO_INCREMENT, ...)", &mut gen)
+        };
+        assert!(pair.safety.counter_unrestored, "AUTO_INCREMENT 列应触发 counter_unrestored");
+        // CREATE TABLE 上下文也应填入 expected_schema.columns
+        let schema = pair.expected_schema.expect("expected_schema should be Some");
+        assert_eq!(schema.columns.len(), 1);
+        assert_eq!(schema.columns[0].name, "id");
+        assert_eq!(schema.columns[0].data_type, "BIGINT");
+    }
+
+    #[test]
+    fn alter_add_auto_increment_column_marks_counter_unrestored() {
+        // M4：ALTER ADD COLUMN 含 AUTO_INCREMENT 时 counter_unrestored = true
+        // （带 AUTO_INCREMENT 的 ADD COLUMN 被 alter_op_has_constraints 判为 true，走 ddl_like 路径）
+        let pair = {
+            let cfg = make_cfg();
+            let rc = RollbackConfig::default();
+            let mut gen = RollbackGenerator::new(&cfg, &rc, &MySqlRenderer);
+            let stmt = make_alter_add_auto_increment_column_stmt();
+            gen_with_full_backup(&stmt, 1, SourceRef::placeholder(), "ALTER TABLE users ADD COLUMN seq INT AUTO_INCREMENT", &mut gen)
+        };
+        assert!(pair.safety.counter_unrestored, "ALTER ADD COLUMN AUTO_INCREMENT 应触发 counter_unrestored");
+    }
+
+    #[test]
+    fn drop_table_expected_schema_has_empty_columns_but_table_exists() {
+        // M4：DROP TABLE 原表完整列定义静态不可知，columns 为空 Vec，但 table_exists=true
+        let pair = {
+            let cfg = make_cfg();
+            let rc = RollbackConfig::default();
+            let mut gen = RollbackGenerator::new(&cfg, &rc, &MySqlRenderer);
+            let stmt = make_drop_table_stmt();
+            gen_with_full_backup(&stmt, 1, SourceRef::placeholder(), "DROP TABLE users", &mut gen)
+        };
+        let schema = pair.expected_schema.expect("expected_schema should be Some");
+        assert!(schema.table_exists);
+        assert!(schema.columns.is_empty(), "DROP TABLE 静态不可知列定义");
+    }
+
+    #[test]
+    fn alter_drop_column_emits_partition_check_warning() {
+        // M4：partitioned 静态不可知，依赖运行期 partition_check，warning 应提示
+        let pair = {
+            let cfg = make_cfg();
+            let rc = RollbackConfig::default();
+            let mut gen = RollbackGenerator::new(&cfg, &rc, &MySqlRenderer);
+            let stmt = make_alter_drop_column_stmt();
+            gen_with_full_backup(&stmt, 1, SourceRef::placeholder(), "ALTER TABLE users DROP COLUMN age", &mut gen)
+        };
+        assert!(pair.warnings.iter().any(|w| w.contains("partition check")),
+            "应有 partition check warning");
+        // safety.partitioned 静态不可知，保持 false（运行期由 partition_check SELECT 判断）
+        assert!(!pair.safety.partitioned);
     }
 }
