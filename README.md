@@ -13,7 +13,7 @@
 启用 `[mapper]` 配置后，扫描 `*Mapper.xml` 文件，自动提取 `<select>` / `<insert>` / `<update>` / `<delete>` 标签中的 SQL 语句，逐条应用规则脚本。支持：
 
 - 动态标签剥离（`<if>` / `<where>` / `<foreach>` 等）
-- `<include refid="..."/>` 同文件引用解析
+- `<include refid="..."/>` 引用解析：同文件短 id（`refid="cols"`）与跨 namespace（`refid="com.example.UserMapper.cols"`）均支持
 - `#{name}` → `?`（值占位符标准化）
 - `${tableName}` → `_var_tableName`（标识符合成为合法标识符，保证 sqlparser 可解析）
 - 违规行号映射回 XML 原始行号
@@ -27,6 +27,7 @@
 - **三种报告格式**：终端彩色输出（plain）、结构化 JSON、深色主题 HTML 网页报告
 - **增量校验**：`check-diff` 子命令通过 `git diff` 获取改动语句，按语句级 `[line, end_line] ∩ hunk` 过滤，CI 中只校验本次提交改动的 SQL
 - **备份回滚生成**：对每条 DDL/DML 自动生成 `backup.sql` / `rollback.sql` / `rollback-manifest.json` / `cleanup.sql`，支持 MySQL / PostgreSQL 双方言、多模式锁策略、长事务预检查、binlog 控制、锁合并、schema 漂移校验、分区表检测，配合发布平台在变更失败时回滚（详见 [docs/backup-rollback-design.md](docs/backup-rollback-design.md)）
+- **动态重放清单导出**：`replay-export` 子命令把 SQL 脚本与 Mapper 语句导出为 `sql-manifest.json`，供分离的 Java 工程 [`replay/`](replay/) 在镜像库上做 EXPLAIN 重放、识别慢 SQL。**注意：SqlGuard 二进制本身只导出清单，不执行重放**；重放由 `sqlguard-replay`（Java/Maven，仅面向 GaussDB/openGauss）完成，需自备 JDBC 驱动
 - **CI 友好**：`error` 级违规返回非零退出码，`warning` 级仅提示不阻断
 
 ## 架构
@@ -183,6 +184,36 @@ sqlguard gen-rollback ./sql -o rollback_out/ \
 
 详见 [docs/backup-rollback-design.md](docs/backup-rollback-design.md)。
 
+### 导出动态重放清单
+
+```bash
+sqlguard replay-export ./sql -o manifest_out/
+```
+
+把扫描到的 SQL 脚本与 Mapper 语句导出为 `sql-manifest.json`，每条语句记录其类型（select/insert/update/delete/merge/ddl/other）、来源文件、行号范围，Mapper 动态分支会按 `<if>`/`<foreach>` 组合展开为多个变体。
+
+**本子命令只导出清单，不连数据库、不执行重放。** 真正的重放由分离的 Java 工程 [`replay/`](replay/)（`sqlguard-replay`）完成：读取清单、连接镜像库、对每条 SQL 跑 `EXPLAIN`、采集执行计划与耗时、识别慢 SQL 与次优计划。
+
+支持 CLI 参数：
+
+```bash
+sqlguard replay-export ./sql -o manifest_out/ \
+    --types select,insert           # 仅导出指定类型，空 = 全部
+```
+
+**重放工程的使用前提与限制**（重要）：
+
+| 项 | 说明 |
+|------|------|
+| 工程位置 | `replay/` 目录，Maven 项目（`mvn package`） |
+| 目标数据库 | **仅 GaussDB / openGauss 镜像库**（不直接支持 MySQL/PG 重放） |
+| JDBC 驱动 | **不在 pom.xml 声明**，运行期通过 `--driver-jar` 参数以 URLClassLoader 动态加载（避免私有 jar 进构建依赖） |
+| 是否随二进制分发 | **否**，SqlGuard 发布物只含 Rust 二进制；Java 重放工程需单独 `mvn package` 构建 |
+| 输入 | 上一步生成的 `sql-manifest.json` |
+| 输出 | 每条语句的执行计划、耗时、慢 SQL 报告 |
+
+详见 `replay/` 工程的 `Main.java` 与 `pom.xml`。
+
 ## 项目结构
 
 ```
@@ -215,11 +246,18 @@ SqlGuard/
 │   │   ├── pk.rs            # 主键解析（配置 → StmtInfo → bks_ JOIN 推断）
 │   │   ├── render.rs        # SQL 文本渲染（事务包裹、锁合并、预检查）
 │   │   └── manifest.rs      # rollback-manifest.json 序列化
+│   ├── replay_export.rs     # replay-export 子命令：导出 sql-manifest.json（只导出不重放）
 │   └── reporter/
 │       ├── mod.rs
 │       ├── plain.rs         # 终端彩色报告
 │       ├── json.rs          # JSON 报告
 │       └── html.rs          # HTML 报告
+├── replay/                  # ★ 分离的 Java/Maven 工程（sqlguard-replay），不随二进制分发
+│   ├── pom.xml              # 仅 GaussDB/openGauss；JDBC 驱动运行期动态加载
+│   └── src/main/java/com/sqlguard/replay/
+│       ├── Main.java        # 入口，读 manifest → 连镜像库 → EXPLAIN → 报告
+│       ├── replay/Replayer.java
+│       └── plan/            # ExplainAdapter / PlanParser / PlanCollector
 ├── config/
 │   └── rules/
 │       ├── lib/
@@ -492,6 +530,45 @@ sqlguard check-diff --base origin/main --groups dml-safety
 ```
 
 行号精度：`end_line` 由 sqlparser 解析后取下一 token 行号 - 1 近似计算，规则脚本产出的 violation 自动从 AST 回填 `end_line`（脚本零改动）。
+
+### `sqlguard gen-rollback`
+
+为 DDL/DML 文件生成备份回滚脚本四件套，退出码遵循 manifest（`0`=可靠 / `1`=仅 warning / `2`=error）。
+
+```
+sqlguard gen-rollback [OPTIONS] [PATH]
+
+参数：
+  [PATH]                待扫描目录，默认当前目录
+
+选项：
+  -c, --config <FILE>            配置文件路径，默认 sqlguard.toml
+  -o, --output-dir <D>           输出目录（backup.sql / rollback.sql / manifest / cleanup）
+      --dialect <D>              覆盖 [rollback].dialect：mysql / postgresql
+      --lock-scope <S>           覆盖 [rollback].lock_scope：auto / global / table / snapshot / none
+      --lock-timeout <SEC>       覆盖 [rollback].lock_timeout（秒）
+      --accept-table-lock-risk   lock_scope=table 时必填（接受隐式提交释放风险）
+      --fail-on-warning          warning 也按 error 处理（退出 2 而非 1）
+      --allow-partial            允许 partial 回滚计划（safety.partial=true 不退出 2）
+```
+
+### `sqlguard replay-export`
+
+把 SQL 脚本与 Mapper 语句导出为 `sql-manifest.json`，供分离的 Java 重放工程消费。**只导出，不重放。**
+
+```
+sqlguard replay-export [OPTIONS] [PATH]
+
+参数：
+  [PATH]                待扫描目录，默认当前目录
+
+选项：
+  -c, --config <FILE>   配置文件路径，默认 sqlguard.toml
+  -o, --output-dir <D>  输出目录（生成 sql-manifest.json）
+      --types <T>       仅导出指定类型，逗号分隔：select,insert,update,delete,merge,ddl,other。空 = 全部
+```
+
+重放由 `replay/` Java 工程完成，详见上方「导出动态重放清单」小节。
 
 ## 规则筛选
 
