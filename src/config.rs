@@ -32,6 +32,9 @@ pub struct Config {
     /// UTF-8 无 BOM（error，必须）+ 换行符 LF（warning，提示）。
     #[serde(default)]
     pub file_check: FileCheckConfig,
+    /// 回滚脚本生成配置。缺省时使用 RollbackConfig::default()（不启用）。
+    #[serde(default)]
+    pub rollback: RollbackConfig,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -337,3 +340,152 @@ impl Config {
         }
     }
 }
+
+// ===== Rollback 配置（gen-rollback 子命令）=====
+
+/// 回滚脚本生成配置。
+///
+/// 对应设计文档 §4.6。CLI `--dialect` / `--lock-scope` / `--lock-timeout`
+/// / `--accept-table-lock-risk` 覆盖此处的字段。
+#[derive(Debug, Deserialize, Clone)]
+pub struct RollbackConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    /// 方言：mysql / postgresql。CLI --dialect 覆盖此值。
+    #[serde(default = "default_dialect")]
+    pub dialect: String,
+    /// 备份模式：auto（默认）/ full / incremental
+    #[serde(default = "default_backup_mode")]
+    pub backup_mode: String,
+    #[serde(default = "default_backup_file")]
+    pub backup_file: String,
+    #[serde(default = "default_rollback_file")]
+    pub rollback_file: String,
+    #[serde(default = "default_manifest_file")]
+    pub manifest_file: String,
+    #[serde(default = "default_cleanup_file")]
+    pub cleanup_file: String,
+    /// 仅 PG 生效，MySQL 方言忽略（DDL 隐式提交无效）
+    #[serde(default = "default_true")]
+    pub wrap_transaction: bool,
+    #[serde(default = "default_bks_prefix")]
+    pub backup_table_prefix: String,
+    /// 备份表名是否包含 8 位日期段（bks_xxx_YYYYMMDD_NNNN）
+    #[serde(default = "default_true")]
+    pub backup_table_with_date: bool,
+    /// 日期段格式，默认 "%Y%m%d"，必须产出 8 位数字以保证表名只含 [a-zA-Z0-9_]
+    #[serde(default = "default_date_fmt")]
+    pub backup_table_date_format: String,
+    /// ★ P1-11 默认改为 false（保留备份表便于审计）
+    #[serde(default = "default_false")]
+    pub cleanup_backup_tables_after_rollback: bool,
+    /// 备份段是否加锁（旧配置，保留兼容；新配置用 lock_scope）
+    #[serde(default = "default_true")]
+    pub lock_tables_during_backup: bool,
+    /// ★ D1 新增：锁策略，见 F14
+    /// auto（默认）：脚本含 DDL 或 backup 含 DDL → global，纯 DML → snapshot
+    /// global / table / snapshot / none
+    #[serde(default = "default_lock_scope")]
+    pub lock_scope: String,
+    /// ★ D1 新增：FTWRL 等待超时（秒），0 表示无限等待，见 F18
+    #[serde(default = "default_lock_timeout")]
+    pub lock_timeout: u64,
+    /// ★ D1 新增：长事务预检查策略：abort / warn / ignore，见 F18
+    #[serde(default = "default_long_tx_strategy")]
+    pub on_long_transaction: String,
+    /// ★ D1 新增：长事务阈值（秒），见 F18
+    #[serde(default = "default_long_tx_threshold")]
+    pub long_transaction_threshold: u64,
+    /// 是否在 backup.sql 头部加 SET SESSION sql_log_bin=0（MySQL 专用），见 F16
+    /// ★ D2 修正：auto 模式下若检测到 GTID 模式（v2 --connect），不设 sql_log_bin=0
+    #[serde(default = "default_true")]
+    pub disable_binlog_for_bks: bool,
+    /// ★ D2 新增：sql_log_bin 策略：auto / always / never，见 F16
+    #[serde(default = "default_binlog_strategy")]
+    pub binlog_strategy: String,
+    /// schema 漂移校验策略：abort / warn / ignore，见 F13
+    #[serde(default = "default_assert_strategy")]
+    pub assert_on_schema_mismatch: String,
+    /// 分区表处理策略：abort / warn / fallback，见 F15
+    #[serde(default = "default_partitioned_strategy")]
+    pub on_partitioned_table: String,
+    #[serde(default)]
+    pub include_select: bool,
+    #[serde(default)]
+    pub primary_keys: Vec<PrimaryKeyDecl>,
+    /// ★ D5 新增：备份表保留天数（默认 7 天），见 F19
+    #[serde(default = "default_retention_days")]
+    pub backup_table_retention_days: u64,
+    /// ★ D6 新增：是否合并连续同表 backup 段的锁区间，见 render.rs coalesce_locks
+    #[serde(default = "default_true")]
+    pub coalesce_locks: bool,
+    /// ★ R6 新增：coalesce 策略：conservative / aggressive
+    /// conservative（默认）：仅 DDL 全表 LIKE（INSERT SELECT * FROM t 无 WHERE）合并；DML 增量不合并
+    /// aggressive：所有同表段都尝试合并（DBA 显式启用，需自负 WHERE 子句含 JOIN/子查询的跨表依赖风险）
+    #[serde(default = "default_coalesce_mode")]
+    pub coalesce_locks_mode: String,
+    /// ★ R2 新增：lock_scope=table 模式必须显式确认（接受隐式提交释放风险）
+    /// 不带此 flag 且 lock_scope=table 时报错退出。CLI --accept-table-lock-risk 写入此字段。
+    #[serde(default)]
+    pub accept_table_lock_risk: bool,
+}
+
+impl Default for RollbackConfig {
+    fn default() -> Self {
+        RollbackConfig {
+            enabled: false,
+            dialect: default_dialect(),
+            backup_mode: default_backup_mode(),
+            backup_file: default_backup_file(),
+            rollback_file: default_rollback_file(),
+            manifest_file: default_manifest_file(),
+            cleanup_file: default_cleanup_file(),
+            wrap_transaction: true,
+            backup_table_prefix: default_bks_prefix(),
+            backup_table_with_date: true,
+            backup_table_date_format: default_date_fmt(),
+            cleanup_backup_tables_after_rollback: false,
+            lock_tables_during_backup: true,
+            lock_scope: default_lock_scope(),
+            lock_timeout: default_lock_timeout(),
+            on_long_transaction: default_long_tx_strategy(),
+            long_transaction_threshold: default_long_tx_threshold(),
+            disable_binlog_for_bks: true,
+            binlog_strategy: default_binlog_strategy(),
+            assert_on_schema_mismatch: default_assert_strategy(),
+            on_partitioned_table: default_partitioned_strategy(),
+            include_select: false,
+            primary_keys: Vec::new(),
+            backup_table_retention_days: default_retention_days(),
+            coalesce_locks: true,
+            coalesce_locks_mode: default_coalesce_mode(),
+            accept_table_lock_risk: false,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct PrimaryKeyDecl {
+    pub table: String,
+    pub columns: Vec<String>,
+}
+
+fn default_dialect() -> String { "mysql".to_string() }
+fn default_backup_mode() -> String { "auto".to_string() }
+fn default_date_fmt() -> String { "%Y%m%d".to_string() }
+fn default_cleanup_file() -> String { "cleanup.sql".to_string() }
+fn default_assert_strategy() -> String { "abort".to_string() }
+fn default_partitioned_strategy() -> String { "abort".to_string() }
+fn default_lock_scope() -> String { "auto".to_string() }
+fn default_lock_timeout() -> u64 { 30 }
+fn default_long_tx_strategy() -> String { "abort".to_string() }
+fn default_long_tx_threshold() -> u64 { 5 }
+fn default_binlog_strategy() -> String { "auto".to_string() }
+fn default_retention_days() -> u64 { 7 }
+fn default_coalesce_mode() -> String { "conservative".to_string() }
+fn default_false() -> bool { false }
+
+fn default_backup_file() -> String { "backup.sql".to_string() }
+fn default_rollback_file() -> String { "rollback.sql".to_string() }
+fn default_manifest_file() -> String { "rollback-manifest.json".to_string() }
+fn default_bks_prefix() -> String { "bks_".to_string() }

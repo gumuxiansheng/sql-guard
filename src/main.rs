@@ -7,6 +7,7 @@ mod reporter;
 mod mapper;
 mod git_diff;
 mod replay_export;
+mod rollback;
 
 use std::path::{Path, PathBuf};
 use std::fs;
@@ -762,6 +763,7 @@ fn generate_default_config() -> Config {
         mapper: crate::config::MapperConfig::default(),
         scan: crate::config::ScanConfig::default(),
         file_check: crate::config::FileCheckConfig::default(),
+        rollback: crate::config::RollbackConfig::default(),
     }
 }
 
