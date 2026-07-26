@@ -68,6 +68,10 @@ pub fn extract_sql_from_xml(xml_path: &Path) -> Result<Vec<ExtractedSql>, SqlGua
 /// # 跨 namespace 引用规则
 /// - `<include refid="cols"/>`（无点）→ 仅查当前文件本地片段
 /// - `<include refid="com.example.UserMapper.cols"/>`（含点）→ 查全局表
+///
+/// ★ D2：当前 main.rs 仅用单文件版 `extract_sql_from_xml`，此批量版是跨 namespace
+/// include 解析的核心扩展能力，保留用于未来多文件批量处理场景。
+#[allow(dead_code)]
 pub fn extract_sql_from_xmls(
     xml_paths: &[PathBuf],
 ) -> Result<Vec<(PathBuf, Vec<ExtractedSql>)>, SqlGuardError> {

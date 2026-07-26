@@ -111,6 +111,9 @@ fn collect_relative_paths(
     }
 }
 
+/// ★ D2：directory 模块对外格式化 API。当前 main.rs 用内部格式化逻辑，
+/// 此函数保留作为库 API 供外部调用方（如 IDE 插件）使用。
+#[allow(dead_code)]
 pub fn format_directory_issues(missing: &[DirectoryIssue], unexpected: &[DirectoryIssue]) -> String {
     use colored::Colorize;
     let mut output = String::new();

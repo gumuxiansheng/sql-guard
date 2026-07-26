@@ -18,7 +18,9 @@ pub struct Config {
     /// 不序列化，加载时根据规则来源设置；为空时回退到主配置目录（config_dir）。
     #[serde(skip)]
     pub rules_dir: PathBuf,
+    /// ★ P2-4：输出配置，当前未被 check 子命令消费（输出由 CLI flag 控制），保留用于未来扩展。
     #[serde(default)]
+    #[allow(dead_code)]
     pub output: OutputConfig,
     /// MyBatis Mapper 模式配置。缺失或 `enabled = false` 时完全保持现有行为。
     #[serde(default)]
@@ -114,6 +116,8 @@ fn default_script_type() -> String {
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct ClassificationRule {
+    /// ★ P2-4：配置元数据字段，仅用于配置文件可读性，代码未消费。
+    #[allow(dead_code)]
     pub name: String,
     pub pattern: String,
     #[serde(rename = "type")]
@@ -130,10 +134,14 @@ fn default_priority() -> i32 {
 pub struct RuleConfig {
     /// 规则编号，必填且全局唯一。CLI 通过 id 引用规则。
     pub id: String,
+    /// ★ P2-4：配置元数据字段，仅用于配置文件可读性，代码未消费。
+    #[allow(dead_code)]
     pub name: String,
     /// 规则分组，可选。CLI 通过 --groups 引用分组。
     #[serde(default)]
     pub group: Option<String>,
+    /// ★ P2-4：配置元数据字段，仅用于配置文件可读性，代码未消费。
+    #[allow(dead_code)]
     pub description: Option<String>,
     #[serde(default = "default_enabled")]
     pub enabled: bool,
@@ -151,7 +159,10 @@ fn default_severity() -> String {
     "error".to_string()
 }
 
+/// ★ P2-4：整个 OutputConfig 当前未被 check 子命令消费（输出由 CLI flag 控制），
+/// 保留用于未来"配置文件指定输出格式/目录"的扩展。配置层兼容字段。
 #[derive(Debug, Default, Deserialize, Clone)]
+#[allow(dead_code)]
 pub struct OutputConfig {
     #[serde(default = "default_formats")]
     pub formats: Vec<String>,
@@ -455,7 +466,10 @@ impl Config {
 /// / `--accept-table-lock-risk` 覆盖此处的字段。
 #[derive(Debug, Deserialize, Clone)]
 pub struct RollbackConfig {
+    /// ★ P2-4：gen-rollback 子命令由 CLI 显式调用，此字段当前不控制任何行为，
+    /// 保留用于未来"check 子命令自动触发 rollback 生成"的场景。配置层兼容字段。
     #[serde(default)]
+    #[allow(dead_code)]
     pub enabled: bool,
     /// 方言：mysql / postgresql。CLI --dialect 覆盖此值。
     #[serde(default = "default_dialect")]
@@ -479,13 +493,16 @@ pub struct RollbackConfig {
     /// 备份表名是否包含 8 位日期段（bks_xxx_YYYYMMDD_NNNN）
     #[serde(default = "default_true")]
     pub backup_table_with_date: bool,
-    /// 日期段格式，默认 "%Y%m%d"，必须产出 8 位数字以保证表名只含 [a-zA-Z0-9_]
+    /// ★ P2-4：日期段格式配置。当前实现固定为 YYYYMMDD（见 util::current_date_yyyymmdd），
+    /// 不支持自定义格式，保留此字段用于未来扩展。配置层兼容字段。
     #[serde(default = "default_date_fmt")]
+    #[allow(dead_code)]
     pub backup_table_date_format: String,
     /// ★ P1-11 默认改为 false（保留备份表便于审计）
     #[serde(default = "default_false")]
     pub cleanup_backup_tables_after_rollback: bool,
-    /// 备份段是否加锁（旧配置，保留兼容；新配置用 lock_scope）
+    /// 备份段是否加锁（旧配置，保留兼容；新配置用 lock_scope）。
+    /// ★ P2-3：在 main.rs 中消费——false 时将 lock_scope 从 auto 映射为 none。
     #[serde(default = "default_true")]
     pub lock_tables_during_backup: bool,
     /// ★ D1 新增：锁策略，见 F14
@@ -502,9 +519,12 @@ pub struct RollbackConfig {
     /// ★ D1 新增：长事务阈值（秒），见 F18
     #[serde(default = "default_long_tx_threshold")]
     pub long_transaction_threshold: u64,
-    /// 是否在 backup.sql 头部加 SET SESSION sql_log_bin=0（MySQL 专用），见 F16
-    /// ★ D2 修正：auto 模式下若检测到 GTID 模式（v2 --connect），不设 sql_log_bin=0
+    /// 是否在 backup.sql 头部加 SET SESSION sql_log_bin=0（MySQL 专用，旧配置，保留兼容）。
+    /// ★ D2 修正：此字段已被 `binlog_strategy` 取代（auto/always/never）。
+    /// ★ P2-4：当前代码仅消费 `binlog_strategy`，此字段保留用于旧配置文件向后兼容读取，
+    /// 不再影响生成行为。迁移建议：用 `binlog_strategy = "always"` 替代 `disable_binlog_for_bks = true`。
     #[serde(default = "default_true")]
+    #[allow(dead_code)]
     pub disable_binlog_for_bks: bool,
     /// ★ D2 新增：sql_log_bin 策略：auto / always / never，见 F16
     #[serde(default = "default_binlog_strategy")]

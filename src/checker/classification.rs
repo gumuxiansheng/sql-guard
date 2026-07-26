@@ -8,6 +8,9 @@ use crate::error::SqlGuardError;
 
 #[derive(Debug, Clone)]
 pub struct ClassificationResult {
+    /// ★ D2：分类结果来源文件路径。当前 main.rs 仅读取 script_type，
+    /// file_path 保留用于未来按文件聚合分类结果的场景及作为公开契约的一部分。
+    #[allow(dead_code)]
     pub file_path: String,
     pub script_type: String,
 }

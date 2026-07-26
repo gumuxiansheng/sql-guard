@@ -10,23 +10,25 @@ use super::pk::PrimaryKeyResolver;
 use super::{BackupRollbackPair, SourceRef, SafetyClass, BackupStrategy};
 
 pub struct RollbackGenerator<'a> {
-    pub(crate) config: &'a Config,
-    pub(crate) rollback_config: &'a RollbackConfig,
     pub(crate) renderer: &'a dyn DialectRenderer,
     pub(crate) naming: NamingAllocator<'a>,
     pub(crate) pk_resolver: PrimaryKeyResolver,
     pub(crate) seq: u64,
+    /// ★ P1-1：备份模式配置（auto/full/incremental），来自 RollbackConfig.backup_mode。
+    /// - auto（默认）：保持现有分发逻辑
+    /// - full：强制全表 LIKE（DML 行为不变，仅影响 ALTER 升级增量路径——当前未实现，故无效果）
+    /// - incremental：ALTER DROP/MODIFY 缺 CREATE TABLE 上下文时报错（当前升级增量未实现，故所有 ALTER DROP/MODIFY 均报错）
+    pub(crate) backup_mode: String,
 }
 
 impl<'a> RollbackGenerator<'a> {
-    pub fn new(config: &'a Config, rc: &'a RollbackConfig, renderer: &'a dyn DialectRenderer) -> Self {
+    pub fn new(_config: &'a Config, rc: &'a RollbackConfig, renderer: &'a dyn DialectRenderer) -> Self {
         RollbackGenerator {
-            config,
-            rollback_config: rc,
             renderer,
             naming: NamingAllocator::new(rc),
             pk_resolver: PrimaryKeyResolver::new(rc),
             seq: 0,
+            backup_mode: rc.backup_mode.clone(),
         }
     }
 
@@ -34,7 +36,7 @@ impl<'a> RollbackGenerator<'a> {
     pub fn generate(&mut self, stmt: &StmtInfo, source: SourceRef, original: &str) -> BackupRollbackPair {
         self.seq += 1;
         let seq = self.seq;
-        match stmt.kind.as_str() {
+        let mut pair = match stmt.kind.as_str() {
             // 纯反向 DDL（无需原表定义）
             "CREATE_TABLE" => super::ddl::gen_create_table(stmt, seq, source, original, self.renderer),
             "CREATE_INDEX" => super::ddl::gen_create_index(stmt, seq, source, original, self.renderer),
@@ -44,7 +46,21 @@ impl<'a> RollbackGenerator<'a> {
             // ★ 需要原表定义的 DDL → 统一走 CREATE TABLE LIKE 模式（含 ADD COLUMN 带约束的降级，见 F17）
             "DROP_TABLE" | "DROP_INDEX" | "DROP_VIEW"
             | "ALTER_TABLE"  // DROP/MODIFY COLUMN、DROP INDEX/CONSTRAINT、DROP PRIMARY KEY、带约束的 ADD COLUMN 等
-                => super::ddl_like::gen_with_full_backup(stmt, seq, source, original, self),
+                => {
+                // ★ P1-1：backup_mode=incremental 时，ALTER DROP/MODIFY 缺 CREATE TABLE 上下文应报错。
+                // 当前升级增量路径未实现（所有 ALTER DROP/MODIFY 都走全表 LIKE），
+                // 故 incremental 模式下这些语句一律视为"缺上下文"，标 irreversible 阻断发布。
+                // DROP_TABLE/DROP_INDEX/DROP_VIEW 不受 backup_mode 影响（本就无增量路径）。
+                if self.backup_mode == "incremental" && stmt.kind == "ALTER_TABLE" {
+                    unsupported(
+                        seq, source, original,
+                        "backup_mode=incremental requires CREATE TABLE context for ALTER DROP/MODIFY, \
+                         which is not yet implemented; use backup_mode=auto or full",
+                    )
+                } else {
+                    super::ddl_like::gen_with_full_backup(stmt, seq, source, original, self)
+                }
+            }
             // DML
             "INSERT" => super::dml::gen_insert(stmt, seq, source, original, self),
             "UPDATE" => super::dml::gen_update(stmt, seq, source, original, self),
@@ -59,7 +75,9 @@ impl<'a> RollbackGenerator<'a> {
             // 跳过
             "START_TRANSACTION" | "COMMIT" | "ROLLBACK" | "SET_VARIABLE" | "USE" => skip(seq, source, original),
             _ => unsupported(seq, source, original, &format!("Unsupported statement kind: {}", stmt.kind)),
-        }
+        };
+        pair.stmt_kind = stmt.kind.clone();
+        pair
     }
 }
 
@@ -108,6 +126,7 @@ pub fn alter_op_has_constraints(op: &crate::rule::engine::ast::AlterOpInfo) -> b
 pub fn skip(seq: u64, source: SourceRef, original: &str) -> BackupRollbackPair {
     BackupRollbackPair {
         seq,
+        stmt_kind: String::new(),
         source,
         original_sql: original.to_string(),
         backup: None,
@@ -123,6 +142,7 @@ pub fn skip(seq: u64, source: SourceRef, original: &str) -> BackupRollbackPair {
 pub fn unsupported(seq: u64, source: SourceRef, original: &str, reason: &str) -> BackupRollbackPair {
     BackupRollbackPair {
         seq,
+        stmt_kind: String::new(),
         source,
         original_sql: original.to_string(),
         backup: None,
@@ -233,5 +253,58 @@ mod tests {
         let pair = skip(1, SourceRef::placeholder(), "COMMIT");
         assert!(pair.backup.is_none());
         assert!(pair.rollback.is_none());
+    }
+
+    // ===== P1-1: backup_mode 配置接入测试 =====
+
+    fn make_cfg_with_backup_mode(backup_mode: &str) -> (Config, RollbackConfig) {
+        let cfg = Config {
+            structure: crate::config::StructureConfig { paths: vec![], strict: false, allow_extra: vec![] },
+            classification: crate::config::ClassificationConfig { rules: vec![], default_type: "other".to_string() },
+            rules: vec![], rules_file: None, rules_dir: std::path::PathBuf::new(),
+            output: crate::config::OutputConfig::default(),
+            mapper: crate::config::MapperConfig::default(),
+            scan: crate::config::ScanConfig::default(),
+            file_check: crate::config::FileCheckConfig::default(),
+            rollback: RollbackConfig { backup_mode: backup_mode.to_string(), ..RollbackConfig::default() },
+            cache: crate::config::CacheConfig::default(),
+            dialect: crate::config::CheckDialect::default(),
+        };
+        let rc = cfg.rollback.clone();
+        (cfg, rc)
+    }
+
+    #[test]
+    fn backup_mode_incremental_blocks_alter_drop_column() {
+        // P1-1：backup_mode=incremental 时，ALTER DROP COLUMN 应标 irreversible 并报错
+        let (cfg, rc) = make_cfg_with_backup_mode("incremental");
+        let mut gen = RollbackGenerator::new(&cfg, &rc, &crate::rollback::dialect::MySqlRenderer);
+        let stmt = make_alter_stmt(vec![op("DROP_COLUMN", "")]);
+        let pair = gen.generate(&stmt, SourceRef::placeholder(), "ALTER TABLE t DROP COLUMN x");
+        assert!(pair.safety.irreversible, "incremental 模式下 ALTER DROP COLUMN 应标 irreversible");
+        assert!(pair.rollback.is_none());
+        assert!(pair.warnings.iter().any(|w| w.contains("backup_mode=incremental")));
+    }
+
+    #[test]
+    fn backup_mode_auto_allows_alter_drop_column() {
+        // P1-1：auto 模式（默认）下，ALTER DROP COLUMN 走全表 LIKE 路径，不报错
+        let (cfg, rc) = make_cfg_with_backup_mode("auto");
+        let mut gen = RollbackGenerator::new(&cfg, &rc, &crate::rollback::dialect::MySqlRenderer);
+        let stmt = make_alter_stmt(vec![op("DROP_COLUMN", "")]);
+        let pair = gen.generate(&stmt, SourceRef::placeholder(), "ALTER TABLE t DROP COLUMN x");
+        assert!(!pair.safety.irreversible, "auto 模式下 ALTER DROP COLUMN 不应标 irreversible");
+        assert!(pair.rollback.is_some());
+    }
+
+    #[test]
+    fn backup_mode_full_allows_alter_drop_column() {
+        // P1-1：full 模式下，ALTER DROP COLUMN 走全表 LIKE 路径（与 auto 一致）
+        let (cfg, rc) = make_cfg_with_backup_mode("full");
+        let mut gen = RollbackGenerator::new(&cfg, &rc, &crate::rollback::dialect::MySqlRenderer);
+        let stmt = make_alter_stmt(vec![op("DROP_COLUMN", "")]);
+        let pair = gen.generate(&stmt, SourceRef::placeholder(), "ALTER TABLE t DROP COLUMN x");
+        assert!(!pair.safety.irreversible);
+        assert!(pair.rollback.is_some());
     }
 }

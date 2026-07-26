@@ -24,12 +24,17 @@ pub mod dml;
 pub mod pk;
 pub mod render;
 pub mod manifest;
+pub mod util;
 
 use crate::rule::engine::ast::StmtInfo;
 use serde::Serialize;
 
-pub use dialect::{Dialect, DialectRenderer, MySqlRenderer, PostgreSqlRenderer, AtomicStrategy, renderer_for};
-pub use manifest::{Manifest, ManifestItem, serialize_manifest};
+/// ★ D3：精简重导出——仅保留 main.rs / 测试实际通过 `crate::rollback::X` 路径访问的类型。
+/// `MySqlRenderer` / `PostgreSqlRenderer` / `AtomicStrategy` / `DialectRenderer` / `ManifestItem`
+/// 均通过 `crate::rollback::dialect::X` / `crate::rollback::manifest::X` 直接路径访问，
+/// 无需在此重导出。
+pub use dialect::{Dialect, renderer_for};
+pub use manifest::{Manifest, serialize_manifest};
 pub use generator::RollbackGenerator;
 
 /// ★ C2 架构修正：聚合所有"安全分类"标志，避免 flag 散装。
@@ -90,6 +95,9 @@ pub struct ExpectedColumn {
 pub struct BackupRollbackPair {
     /// 全局序号（1-indexed），用于 backup/rollback 配对
     pub seq: u64,
+    /// 语句类型（StmtInfo.kind），如 "INSERT" / "UPDATE" / "CREATE_TABLE" / "ALTER_TABLE" / "DROP_TABLE"
+    /// 用于 render 阶段判断 DDL/DML 归类，避免文本嗅探
+    pub stmt_kind: String,
     /// 来源信息：文件路径 + 行号 + （mapper 时）statement_id
     pub source: SourceRef,
     /// 变更语句原文（去掉尾部分号）
@@ -119,6 +127,9 @@ pub struct SourceRef {
 
 impl SourceRef {
     /// 占位 SourceRef，由调用方回填实际值。
+    /// ★ D2：仅在测试模块使用（generator/dml 测试构造 pair 时调用），
+    /// 生产代码直接构造 SourceRef 字面量。保留用于测试便利。
+    #[allow(dead_code)]
     pub fn placeholder() -> Self {
         SourceRef {
             file: String::new(),
@@ -128,13 +139,6 @@ impl SourceRef {
             variant_label: None,
         }
     }
-}
-
-pub struct GenerationResult {
-    pub pairs: Vec<BackupRollbackPair>,
-    pub backup_sql: String,
-    pub rollback_sql: String,
-    pub manifest: Manifest,
 }
 
 /// 从 StmtInfo 提取目标表名（去掉反引号/双引号）。

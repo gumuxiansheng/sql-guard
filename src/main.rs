@@ -593,10 +593,19 @@ fn run_gen_rollback(
     fail_on_warning: bool,
     allow_partial: bool,
 ) -> Result<i32, SqlGuardError> {
-    let (mut config, config_dir) = load_config(config_path)?;
+    let (mut config, _config_dir) = load_config(config_path)?;
 
     // 应用 CLI 覆盖到 rollback 配置
     let rc: &mut crate::config::RollbackConfig = &mut config.rollback;
+
+    // ★ P2-3：旧配置兼容映射——lock_tables_during_backup=false 且未显式覆盖 lock_scope 时，
+    // 视为用户意图"不加锁"，将 lock_scope 从默认 auto 改为 none。
+    // 必须在 CLI lock_scope 覆盖之前执行，确保 CLI 优先级高于旧配置兼容映射。
+    if !rc.lock_tables_during_backup && rc.lock_scope == "auto" && lock_scope_override.is_none() {
+        rc.lock_scope = "none".to_string();
+        eprintln!("Rollback lock_scope=none (mapped from legacy lock_tables_during_backup=false)");
+    }
+
     if let Some(d) = dialect_override {
         rc.dialect = d.to_string();
         eprintln!("Rollback dialect override: {}", d);
@@ -743,6 +752,18 @@ fn run_gen_rollback(
         pairs.iter().filter(|p| !p.safety.reliable).count()
     );
 
+    // P1-2：按 lock_scope 统一回填 safety.lock_type 及衍生标志（在 render/manifest 之前）
+    crate::rollback::render::finalize_safety(&mut pairs, &config.rollback);
+
+    // R4 预检（需 pairs 已生成）：binlog_strategy=auto + 含 DDL → 报错退出
+    let prereq_errors = crate::rollback::render::validate_render_prerequisites(&pairs, &config.rollback);
+    if !prereq_errors.is_empty() {
+        for e in &prereq_errors {
+            eprintln!("Prerequisite error: {}", e);
+        }
+        return Ok(2);
+    }
+
     // 渲染输出
     let backup_sql = crate::rollback::render::render_backup(&pairs, &config.rollback, &*renderer);
     let rollback_sql = crate::rollback::render::render_rollback(&pairs, &config.rollback, &*renderer);
@@ -757,8 +778,8 @@ fn run_gen_rollback(
     fs::write(&rollback_path, &rollback_sql).map_err(SqlGuardError::IoError)?;
     fs::write(&cleanup_path, &cleanup_sql).map_err(SqlGuardError::IoError)?;
 
-    // 构建并写 manifest
-    let manifest = crate::rollback::Manifest::from_pairs(&pairs, dialect.as_str(), Vec::new());
+    // 构建并写 manifest（★ P1-2：传入 rc 以透出 assert_on_schema_mismatch / on_partitioned_table）
+    let manifest = crate::rollback::Manifest::from_pairs(&pairs, dialect.as_str(), &config.rollback, Vec::new());
     let manifest_json = crate::rollback::serialize_manifest(&manifest)
         .map_err(|e| SqlGuardError::CheckError(format!("Failed to serialize manifest: {}", e)))?;
     fs::write(&manifest_path, &manifest_json).map_err(SqlGuardError::IoError)?;

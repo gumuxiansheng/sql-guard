@@ -6,6 +6,7 @@
 use std::collections::HashSet;
 use crate::config::RollbackConfig;
 use super::strip_ident_quotes;
+use super::util::current_date_yyyymmdd;
 
 /// 备份表命名分配器。
 ///
@@ -51,13 +52,29 @@ impl<'a> NamingAllocator<'a> {
 
     /// 分配一个影子表名（用于 F12 原子 RENAME 切换）：`_rb_<seq>_<table>`。
     /// 与 bks_ 表共用同一序号空间（调用方在 alloc bks_ 之后调用 alloc_shadow 取对齐的 seq）。
+    /// ★ P2-4：插入 `used` 集合防止重名；若冲突（同 seq+table 重复调用），追加子计数器后缀。
     pub fn alloc_shadow(&mut self, seq: u64, table: &str) -> String {
         let clean = strip_ident_quotes(table);
         let safe = sanitize_table_name(&clean);
-        format!("_rb_{:04}_{}", seq, safe)
+        let base = format!("_rb_{:04}_{}", seq, safe);
+        if self.used.insert(base.clone()) {
+            return base;
+        }
+        // 罕见：同 seq+table 重复调用导致冲突，追加子计数器保证唯一
+        let mut sub = 2u64;
+        loop {
+            let candidate = format!("_rb_{:04}_{}_{}", seq, safe, sub);
+            if self.used.insert(candidate.clone()) {
+                return candidate;
+            }
+            sub += 1;
+        }
     }
 
     /// 当前已分配的最大序号。
+    /// ★ D2：命名分配器对外查询 API，供调用方在生成后获取已用序号上限。
+    /// 当前 main.rs 未调用，保留作为库 API。
+    #[allow(dead_code)]
     pub fn current_seq(&self) -> u64 {
         self.seq
     }
@@ -68,47 +85,6 @@ fn sanitize_table_name(name: &str) -> String {
     name.chars()
         .map(|c| if c.is_ascii_alphanumeric() || c == '_' { c } else { '_' })
         .collect()
-}
-
-/// 取当前日期，格式 `YYYYMMDD`（8 位数字）。失败时回退到 `19700101`。
-fn current_date_yyyymmdd() -> String {
-    // 不引入 chrono 依赖，用 std::time + 简单天数计算。
-    // Unix epoch 1970-01-01；以日为单位累加，反向计算年月日。
-    let secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    let days = secs / 86_400;
-    yyyymmdd_from_days_since_epoch(days as i64)
-}
-
-/// 将"自 1970-01-01 起的天数"转换为 `YYYYMMDD`。
-/// 算法：从 1970 起逐年减去当年天数（闰年 366，平年 365）。
-fn yyyymmdd_from_days_since_epoch(mut days: i64) -> String {
-    let mut year = 1970i64;
-    loop {
-        let days_in_year = if is_leap(year) { 366 } else { 365 };
-        if days < days_in_year {
-            break;
-        }
-        days -= days_in_year;
-        year += 1;
-    }
-    let month_lengths: [i64; 12] = [31, if is_leap(year) { 29 } else { 28 }, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
-    let mut month = 1i64;
-    for &ml in &month_lengths {
-        if days < ml {
-            break;
-        }
-        days -= ml;
-        month += 1;
-    }
-    let day = days + 1;
-    format!("{:04}{:02}{:02}", year, month, day)
-}
-
-fn is_leap(year: i64) -> bool {
-    (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0)
 }
 
 #[cfg(test)]
@@ -167,28 +143,22 @@ mod tests {
     }
 
     #[test]
+    fn alloc_shadow_dedup_on_collision() {
+        // P2-4：同 seq+table 重复调用 alloc_shadow 时，第二次应追加子计数器后缀
+        let rc = rc();
+        let mut n = NamingAllocator::new(&rc);
+        let first = n.alloc_shadow(1, "users");
+        let second = n.alloc_shadow(1, "users");
+        assert_eq!(first, "_rb_0001_users");
+        assert_eq!(second, "_rb_0001_users_2");
+    }
+
+    #[test]
     fn alloc_without_date_omits_date_segment() {
         let mut rc = rc();
         rc.backup_table_with_date = false;
         let mut n = NamingAllocator::new(&rc);
         let name = n.alloc("users");
         assert_eq!(name, "bks_users_0001");
-    }
-
-    #[test]
-    fn yyyymmdd_known_epoch() {
-        assert_eq!(yyyymmdd_from_days_since_epoch(0), "19700101");
-        // 2026-07-26 是 epoch + 20681 天（粗略验证）
-        let s = yyyymmdd_from_days_since_epoch(20681);
-        assert_eq!(s.len(), 8);
-        assert!(s.starts_with("202"));
-    }
-
-    #[test]
-    fn is_leap_handles_century_rules() {
-        assert!(is_leap(2000));
-        assert!(!is_leap(1900));
-        assert!(is_leap(2024));
-        assert!(!is_leap(2023));
     }
 }

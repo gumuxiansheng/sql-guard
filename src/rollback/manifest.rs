@@ -6,6 +6,8 @@
 
 use serde::Serialize;
 use super::{BackupRollbackPair, SafetyClass, BackupStrategy, SourceRef, ExpectedSchema};
+use super::util::current_iso8601_utc;
+use crate::config::RollbackConfig;
 
 #[derive(Serialize)]
 pub struct Manifest {
@@ -24,6 +26,11 @@ pub struct Manifest {
     pub requires_lock_count: usize,
     pub partitioned_count: usize,
     pub irreversible_if_backup_missing_count: usize,
+    /// ★ P1-2：执行期策略（发布平台消费，原仅存在于 RollbackConfig 未透出）
+    /// F13 schema 漂移校验策略：abort / warn / ignore
+    pub assert_on_schema_mismatch: String,
+    /// F15 分区表处理策略：abort / warn / fallback
+    pub on_partitioned_table: String,
     pub items: Vec<ManifestItem>,
     pub warnings: Vec<String>,
 }
@@ -48,7 +55,8 @@ pub struct ManifestItem {
 
 impl Manifest {
     /// 从已生成的 pairs 与方言名称构造 manifest。
-    pub fn from_pairs(pairs: &[BackupRollbackPair], dialect: &str, warnings: Vec<String>) -> Self {
+    /// ★ P1-2：新增 `rc` 参数以透出 `assert_on_schema_mismatch` / `on_partitioned_table` 执行期策略。
+    pub fn from_pairs(pairs: &[BackupRollbackPair], dialect: &str, rc: &RollbackConfig, warnings: Vec<String>) -> Self {
         let mut unreliable = 0usize;
         let mut irreversible = 0usize;
         let mut partial = 0usize;
@@ -116,6 +124,9 @@ impl Manifest {
             requires_lock_count: requires_lock,
             partitioned_count: partitioned,
             irreversible_if_backup_missing_count: irreversible_if_missing,
+            // ★ P1-2：透出执行期策略供发布平台读取
+            assert_on_schema_mismatch: rc.assert_on_schema_mismatch.clone(),
+            on_partitioned_table: rc.on_partitioned_table.clone(),
             items,
             warnings,
         }
@@ -146,47 +157,6 @@ pub fn serialize_manifest(m: &Manifest) -> Result<String, serde_json::Error> {
     serde_json::to_string_pretty(m)
 }
 
-/// 取当前 UTC 时间，格式 `YYYY-MM-DDTHH:MM:SSZ`。失败时回退到 `1970-01-01T00:00:00Z`。
-fn current_iso8601_utc() -> String {
-    let secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    let days = (secs / 86_400) as i64;
-    let sec_of_day = secs % 86_400;
-    let hour = sec_of_day / 3600;
-    let minute = (sec_of_day % 3600) / 60;
-    let second = sec_of_day % 60;
-    let (y, m, d) = ymd_from_days_since_epoch(days);
-    format!("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z", y, m, d, hour, minute, second)
-}
-
-fn ymd_from_days_since_epoch(mut days: i64) -> (i64, i64, i64) {
-    let mut year = 1970i64;
-    loop {
-        let days_in_year = if is_leap(year) { 366 } else { 365 };
-        if days < days_in_year {
-            break;
-        }
-        days -= days_in_year;
-        year += 1;
-    }
-    let month_lengths: [i64; 12] = [31, if is_leap(year) { 29 } else { 28 }, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
-    let mut month = 1i64;
-    for &ml in &month_lengths {
-        if days < ml {
-            break;
-        }
-        days -= ml;
-        month += 1;
-    }
-    (year, month, days + 1)
-}
-
-fn is_leap(year: i64) -> bool {
-    (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -195,6 +165,7 @@ mod tests {
     fn make_pair(seq: u64, reliable: bool, partial: bool, irreversible: bool, requires_lock: bool) -> BackupRollbackPair {
         BackupRollbackPair {
             seq,
+            stmt_kind: String::new(),
             source: SourceRef::placeholder(),
             original_sql: format!("-- stmt {}", seq),
             backup: Some(format!("-- backup {}", seq)),
@@ -217,6 +188,10 @@ mod tests {
         }
     }
 
+    fn default_rc() -> RollbackConfig {
+        RollbackConfig::default()
+    }
+
     #[test]
     fn from_pairs_counts_correctly() {
         let pairs = vec![
@@ -224,7 +199,7 @@ mod tests {
             make_pair(2, false, true, false, false),
             make_pair(3, true, false, true, false),
         ];
-        let m = Manifest::from_pairs(&pairs, "mysql", vec![]);
+        let m = Manifest::from_pairs(&pairs, "mysql", &default_rc(), vec![]);
         assert_eq!(m.source_count, 3);
         assert_eq!(m.backup_count, 3);
         assert_eq!(m.rollback_count, 3);
@@ -237,21 +212,21 @@ mod tests {
     #[test]
     fn exit_code_zero_when_all_clean() {
         let pairs = vec![make_pair(1, true, false, false, false)];
-        let m = Manifest::from_pairs(&pairs, "mysql", vec![]);
+        let m = Manifest::from_pairs(&pairs, "mysql", &default_rc(), vec![]);
         assert_eq!(m.exit_code(false, false), 0);
     }
 
     #[test]
     fn exit_code_two_when_irreversible() {
         let pairs = vec![make_pair(1, true, false, true, false)];
-        let m = Manifest::from_pairs(&pairs, "mysql", vec![]);
+        let m = Manifest::from_pairs(&pairs, "mysql", &default_rc(), vec![]);
         assert_eq!(m.exit_code(false, false), 2);
     }
 
     #[test]
     fn exit_code_two_when_partial_unless_allowed() {
         let pairs = vec![make_pair(1, true, true, false, false)];
-        let m = Manifest::from_pairs(&pairs, "mysql", vec![]);
+        let m = Manifest::from_pairs(&pairs, "mysql", &default_rc(), vec![]);
         assert_eq!(m.exit_code(false, false), 2);
         assert_eq!(m.exit_code(false, true), 0);
     }
@@ -259,7 +234,7 @@ mod tests {
     #[test]
     fn exit_code_one_when_only_warning() {
         let pairs = vec![make_pair(1, true, false, false, true)];
-        let m = Manifest::from_pairs(&pairs, "mysql", vec![]);
+        let m = Manifest::from_pairs(&pairs, "mysql", &default_rc(), vec![]);
         assert_eq!(m.exit_code(false, false), 1);
         assert_eq!(m.exit_code(true, false), 2);
     }
@@ -267,11 +242,30 @@ mod tests {
     #[test]
     fn serialize_produces_valid_json() {
         let pairs = vec![make_pair(1, true, false, false, true)];
-        let m = Manifest::from_pairs(&pairs, "mysql", vec!["test warning".to_string()]);
+        let m = Manifest::from_pairs(&pairs, "mysql", &default_rc(), vec!["test warning".to_string()]);
         let json = serialize_manifest(&m).unwrap();
         assert!(json.contains("\"dialect\": \"mysql\""));
         assert!(json.contains("\"requires_lock_count\": 1"));
         assert!(json.contains("\"lock_type\": \"FTWRL\""));
         assert!(json.contains("\"test warning\""));
+    }
+
+    // ===== P1-2: 执行期策略透出测试 =====
+
+    #[test]
+    fn manifest_includes_assert_and_partitioned_strategy() {
+        // P1-2：assert_on_schema_mismatch / on_partitioned_table 应从 rc 透出到 manifest 顶层
+        let pairs = vec![make_pair(1, true, false, false, false)];
+        let rc = RollbackConfig {
+            assert_on_schema_mismatch: "warn".to_string(),
+            on_partitioned_table: "fallback".to_string(),
+            ..RollbackConfig::default()
+        };
+        let m = Manifest::from_pairs(&pairs, "mysql", &rc, vec![]);
+        assert_eq!(m.assert_on_schema_mismatch, "warn");
+        assert_eq!(m.on_partitioned_table, "fallback");
+        let json = serialize_manifest(&m).unwrap();
+        assert!(json.contains("\"assert_on_schema_mismatch\": \"warn\""));
+        assert!(json.contains("\"on_partitioned_table\": \"fallback\""));
     }
 }

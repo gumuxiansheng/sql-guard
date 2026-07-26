@@ -65,22 +65,11 @@ pub trait DialectRenderer: Sync {
     /// - PG: `(LIKE "t" INCLUDING DEFAULTS INCLUDING CONSTRAINTS INCLUDING INDEXES INCLUDING COMMENTS INCLUDING GENERATED)`
     fn create_table_like_clause(&self, source_table: &str) -> String;
 
-    /// 事务开启语句（MySQL: `START TRANSACTION` / PG: `BEGIN`）
-    fn begin_transaction(&self) -> &'static str;
-
     /// DROP INDEX 语句（MySQL: `DROP INDEX IF EXISTS i ON t` / PG: `DROP INDEX IF EXISTS i`）
     fn drop_index(&self, index_name: &str, table_name: &str) -> String;
 
     /// RENAME TABLE 语句（MySQL: `RENAME TABLE old TO new` / PG: `ALTER TABLE old RENAME TO new`）
     fn rename_table(&self, old: &str, new: &str) -> String;
-
-    /// CREATE INDEX IF NOT EXISTS 语句
-    /// （MySQL 8.0 不支持 IF NOT EXISTS，降级为 `CREATE INDEX i ON t (c)` + 容错；
-    ///   PG 直接 `CREATE INDEX IF NOT EXISTS i ON t (c)`）
-    fn create_index_if_not_exists(&self, index_name: &str, table: &str, columns: &[String]) -> String;
-
-    /// ALTER TABLE ADD PRIMARY KEY 语句（语法双方言兼容，但 PG 要求列 NOT NULL）
-    fn add_primary_key(&self, table: &str, columns: &[String]) -> String;
 
     /// ALTER TABLE DROP PRIMARY KEY 语句
     /// （MySQL: `ALTER TABLE t DROP PRIMARY KEY` / PG: `ALTER TABLE t DROP CONSTRAINT t_pkey`，需 PG 知道约束名）
@@ -151,10 +140,6 @@ impl DialectRenderer for MySqlRenderer {
         format!("LIKE {}", self.quote_ident(src))
     }
 
-    fn begin_transaction(&self) -> &'static str {
-        "START TRANSACTION"
-    }
-
     fn drop_index(&self, idx: &str, tbl: &str) -> String {
         format!(
             "DROP INDEX IF EXISTS {} ON {}",
@@ -165,18 +150,6 @@ impl DialectRenderer for MySqlRenderer {
 
     fn rename_table(&self, old: &str, new: &str) -> String {
         format!("RENAME TABLE {} TO {}", self.quote_ident(old), self.quote_ident(new))
-    }
-
-    fn create_index_if_not_exists(&self, idx: &str, tbl: &str, cols: &[String]) -> String {
-        // MySQL 8.0 不支持 CREATE INDEX IF NOT EXISTS，用不带 IF NOT EXISTS 的写法
-        // （运行期若已存在会报错，由 DBA 处理；生成时无法静态判断）
-        let cols_str = cols.iter().map(|c| self.quote_ident(c)).collect::<Vec<_>>().join(", ");
-        format!("CREATE INDEX {} ON {} ({})", self.quote_ident(idx), self.quote_ident(tbl), cols_str)
-    }
-
-    fn add_primary_key(&self, tbl: &str, cols: &[String]) -> String {
-        let cols_str = cols.iter().map(|c| self.quote_ident(c)).collect::<Vec<_>>().join(", ");
-        format!("ALTER TABLE {} ADD PRIMARY KEY ({})", self.quote_ident(tbl), cols_str)
     }
 
     fn drop_primary_key(&self, tbl: &str, _constraint_name: Option<&str>) -> String {
@@ -205,9 +178,12 @@ impl DialectRenderer for MySqlRenderer {
         s.push_str("-- ★ F12 原子 RENAME 切换（MySQL）：原表保留为 _old 兜底，影子表 RENAME 为原表名\n");
         s.push_str("-- 乙-3 修正：RENAME 前关闭外键检查，避免 FK 拓扑破坏\n");
         s.push_str("SET FOREIGN_KEY_CHECKS=0;\n");
+        // ★ N5 守卫：RENAME 前先 DROP 已存在的 _old / shadow，确保脚本可重跑
+        let old_name = format!("{}_old_{}", table, shadow.strip_prefix("_rb_").and_then(|r| r.split('_').next()).unwrap_or("0001"));
+        s.push_str(&format!("DROP TABLE IF EXISTS {};\n", self.quote_ident(&old_name)));
+        s.push_str(&format!("DROP TABLE IF EXISTS {};\n", self.quote_ident(shadow)));
         s.push_str(&format!("CREATE TABLE {} LIKE {};\n", self.quote_ident(shadow), self.quote_ident(bks)));
         s.push_str(&format!("INSERT INTO {} SELECT * FROM {};\n", self.quote_ident(shadow), self.quote_ident(bks)));
-        let old_name = format!("{}_old_{}", table, shadow.trim_start_matches("_rb_").split('_').next().unwrap_or("0001"));
         s.push_str(&format!(
             "RENAME TABLE {} TO {}, {} TO {};\n",
             self.quote_ident(table), self.quote_ident(&old_name),
@@ -302,26 +278,12 @@ impl DialectRenderer for PostgreSqlRenderer {
         )
     }
 
-    fn begin_transaction(&self) -> &'static str {
-        "BEGIN"
-    }
-
     fn drop_index(&self, idx: &str, _tbl: &str) -> String {
         format!("DROP INDEX IF EXISTS {}", self.quote_ident(idx))
     }
 
     fn rename_table(&self, old: &str, new: &str) -> String {
         format!("ALTER TABLE {} RENAME TO {}", self.quote_ident(old), self.quote_ident(new))
-    }
-
-    fn create_index_if_not_exists(&self, idx: &str, tbl: &str, cols: &[String]) -> String {
-        let cols_str = cols.iter().map(|c| self.quote_ident(c)).collect::<Vec<_>>().join(", ");
-        format!("CREATE INDEX IF NOT EXISTS {} ON {} ({})", self.quote_ident(idx), self.quote_ident(tbl), cols_str)
-    }
-
-    fn add_primary_key(&self, tbl: &str, cols: &[String]) -> String {
-        let cols_str = cols.iter().map(|c| self.quote_ident(c)).collect::<Vec<_>>().join(", ");
-        format!("ALTER TABLE {} ADD PRIMARY KEY ({})", self.quote_ident(tbl), cols_str)
     }
 
     fn drop_primary_key(&self, tbl: &str, constraint_name: Option<&str>) -> String {
@@ -513,5 +475,16 @@ mod tests {
         assert!(!stripped.contains("UNLOCK TABLES"));
         assert!(stripped.contains("DROP TABLE IF EXISTS `bks_x`;"));
         assert!(stripped.contains("INSERT INTO `bks_x` SELECT * FROM `x`;"));
+    }
+
+    #[test]
+    fn mysql_atomic_rename_includes_n5_guard_drops() {
+        // ★ N5 守卫：RENAME 前必须先 DROP _old 和 shadow，确保脚本可重跑
+        let r = MySqlRenderer;
+        let sql = r.render_atomic_rename_rollback("users", "bks_users_20260731_0001", "_rb_0001_users");
+        assert!(sql.contains("DROP TABLE IF EXISTS `users_old_0001`;"), "N5 guard: must DROP _old before RENAME");
+        assert!(sql.contains("DROP TABLE IF EXISTS `_rb_0001_users`;"), "N5 guard: must DROP shadow before RENAME");
+        assert!(sql.contains("CREATE TABLE `_rb_0001_users` LIKE `bks_users_20260731_0001`;"));
+        assert!(sql.contains("RENAME TABLE `users` TO `users_old_0001`, `_rb_0001_users` TO `users`;"));
     }
 }

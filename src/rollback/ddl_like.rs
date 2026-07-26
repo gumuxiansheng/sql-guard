@@ -17,7 +17,7 @@
 //! has_auto_increment_or_serial 等辅助逻辑。
 
 use crate::rule::engine::ast::StmtInfo;
-use super::dialect::{DialectRenderer, AtomicStrategy};
+use super::dialect::AtomicStrategy;
 use super::generator::RollbackGenerator;
 use super::{BackupRollbackPair, SourceRef, SafetyClass, BackupStrategy, ExpectedSchema, extract_target_table_from_stmt};
 
@@ -118,6 +118,7 @@ pub fn gen_with_full_backup(
 
     BackupRollbackPair {
         seq,
+        stmt_kind: String::new(),
         source,
         original_sql: original.to_string(),
         backup: Some(backup_sql),

@@ -6,6 +6,9 @@
 //! 只关心"新增/修改"行，不关心删除行（删除的 SQL 已不在文件中）。
 //! `--diff-filter=d` 排除纯删除的文件；新增文件（`is_new = true`）整文件算改动。
 
+/// ★ D3：`Path` 仅在 cfg(test) 测试模块中使用，生产代码只用 `PathBuf`。
+/// 编译器 dead_code 分析不看测试模块故报 unused，此处显式允许。
+#[allow(unused_imports)]
 use std::path::{Path, PathBuf};
 use std::process::Command;
 

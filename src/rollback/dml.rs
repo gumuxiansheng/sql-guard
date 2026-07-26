@@ -71,6 +71,7 @@ pub fn gen_insert(
 
     BackupRollbackPair {
         seq,
+        stmt_kind: String::new(),
         source,
         original_sql: original.to_string(),
         backup: None,
@@ -185,6 +186,7 @@ pub fn gen_update(
 
     BackupRollbackPair {
         seq,
+        stmt_kind: String::new(),
         source,
         original_sql: original.to_string(),
         backup: Some(backup),
@@ -251,6 +253,7 @@ pub fn gen_delete(
 
     BackupRollbackPair {
         seq,
+        stmt_kind: String::new(),
         source,
         original_sql: original.to_string(),
         backup: Some(backup),
@@ -303,6 +306,7 @@ pub fn gen_truncate(
 
     BackupRollbackPair {
         seq,
+        stmt_kind: String::new(),
         source,
         original_sql: original.to_string(),
         backup: Some(backup),
@@ -405,6 +409,7 @@ pub fn gen_replace(
 
     BackupRollbackPair {
         seq,
+        stmt_kind: String::new(),
         source,
         original_sql: original.to_string(),
         backup: Some(backup),
@@ -890,6 +895,7 @@ fn build_full_column_delete(
 fn missing_insert_info(seq: u64, source: SourceRef, original: &str) -> BackupRollbackPair {
     BackupRollbackPair {
         seq,
+        stmt_kind: String::new(),
         source,
         original_sql: original.to_string(),
         backup: None,
@@ -907,6 +913,7 @@ fn missing_insert_info(seq: u64, source: SourceRef, original: &str) -> BackupRol
 fn missing_update_info(seq: u64, source: SourceRef, original: &str) -> BackupRollbackPair {
     BackupRollbackPair {
         seq,
+        stmt_kind: String::new(),
         source,
         original_sql: original.to_string(),
         backup: None,
@@ -924,6 +931,7 @@ fn missing_update_info(seq: u64, source: SourceRef, original: &str) -> BackupRol
 fn missing_delete_info(seq: u64, source: SourceRef, original: &str) -> BackupRollbackPair {
     BackupRollbackPair {
         seq,
+        stmt_kind: String::new(),
         source,
         original_sql: original.to_string(),
         backup: None,
@@ -941,6 +949,7 @@ fn missing_delete_info(seq: u64, source: SourceRef, original: &str) -> BackupRol
 fn missing_truncate_info(seq: u64, source: SourceRef, original: &str) -> BackupRollbackPair {
     BackupRollbackPair {
         seq,
+        stmt_kind: String::new(),
         source,
         original_sql: original.to_string(),
         backup: None,

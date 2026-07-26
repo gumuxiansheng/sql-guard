@@ -6,6 +6,9 @@ use serde::{Deserialize, Serialize};
 pub enum SqlGuardError {
     ConfigError(String),
     IoError(std::io::Error),
+    /// ★ D2：规则执行错误变体。当前规则引擎错误统一走 CheckError，此变体保留用于
+    /// 未来细粒度错误分类（按 rule_name 区分），是公开 API 契约的一部分。
+    #[allow(dead_code)]
     RuleError { rule_name: String, message: String },
     ScriptError(String),
     CheckError(String),
@@ -58,6 +61,9 @@ pub struct Violation {
 #[derive(Debug, Clone)]
 pub struct DirectoryIssue {
     pub path: PathBuf,
+    /// ★ D2：问题类型分类。当前 main.rs 仅按 path 列出问题，未读取此字段区分
+    /// Missing/Unexpected 的展示文案，保留用于未来按类型分组的展示需求。
+    #[allow(dead_code)]
     pub issue_type: DirectoryIssueType,
 }
 

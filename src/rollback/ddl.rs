@@ -25,6 +25,7 @@ pub fn gen_create_table(
     let rollback = format!("DROP TABLE IF EXISTS {};", r.quote_ident(table));
     BackupRollbackPair {
         seq,
+        stmt_kind: String::new(),
         source,
         original_sql: original.to_string(),
         backup: None,
@@ -50,6 +51,7 @@ pub fn gen_create_index(
     let rollback = format!("{};", r.drop_index(idx, tbl));
     BackupRollbackPair {
         seq,
+        stmt_kind: String::new(),
         source,
         original_sql: original.to_string(),
         backup: None,
@@ -73,6 +75,7 @@ pub fn gen_create_view(
     let rollback = format!("DROP VIEW IF EXISTS {};", r.quote_ident(name));
     BackupRollbackPair {
         seq,
+        stmt_kind: String::new(),
         source,
         original_sql: original.to_string(),
         backup: None,
@@ -227,6 +230,7 @@ pub fn gen_alter_metadata(
     };
     BackupRollbackPair {
         seq,
+        stmt_kind: String::new(),
         source,
         original_sql: original.to_string(),
         backup: None,

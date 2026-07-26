@@ -76,20 +76,43 @@ pub fn render_backup(
         }
     }
 
-    // 5. 主体：按 SEQ 正序渲染
+    // 5. PG 外层事务包裹（F14/N11）：REPEATABLE READ + 段内 LOCK TABLE ACCESS SHARE
+    //    backup 段内的 LOCK TABLE ... IN ACCESS SHARE MODE 在事务内才有效
+    let wrap = rc.wrap_transaction && dialect_name == "postgresql";
+    if wrap {
+        out.push_str("BEGIN;\n");
+        out.push_str("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ;\n\n");
+    }
+
+    // 6. 主体：按 SEQ 正序渲染
+    // P1-2：lock_scope=none 时剥离所有锁语句（FTWRL / LOCK TABLE / UNLOCK TABLES）
+    let strip_locks = rc.lock_scope == "none";
     if rc.coalesce_locks {
-        out.push_str(&render_backup_coalesced(pairs, rc, renderer));
+        let coalesced = render_backup_coalesced(pairs, rc, renderer);
+        if strip_locks {
+            out.push_str(&renderer.strip_lock_statements(&coalesced));
+        } else {
+            out.push_str(&coalesced);
+        }
     } else {
         for pair in pairs {
             if let Some(backup) = &pair.backup {
                 out.push_str(&format!("-- seq={} source={}:{}\n", pair.seq, pair.source.file, pair.source.line));
-                out.push_str(backup);
-                if !backup.ends_with('\n') {
+                if strip_locks {
+                    out.push_str(&renderer.strip_lock_statements(backup));
+                } else {
+                    out.push_str(backup);
+                }
+                if !out.ends_with('\n') {
                     out.push('\n');
                 }
                 out.push_str("\n");
             }
         }
+    }
+
+    if wrap {
+        out.push_str("COMMIT;\n");
     }
 
     out
@@ -135,12 +158,22 @@ pub fn render_rollback(
     let mut sorted: Vec<&BackupRollbackPair> = pairs.iter().collect();
     sorted.sort_by(|a, b| b.seq.cmp(&a.seq));
 
+    // P1-4/F5：MySQL DML rollback 包语句级事务（DDL 隐式提交不包）
+    let mysql_dml_wrap = dialect_name == "mysql" && rc.wrap_transaction;
+
     for pair in sorted {
         if let Some(rollback) = &pair.rollback {
             out.push_str(&format!("-- seq={} (LIFO) source={}:{}\n", pair.seq, pair.source.file, pair.source.line));
+            let is_dml = matches!(pair.stmt_kind.as_str(), "INSERT" | "UPDATE" | "DELETE" | "REPLACE");
+            if mysql_dml_wrap && is_dml {
+                out.push_str("START TRANSACTION;\n");
+            }
             out.push_str(rollback);
             if !rollback.ends_with('\n') {
                 out.push('\n');
+            }
+            if mysql_dml_wrap && is_dml {
+                out.push_str("COMMIT;\n");
             }
             out.push_str("\n");
         }
@@ -217,22 +250,43 @@ pub fn resolve_lock_type(lock_scope: &str, has_ddl: bool) -> &'static str {
 /// 判断 pairs 中是否含 DDL 语句（用于 resolve_lock_type 的 auto 决策）。
 pub fn has_ddl_in_pairs(pairs: &[BackupRollbackPair]) -> bool {
     pairs.iter().any(|p| {
-        // 通过 rollback 文本特征判断 DDL：含 CREATE/DROP/ALTER/RENAME TABLE
-        let r = p.rollback.as_deref().unwrap_or("");
-        let upper = r.to_uppercase();
-        upper.contains("CREATE TABLE")
-            || upper.contains("DROP TABLE")
-            || upper.contains("ALTER TABLE")
-            || upper.contains("RENAME TABLE")
-            || upper.contains("CREATE VIEW")
-            || upper.contains("DROP VIEW")
+        // ★ P1-3：通过 stmt_kind 结构化判断，避免文本嗅探
+        matches!(
+            p.stmt_kind.as_str(),
+            "CREATE_TABLE" | "DROP_TABLE" | "ALTER_TABLE"
+            | "CREATE_INDEX" | "DROP_INDEX"
+            | "CREATE_VIEW" | "DROP_VIEW"
+            | "RENAME_TABLE" | "TRUNCATE"
+        )
     })
+}
+
+/// ★ P1-2：在所有 pairs 生成后，按 lock_scope 统一回填 safety.lock_type 及衍生标志。
+///
+/// 生成阶段 safety.lock_type 为硬编码 "FTWRL"（占位），此处按脚本级 has_ddl +
+/// `resolve_lock_type` 覆写为实际锁类型。同时回填：
+/// - `lock_timeout_best_effort`（FTWRL 时 true，N12/R7）
+/// - `snapshot_window_unprotected`（SNAPSHOT 时 true，N11/R1）
+///
+/// 应在 `generate()` 全部完成后、`render_*()` / `Manifest::from_pairs()` 之前调用。
+pub fn finalize_safety(pairs: &mut [BackupRollbackPair], rc: &RollbackConfig) {
+    let has_ddl = has_ddl_in_pairs(pairs);
+    let lock_type = resolve_lock_type(&rc.lock_scope, has_ddl);
+    for p in pairs.iter_mut() {
+        if p.safety.requires_lock {
+            p.safety.lock_type = Some(lock_type.to_string());
+            // N12/R7：FTWRL 的 lock_wait_timeout 行为不完全一致，仅 best-effort 兜底
+            p.safety.lock_timeout_best_effort = lock_type == "FTWRL";
+            // N11/R1：snapshot 模式下 DDL 外提到事务前，建表到快照间无保护窗口期
+            p.safety.snapshot_window_unprotected = lock_type == "SNAPSHOT";
+        }
+    }
 }
 
 /// D6/R6 锁合并分组：将连续同表的 backup 段归为一组。
 ///
-/// conservative（默认）：仅 DDL 全表 LIKE（backup 含 "INSERT INTO bks_ SELECT * FROM t" 无 WHERE）
-///   合并；DML 增量（含 WHERE）不合并
+/// conservative（默认）：仅 DDL 全表 LIKE（strategy.backup_mode == "full"）
+///   合并；DML 增量（backup_mode == "incremental"）不合并
 /// aggressive：所有同表段都尝试合并
 pub fn group_for_coalesce<'a>(
     pairs: &'a [BackupRollbackPair],
@@ -252,11 +306,12 @@ pub fn group_for_coalesce<'a>(
         // 提取目标表名（从 backup 段的 CREATE TABLE bks_xxx LIKE t 中的 t）
         let target = extract_target_table_from_backup(backup);
 
+        // P1-7：用 strategy.backup_mode 结构化判断，而非文本嗅探
         let can_coalesce = if aggressive {
             target.is_some()
         } else {
-            // conservative：仅全表 LIKE（INSERT SELECT * FROM t 无 WHERE）
-            target.is_some() && is_full_table_backup(backup)
+            // conservative：仅全表备份（backup_mode == "full"）
+            target.is_some() && pair.strategy.backup_mode == "full"
         };
 
         if can_coalesce {
@@ -293,13 +348,15 @@ pub fn validate_render_prerequisites(
         );
     }
 
-    // R4：binlog_strategy=auto + 含 DDL → 视为 never（v1 静态无法检测 GTID）
-    // M5 简化：auto + 含 DDL 不报错，但在 render_binlog_control 中降级为 never
-    // 严格模式由调用方按返回的 warnings 决策
+    // R4：binlog_strategy=auto + 含 DDL → 报错退出（v1 静态无法检测 GTID）
+    // 用户需显式设 binlog_strategy = "never"（安全，binlog 增长）或 "always"（GTID 风险）
     let has_ddl = has_ddl_in_pairs(pairs);
     if rc.binlog_strategy == "auto" && has_ddl && rc.dialect == "mysql" {
-        // 仅记录为 warning（通过返回值不阻断），不加入 errors
-        // 严格场景调用方可自行升级为 error
+        errors.push(
+            "binlog_strategy=auto + static mode + DDL in script is ambiguous (GTID unknown); \
+             explicitly set binlog_strategy to 'never' (safe, binlog grows) or 'always' (GTID risk) \
+             before execution".to_string()
+        );
     }
 
     errors
@@ -448,14 +505,6 @@ fn extract_target_table_from_backup(backup: &str) -> Option<String> {
     Some(super::strip_ident_quotes(raw))
 }
 
-/// 判断 backup 段是否为全表备份（INSERT INTO bks_ SELECT * FROM t 无 WHERE）。
-/// conservative coalesce 仅合并此类段。
-fn is_full_table_backup(backup: &str) -> bool {
-    let upper = backup.to_uppercase();
-    // 含 "INSERT INTO bks_ SELECT * FROM" 且不含 " WHERE "
-    upper.contains("INSERT INTO") && upper.contains("SELECT * FROM") && !upper.contains(" WHERE ")
-}
-
 /// 从所有 backup 段收集 bks_ 表名（用于 cleanup）。
 fn collect_bks_table_names(pairs: &[BackupRollbackPair]) -> Vec<String> {
     let mut names = Vec::new();
@@ -496,8 +545,13 @@ mod tests {
     use crate::rollback::dialect::{MySqlRenderer, PostgreSqlRenderer};
 
     fn make_pair(seq: u64, backup: Option<&str>, rollback: Option<&str>) -> BackupRollbackPair {
+        make_pair_with_kind(seq, backup, rollback, "")
+    }
+
+    fn make_pair_with_kind(seq: u64, backup: Option<&str>, rollback: Option<&str>, kind: &str) -> BackupRollbackPair {
         BackupRollbackPair {
             seq,
+            stmt_kind: kind.to_string(),
             source: SourceRef::placeholder(),
             original_sql: String::new(),
             backup: backup.map(|s| s.to_string()),
@@ -507,6 +561,12 @@ mod tests {
             expected_schema: None,
             warnings: vec![],
         }
+    }
+
+    fn make_pair_with_mode(seq: u64, backup: Option<&str>, rollback: Option<&str>, kind: &str, backup_mode: &str) -> BackupRollbackPair {
+        let mut pair = make_pair_with_kind(seq, backup, rollback, kind);
+        pair.strategy.backup_mode = backup_mode.to_string();
+        pair
     }
 
     fn rc() -> RollbackConfig {
@@ -539,14 +599,70 @@ mod tests {
     }
 
     #[test]
+    fn finalize_safety_global_sets_ftwrl_and_best_effort() {
+        // P1-2 + P2-2：lock_scope=global → lock_type=FTWRL, lock_timeout_best_effort=true
+        let mut rc = rc();
+        rc.lock_scope = "global".to_string();
+        let mut pairs = vec![make_pair_with_kind(1, Some("FLUSH TABLES WITH READ LOCK;\nCREATE TABLE `bks_t` LIKE `t`;\nUNLOCK TABLES;"), None, "DROP_TABLE")];
+        // requires_lock defaults to false; set it true to simulate backup segments
+        pairs[0].safety.requires_lock = true;
+        finalize_safety(&mut pairs, &rc);
+        assert_eq!(pairs[0].safety.lock_type.as_deref(), Some("FTWRL"));
+        assert!(pairs[0].safety.lock_timeout_best_effort, "FTWRL → best_effort=true");
+        assert!(!pairs[0].safety.snapshot_window_unprotected);
+    }
+
+    #[test]
+    fn finalize_safety_snapshot_sets_unprotected() {
+        // P2-2：lock_scope=snapshot → snapshot_window_unprotected=true
+        let mut rc = rc();
+        rc.lock_scope = "snapshot".to_string();
+        let mut pairs = vec![make_pair_with_kind(1, Some("LOCK TABLE \"t\" IN ACCESS SHARE MODE;\nCREATE TABLE \"bks_t\" (LIKE \"t\");"), None, "DELETE")];
+        pairs[0].safety.requires_lock = true;
+        finalize_safety(&mut pairs, &rc);
+        assert_eq!(pairs[0].safety.lock_type.as_deref(), Some("SNAPSHOT"));
+        assert!(pairs[0].safety.snapshot_window_unprotected, "SNAPSHOT → unprotected=true");
+        assert!(!pairs[0].safety.lock_timeout_best_effort);
+    }
+
+    #[test]
+    fn finalize_safety_none_sets_none() {
+        let mut rc = rc();
+        rc.lock_scope = "none".to_string();
+        let mut pairs = vec![make_pair_with_kind(1, Some("FLUSH TABLES WITH READ LOCK;\nCREATE TABLE `bks_t` LIKE `t`;"), None, "DELETE")];
+        pairs[0].safety.requires_lock = true;
+        finalize_safety(&mut pairs, &rc);
+        assert_eq!(pairs[0].safety.lock_type.as_deref(), Some("NONE"));
+        assert!(!pairs[0].safety.lock_timeout_best_effort);
+        assert!(!pairs[0].safety.snapshot_window_unprotected);
+    }
+
+    #[test]
+    fn render_backup_lock_scope_none_strips_ftwrl() {
+        // P1-2：lock_scope=none → backup.sql 不含 FTWRL / UNLOCK TABLES
+        let mut rc = rc();
+        rc.lock_scope = "none".to_string();
+        let pairs = vec![make_pair_with_kind(
+            1,
+            Some("FLUSH TABLES WITH READ LOCK;\nDROP TABLE IF EXISTS `bks_t`;\nCREATE TABLE `bks_t` LIKE `t`;\nINSERT INTO `bks_t` SELECT * FROM `t`;\nUNLOCK TABLES;"),
+            None,
+            "DELETE",
+        )];
+        let out = render_backup(&pairs, &rc, &MySqlRenderer);
+        assert!(!out.contains("FLUSH TABLES WITH READ LOCK"), "lock_scope=none should strip FTWRL");
+        assert!(!out.contains("UNLOCK TABLES"), "lock_scope=none should strip UNLOCK");
+        assert!(out.contains("CREATE TABLE `bks_t` LIKE `t`;"), "non-lock statements should remain");
+    }
+
+    #[test]
     fn has_ddl_in_pairs_detects_create_table() {
-        let pairs = vec![make_pair(1, None, Some("DROP TABLE IF EXISTS `users`;"))];
+        let pairs = vec![make_pair_with_kind(1, None, Some("DROP TABLE IF EXISTS `users`;"), "DROP_TABLE")];
         assert!(has_ddl_in_pairs(&pairs));
     }
 
     #[test]
     fn has_ddl_in_pairs_pure_dml_returns_false() {
-        let pairs = vec![make_pair(1, None, Some("DELETE FROM `users` WHERE `id` = 1;"))];
+        let pairs = vec![make_pair_with_kind(1, None, Some("DELETE FROM `users` WHERE `id` = 1;"), "DELETE")];
         assert!(!has_ddl_in_pairs(&pairs));
     }
 
@@ -609,24 +725,26 @@ mod tests {
     #[test]
     fn render_backup_mysql_includes_binlog_control_for_pure_dml() {
         let rc = rc();
-        let pairs = vec![make_pair(1, None, Some("DELETE FROM `users` WHERE `id` = 1;"))];
+        let pairs = vec![make_pair_with_kind(1, None, Some("DELETE FROM `users` WHERE `id` = 1;"), "DELETE")];
         let out = render_backup(&pairs, &rc, &MySqlRenderer);
         assert!(out.contains("sql_log_bin=0"), "纯 DML auto 模式应设 sql_log_bin=0");
     }
 
     #[test]
     fn render_backup_mysql_ddl_omits_binlog_control() {
-        let rc = rc();
-        let pairs = vec![make_pair(1, None, Some("DROP TABLE IF EXISTS `users`;"))];
+        // 含 DDL → R4 要求显式 binlog_strategy，设 never 跳过 R4 检查
+        let mut rc = rc();
+        rc.binlog_strategy = "never".to_string();
+        let pairs = vec![make_pair_with_kind(1, None, Some("DROP TABLE IF EXISTS `users`;"), "DROP_TABLE")];
         let out = render_backup(&pairs, &rc, &MySqlRenderer);
-        assert!(!out.contains("sql_log_bin=0"), "含 DDL auto 模式不设 sql_log_bin=0");
+        assert!(!out.contains("sql_log_bin=0"), "含 DDL never 模式不设 sql_log_bin=0");
     }
 
     #[test]
     fn render_backup_binlog_always_includes_control() {
         let mut rc = rc();
         rc.binlog_strategy = "always".to_string();
-        let pairs = vec![make_pair(1, None, Some("DROP TABLE IF EXISTS `users`;"))];
+        let pairs = vec![make_pair_with_kind(1, None, Some("DROP TABLE IF EXISTS `users`;"), "DROP_TABLE")];
         let out = render_backup(&pairs, &rc, &MySqlRenderer);
         assert!(out.contains("sql_log_bin=0"));
     }
@@ -635,7 +753,7 @@ mod tests {
     fn render_backup_binlog_never_omits_control() {
         let mut rc = rc();
         rc.binlog_strategy = "never".to_string();
-        let pairs = vec![make_pair(1, None, Some("DELETE FROM `users` WHERE `id` = 1;"))];
+        let pairs = vec![make_pair_with_kind(1, None, Some("DELETE FROM `users` WHERE `id` = 1;"), "DELETE")];
         let out = render_backup(&pairs, &rc, &MySqlRenderer);
         assert!(!out.contains("sql_log_bin=0"));
     }
@@ -665,12 +783,53 @@ mod tests {
     }
 
     #[test]
+    fn render_backup_pg_wraps_in_transaction() {
+        // P0-2: PG backup.sql 必须有外层 BEGIN + REPEATABLE READ，段内 LOCK TABLE 才有效
+        let rc = rc();
+        let pairs = vec![make_pair(1, Some("LOCK TABLE \"users\" IN ACCESS SHARE MODE;\nDROP TABLE IF EXISTS \"bks_users\";\nCREATE TABLE \"bks_users\" (LIKE \"users\");\nINSERT INTO \"bks_users\" SELECT * FROM \"users\";"), None)];
+        let out = render_backup(&pairs, &rc, &PostgreSqlRenderer);
+        assert!(out.contains("BEGIN;"), "PG backup.sql 必须包 BEGIN");
+        assert!(out.contains("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ;"));
+        assert!(out.contains("COMMIT;"));
+    }
+
+    #[test]
+    fn render_backup_mysql_no_global_wrap() {
+        // MySQL 不包外层事务（DDL 隐式提交）
+        let rc = rc();
+        let pairs = vec![make_pair(1, Some("FLUSH TABLES WITH READ LOCK;\nDROP TABLE IF EXISTS `bks_users`;\nCREATE TABLE `bks_users` LIKE `users`;\nINSERT INTO `bks_users` SELECT * FROM `users`;\nUNLOCK TABLES;"), None)];
+        let out = render_backup(&pairs, &rc, &MySqlRenderer);
+        assert!(!out.contains("BEGIN;"), "MySQL backup 不包外层事务");
+        assert!(!out.contains("SET TRANSACTION ISOLATION LEVEL"));
+    }
+
+    #[test]
     fn render_rollback_mysql_no_global_wrap() {
         let rc = rc();
         let pairs = vec![make_pair(1, None, Some("DELETE FROM `t` WHERE `id` = 1;"))];
         let out = render_rollback(&pairs, &rc, &MySqlRenderer);
         // MySQL 不整体包裹（DDL 隐式提交）
         assert!(!out.starts_with("BEGIN;"));
+    }
+
+    #[test]
+    fn render_rollback_mysql_dml_wraps_statement_level_transaction() {
+        // P1-4/F5：MySQL DML rollback 包 START TRANSACTION / COMMIT，DDL 不包
+        let mut rc = rc();
+        rc.binlog_strategy = "never".to_string();  // 含 DDL，需显式 binlog_strategy
+        let pairs = vec![
+            make_pair_with_kind(1, None, Some("DELETE FROM `t` WHERE `id` = 1;"), "DELETE"),
+            make_pair_with_kind(2, None, Some("CREATE TABLE `t` LIKE `bks_t`;"), "DROP_TABLE"),
+        ];
+        let out = render_rollback(&pairs, &rc, &MySqlRenderer);
+        // LIFO: seq=2 (DDL) 先输出，seq=1 (DML) 后输出
+        // DDL 段不应有 START TRANSACTION
+        let ddl_section = out.split("seq=2").nth(1).unwrap().split("seq=1").next().unwrap();
+        assert!(!ddl_section.contains("START TRANSACTION;"), "MySQL DDL rollback 不包事务");
+        // DML 段应有 START TRANSACTION / COMMIT
+        let dml_section = out.split("seq=1").nth(1).unwrap();
+        assert!(dml_section.contains("START TRANSACTION;"), "MySQL DML rollback 应包 START TRANSACTION");
+        assert!(dml_section.contains("COMMIT;"), "MySQL DML rollback 应包 COMMIT");
     }
 
     #[test]
@@ -721,8 +880,8 @@ mod tests {
     #[test]
     fn group_for_coalesce_conservative_merges_full_table_backups() {
         let pairs = vec![
-            make_pair(1, Some("CREATE TABLE `bks_t_1` LIKE `t`;\nINSERT INTO `bks_t_1` SELECT * FROM `t`;"), None),
-            make_pair(2, Some("CREATE TABLE `bks_t_2` LIKE `t`;\nINSERT INTO `bks_t_2` SELECT * FROM `t`;"), None),
+            make_pair_with_mode(1, Some("CREATE TABLE `bks_t_1` LIKE `t`;\nINSERT INTO `bks_t_1` SELECT * FROM `t`;"), None, "DROP_TABLE", "full"),
+            make_pair_with_mode(2, Some("CREATE TABLE `bks_t_2` LIKE `t`;\nINSERT INTO `bks_t_2` SELECT * FROM `t`;"), None, "DROP_TABLE", "full"),
         ];
         let groups = group_for_coalesce(&pairs, "conservative");
         assert_eq!(groups.len(), 1, "同表全表备份应合并为一组");
@@ -732,18 +891,18 @@ mod tests {
     #[test]
     fn group_for_coalesce_conservative_does_not_merge_incremental() {
         let pairs = vec![
-            make_pair(1, Some("CREATE TABLE `bks_t_1` LIKE `t`;\nINSERT INTO `bks_t_1` SELECT * FROM `t` WHERE `id` > 100;"), None),
-            make_pair(2, Some("CREATE TABLE `bks_t_2` LIKE `t`;\nINSERT INTO `bks_t_2` SELECT * FROM `t` WHERE `id` > 200;"), None),
+            make_pair_with_mode(1, Some("CREATE TABLE `bks_t_1` LIKE `t`;\nINSERT INTO `bks_t_1` SELECT * FROM `t` WHERE `id` > 100;"), None, "DELETE", "incremental"),
+            make_pair_with_mode(2, Some("CREATE TABLE `bks_t_2` LIKE `t`;\nINSERT INTO `bks_t_2` SELECT * FROM `t` WHERE `id` > 200;"), None, "DELETE", "incremental"),
         ];
         let groups = group_for_coalesce(&pairs, "conservative");
-        assert_eq!(groups.len(), 2, "增量备份（含 WHERE）不合并");
+        assert_eq!(groups.len(), 2, "增量备份（backup_mode=incremental）不合并");
     }
 
     #[test]
     fn group_for_coalesce_aggressive_merges_incremental() {
         let pairs = vec![
-            make_pair(1, Some("CREATE TABLE `bks_t_1` LIKE `t`;\nINSERT INTO `bks_t_1` SELECT * FROM `t` WHERE `id` > 100;"), None),
-            make_pair(2, Some("CREATE TABLE `bks_t_2` LIKE `t`;\nINSERT INTO `bks_t_2` SELECT * FROM `t` WHERE `id` > 200;"), None),
+            make_pair_with_mode(1, Some("CREATE TABLE `bks_t_1` LIKE `t`;\nINSERT INTO `bks_t_1` SELECT * FROM `t` WHERE `id` > 100;"), None, "DELETE", "incremental"),
+            make_pair_with_mode(2, Some("CREATE TABLE `bks_t_2` LIKE `t`;\nINSERT INTO `bks_t_2` SELECT * FROM `t` WHERE `id` > 200;"), None, "DELETE", "incremental"),
         ];
         let groups = group_for_coalesce(&pairs, "aggressive");
         assert_eq!(groups.len(), 1, "aggressive 模式同表增量也合并");
@@ -752,8 +911,8 @@ mod tests {
     #[test]
     fn group_for_coalesce_different_tables_not_merged() {
         let pairs = vec![
-            make_pair(1, Some("CREATE TABLE `bks_t_1` LIKE `t`;\nINSERT INTO `bks_t_1` SELECT * FROM `t`;"), None),
-            make_pair(2, Some("CREATE TABLE `bks_u_1` LIKE `u`;\nINSERT INTO `bks_u_1` SELECT * FROM `u`;"), None),
+            make_pair_with_mode(1, Some("CREATE TABLE `bks_t_1` LIKE `t`;\nINSERT INTO `bks_t_1` SELECT * FROM `t`;"), None, "DROP_TABLE", "full"),
+            make_pair_with_mode(2, Some("CREATE TABLE `bks_u_1` LIKE `u`;\nINSERT INTO `bks_u_1` SELECT * FROM `u`;"), None, "DROP_TABLE", "full"),
         ];
         let groups = group_for_coalesce(&pairs, "conservative");
         assert_eq!(groups.len(), 2, "不同表不合并");
@@ -763,9 +922,10 @@ mod tests {
     fn render_backup_coalesced_strips_inner_locks() {
         let mut rc = rc();
         rc.coalesce_locks = true;
+        rc.binlog_strategy = "never".to_string();  // 含 DDL → 需显式 binlog_strategy
         let pairs = vec![
-            make_pair(1, Some("FLUSH TABLES WITH READ LOCK;\nCREATE TABLE `bks_t_1` LIKE `t`;\nINSERT INTO `bks_t_1` SELECT * FROM `t`;\nUNLOCK TABLES;"), None),
-            make_pair(2, Some("FLUSH TABLES WITH READ LOCK;\nCREATE TABLE `bks_t_2` LIKE `t`;\nINSERT INTO `bks_t_2` SELECT * FROM `t`;\nUNLOCK TABLES;"), None),
+            make_pair_with_mode(1, Some("FLUSH TABLES WITH READ LOCK;\nCREATE TABLE `bks_t_1` LIKE `t`;\nINSERT INTO `bks_t_1` SELECT * FROM `t`;\nUNLOCK TABLES;"), None, "DROP_TABLE", "full"),
+            make_pair_with_mode(2, Some("FLUSH TABLES WITH READ LOCK;\nCREATE TABLE `bks_t_2` LIKE `t`;\nINSERT INTO `bks_t_2` SELECT * FROM `t`;\nUNLOCK TABLES;"), None, "DROP_TABLE", "full"),
         ];
         let out = render_backup(&pairs, &rc, &MySqlRenderer);
         // 合并后段内 FTWRL 应被剥离，组头统一发射
@@ -788,18 +948,6 @@ mod tests {
     }
 
     #[test]
-    fn is_full_table_backup_true_without_where() {
-        let backup = "CREATE TABLE `bks_t` LIKE `t`;\nINSERT INTO `bks_t` SELECT * FROM `t`;";
-        assert!(is_full_table_backup(backup));
-    }
-
-    #[test]
-    fn is_full_table_backup_false_with_where() {
-        let backup = "CREATE TABLE `bks_t` LIKE `t`;\nINSERT INTO `bks_t` SELECT * FROM `t` WHERE `id` > 100;";
-        assert!(!is_full_table_backup(backup));
-    }
-
-    #[test]
     fn extract_bks_table_name_basic() {
         let backup = "CREATE TABLE `bks_users_20260726_0001` LIKE `users`;";
         assert_eq!(extract_bks_table_name(backup), Some("bks_users_20260726_0001".to_string()));
@@ -819,6 +967,37 @@ mod tests {
         let out = render_backup(&[], &rc, &MySqlRenderer);
         assert!(out.contains("ABORT"));
         assert!(out.contains("accept_table_lock_risk"));
+    }
+
+    #[test]
+    fn validate_r4_auto_ddl_returns_error() {
+        // P0-3/R4：binlog_strategy=auto + 含 DDL → 必须报错
+        let rc = rc();  // dialect=mysql, binlog_strategy=auto by default
+        let pairs = vec![make_pair_with_kind(1, None, Some("DROP TABLE IF EXISTS `users`;"), "DROP_TABLE")];
+        let errors = validate_render_prerequisites(&pairs, &rc);
+        assert!(
+            errors.iter().any(|e| e.contains("binlog_strategy=auto") && e.contains("DDL")),
+            "auto + DDL should produce an error, got: {:?}", errors
+        );
+    }
+
+    #[test]
+    fn validate_r4_auto_pure_dml_passes() {
+        // binlog_strategy=auto + 纯 DML → 不报错
+        let rc = rc();
+        let pairs = vec![make_pair_with_kind(1, None, Some("DELETE FROM `users` WHERE `id` = 1;"), "DELETE")];
+        let errors = validate_render_prerequisites(&pairs, &rc);
+        assert!(errors.is_empty(), "auto + pure DML should pass, got: {:?}", errors);
+    }
+
+    #[test]
+    fn validate_r4_never_ddl_passes() {
+        // binlog_strategy=never + 含 DDL → 不报错（用户已显式选择）
+        let mut rc = rc();
+        rc.binlog_strategy = "never".to_string();
+        let pairs = vec![make_pair_with_kind(1, None, Some("DROP TABLE IF EXISTS `users`;"), "DROP_TABLE")];
+        let errors = validate_render_prerequisites(&pairs, &rc);
+        assert!(errors.is_empty(), "never + DDL should pass, got: {:?}", errors);
     }
 
     // ===== 端到端集成测试：generate → render =====
@@ -847,7 +1026,9 @@ mod tests {
         }
 
         let cfg = make_cfg();
-        let rc = RollbackConfig::default();
+        let mut rc = RollbackConfig::default();
+        // 混合 DML+DDL → R4 要求显式 binlog_strategy（非 auto）
+        rc.binlog_strategy = "never".to_string();
         let mut gen = RollbackGenerator::new(&cfg, &rc, &MySqlRenderer);
 
         // 构造混合语句：CREATE TABLE → INSERT → DELETE → DROP TABLE
@@ -931,9 +1112,14 @@ mod tests {
         let pos_drop = rollback_sql.find("seq=4").unwrap();
         let pos_delete = rollback_sql.find("seq=3").unwrap();
         assert!(pos_drop < pos_delete, "LIFO: seq=4 应在 seq=3 之前");
-        // MySQL 不整体包裹 BEGIN/COMMIT
+        // MySQL 不整体包裹 BEGIN/COMMIT（P1-4：DML 段有语句级 START TRANSACTION / COMMIT）
         assert!(!rollback_sql.contains("BEGIN;"));
-        assert!(!rollback_sql.contains("COMMIT;"));
+        // DML 段（seq=3 DELETE）应有语句级 START TRANSACTION / COMMIT
+        assert!(rollback_sql.contains("START TRANSACTION;"));
+        // DDL 段（seq=4 DROP_TABLE 回滚）不应有 START TRANSACTION
+        // LIFO: seq=4 最先输出，到 seq=3 之前是 seq=4 的回滚段
+        let seq4_section = rollback_sql.split("seq=4").nth(1).unwrap().split("seq=3").next().unwrap();
+        assert!(!seq4_section.contains("START TRANSACTION;"), "DDL rollback 不应包事务");
 
         // ===== 渲染 cleanup.sql =====
         let mut rc_cleanup = rc.clone();
@@ -943,7 +1129,7 @@ mod tests {
 
         // ===== Manifest 生成 =====
         use crate::rollback::manifest::Manifest;
-        let manifest = Manifest::from_pairs(&pairs, "mysql", vec![]);
+        let manifest = Manifest::from_pairs(&pairs, "mysql", &rc, vec![]);
         assert_eq!(manifest.items.len(), 4);
         // DROP TABLE 应标 irreversible_if_backup_missing
         assert!(manifest.items.iter().any(|m| m.seq == 4 && m.safety.irreversible_if_backup_missing));

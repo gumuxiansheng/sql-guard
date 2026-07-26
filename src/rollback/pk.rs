@@ -7,6 +7,9 @@
 //! 3. 无主键 → 返回空 Vec，调用方按 `reliable=false` 处理
 
 use std::collections::HashMap;
+/// ★ D3：`PrimaryKeyDecl` 仅在 cfg(test) 测试模块中使用（构造测试配置），
+/// 编译器 dead_code 分析不看测试模块故报 unused，此处显式允许。
+#[allow(unused_imports)]
 use crate::config::{RollbackConfig, PrimaryKeyDecl};
 use crate::rule::engine::ast::StmtInfo;
 use super::strip_ident_quotes;
@@ -53,6 +56,9 @@ impl PrimaryKeyResolver {
     }
 
     /// 注册一个主键声明（供脚本内含 CREATE TABLE 上下文时回填）。
+    /// ★ D2：当前 generator 未实现"扫描 CREATE TABLE 上下文回填主键"路径，
+    /// 此方法保留用于未来扩展及测试（pk.rs 测试模块使用）。
+    #[allow(dead_code)]
     pub fn register(&mut self, table: &str, columns: Vec<String>) {
         let clean = strip_ident_quotes(table).to_lowercase();
         self.declared.insert(clean, columns);
