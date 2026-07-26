@@ -123,4 +123,46 @@ pub enum Commands {
         #[clap(long)]
         dialect: Option<String>,
     },
+    /// Generate backup/rollback scripts for DDL/DML files.
+    ///
+    /// Produces backup.sql / rollback.sql / rollback-manifest.json / cleanup.sql
+    /// in the output directory. Exit code follows the manifest:
+    ///   0 = all reliable, 1 = warnings only, 2 = errors (irreversible/unreliable/partial)
+    GenRollback {
+        /// Path to the project/sql directory to scan.
+        #[clap(default_value = ".")]
+        path: PathBuf,
+
+        /// Path to configuration file.
+        #[clap(short, long, default_value = "sqlguard.toml")]
+        config: PathBuf,
+
+        /// Output directory for backup.sql / rollback.sql / manifest / cleanup.
+        #[clap(short, long, default_value = ".")]
+        output_dir: PathBuf,
+
+        /// Override [rollback].dialect: mysql / postgresql.
+        #[clap(long)]
+        dialect: Option<String>,
+
+        /// Override [rollback].lock_scope: auto / global / table / snapshot / none.
+        #[clap(long)]
+        lock_scope: Option<String>,
+
+        /// Override [rollback].lock_timeout (seconds).
+        #[clap(long)]
+        lock_timeout: Option<u64>,
+
+        /// Required when lock_scope=table (accept implicit-commit release risk).
+        #[clap(long)]
+        accept_table_lock_risk: bool,
+
+        /// Treat warnings as errors (exit 2 instead of 1).
+        #[clap(long)]
+        fail_on_warning: bool,
+
+        /// Allow partial rollback plans (do not exit 2 on safety.partial=true).
+        #[clap(long)]
+        allow_partial: bool,
+    },
 }

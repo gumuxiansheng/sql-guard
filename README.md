@@ -127,6 +127,26 @@ Files checked: 2
 Summary: All checks passed
 ```
 
+### 生成备份回滚脚本
+
+```bash
+sqlguard gen-rollback ./sql -o rollback_out/
+```
+
+为每条 DDL/DML 生成 `backup.sql` / `rollback.sql` / `rollback-manifest.json` / `cleanup.sql`，配合发布平台在变更失败时回滚。退出码遵循 manifest：`0`=全部可靠，`1`=仅 warning，`2`=error（irreversible/unreliable/partial）。
+
+支持 CLI 覆盖配置：
+
+```bash
+sqlguard gen-rollback ./sql -o rollback_out/ \
+    --dialect mysql \
+    --lock-scope global \
+    --lock-timeout 60 \
+    --accept-table-lock-risk
+```
+
+详见 [docs/backup-rollback-design.md](docs/backup-rollback-design.md)。
+
 ## 项目结构
 
 ```

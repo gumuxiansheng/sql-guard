@@ -85,6 +85,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         } => {
             run_replay_export(&path, &config_path, &output_dir, &types)?;
         }
+        Commands::GenRollback {
+            path,
+            config: config_path,
+            output_dir,
+            dialect,
+            lock_scope,
+            lock_timeout,
+            accept_table_lock_risk,
+            fail_on_warning,
+            allow_partial,
+        } => {
+            let code = run_gen_rollback(
+                &path,
+                &config_path,
+                &output_dir,
+                dialect.as_deref(),
+                lock_scope.as_deref(),
+                lock_timeout,
+                accept_table_lock_risk,
+                fail_on_warning,
+                allow_partial,
+            )?;
+            std::process::exit(code);
+        }
     }
 
     Ok(())
@@ -479,6 +503,222 @@ fn filter_violations_by_diff(
                 .any(|(s, e)| line <= *e && end_line >= *s)
         })
         .collect()
+}
+
+// ===== run_gen_rollback =====
+
+/// 生成 backup/rollback 脚本。
+///
+/// 流程：
+/// 1. 加载配置，应用 CLI 覆盖（dialect/lock_scope/lock_timeout/accept_table_lock_risk）
+/// 2. 收集 SQL 文件（脚本模式 + Mapper 模式）
+/// 3. 对每个文件用 check 方言解析为 SqlAst，遍历 StmtInfo 调 RollbackGenerator::generate
+/// 4. 渲染 backup.sql / rollback.sql / cleanup.sql
+/// 5. 构建 Manifest 并写 rollback-manifest.json
+/// 6. 按 Manifest::exit_code 返回退出码
+#[allow(clippy::too_many_arguments)]
+fn run_gen_rollback(
+    target_dir: &Path,
+    config_path: &Path,
+    output_dir: &Path,
+    dialect_override: Option<&str>,
+    lock_scope_override: Option<&str>,
+    lock_timeout_override: Option<u64>,
+    accept_table_lock_risk: bool,
+    fail_on_warning: bool,
+    allow_partial: bool,
+) -> Result<i32, SqlGuardError> {
+    let (mut config, config_dir) = load_config(config_path)?;
+
+    // 应用 CLI 覆盖到 rollback 配置
+    let rc: &mut crate::config::RollbackConfig = &mut config.rollback;
+    if let Some(d) = dialect_override {
+        rc.dialect = d.to_string();
+        eprintln!("Rollback dialect override: {}", d);
+    }
+    if let Some(ls) = lock_scope_override {
+        rc.lock_scope = ls.to_string();
+        eprintln!("Rollback lock_scope override: {}", ls);
+    }
+    if let Some(lt) = lock_timeout_override {
+        rc.lock_timeout = lt;
+        eprintln!("Rollback lock_timeout override: {}s", lt);
+    }
+    if accept_table_lock_risk {
+        rc.accept_table_lock_risk = true;
+    }
+
+    // 解析方言
+    let dialect: crate::rollback::Dialect = rc
+        .dialect
+        .parse()
+        .map_err(|e: String| {
+            SqlGuardError::ConfigError(format!("Invalid rollback.dialect '{}': {}", rc.dialect, e))
+        })?;
+    let renderer = crate::rollback::renderer_for(dialect);
+
+    // R2 预检：lock_scope=table 必须显式确认
+    let prereq_errors = crate::rollback::render::validate_render_prerequisites(&[], &config.rollback);
+    if !prereq_errors.is_empty() {
+        for e in &prereq_errors {
+            eprintln!("Prerequisite error: {}", e);
+        }
+        return Ok(2);
+    }
+
+    let absolute_target = resolve_absolute_path(target_dir);
+    let absolute_output = resolve_absolute_path(output_dir);
+    fs::create_dir_all(&absolute_output).map_err(SqlGuardError::IoError)?;
+
+    let effective_scan_paths: Vec<String> = if !config.scan.paths.is_empty() {
+        config.scan.paths.clone()
+    } else {
+        config.structure.paths.clone()
+    };
+    let exclude_dirs: &[String] = &config.scan.exclude_dirs;
+
+    let sql_files = classification::collect_sql_files(&absolute_target, &effective_scan_paths, exclude_dirs);
+    let mapper_files = if config.mapper.enabled {
+        mapper::collect_mapper_files(&absolute_target, &config.mapper, exclude_dirs)
+    } else {
+        Vec::new()
+    };
+
+    eprintln!(
+        "Scanning {} SQL file(s) and {} mapper file(s) with {} dialect",
+        sql_files.len(),
+        mapper_files.len(),
+        dialect.as_str()
+    );
+
+    let mut generator = crate::rollback::RollbackGenerator::new(&config, &config.rollback, &*renderer);
+    let mut pairs: Vec<crate::rollback::BackupRollbackPair> = Vec::new();
+
+    // 脚本模式：解析每个 SQL 文件为 SqlAst，遍历 StmtInfo
+    for file_path in &sql_files {
+        let content = fs::read_to_string(file_path).map_err(|e| {
+            SqlGuardError::CheckError(format!("Failed to read '{}': {}", file_path.display(), e))
+        })?;
+        let ast = engine::parser::parse_sql_to_ast(&content, config.dialect);
+
+        if let Some(err) = &ast.parse_error {
+            eprintln!(
+                "Warning: {} failed to tokenize ({}); skipped",
+                file_path.display(),
+                err
+            );
+        }
+
+        for stmt in &ast.statements {
+            if stmt.kind == "PARSE_ERROR" {
+                eprintln!(
+                    "Warning: {}:{} parse error; statement skipped",
+                    file_path.display(),
+                    stmt.line
+                );
+                continue;
+            }
+            // 提取原始 SQL 文本片段（按行号）
+            let original = extract_sql_lines(&content, stmt.line as usize, stmt.end_line as usize);
+            let source = crate::rollback::SourceRef {
+                file: file_path.to_string_lossy().to_string(),
+                line: stmt.line,
+                end_line: stmt.end_line,
+                statement_id: None,
+                variant_label: None,
+            };
+            let pair = generator.generate(stmt, source, &original);
+            pairs.push(pair);
+        }
+    }
+
+    // Mapper 模式：解析 XML，对每个 SQL 片段生成
+    if config.mapper.enabled {
+        for file_path in &mapper_files {
+            let extracted = match mapper::extract_sql_from_xml(file_path) {
+                Ok(v) => v,
+                Err(e) => {
+                    eprintln!(
+                        "Warning: failed to parse mapper XML '{}': {}",
+                        file_path.display(),
+                        e
+                    );
+                    continue;
+                }
+            };
+            for sql in extracted {
+                if !config.rollback.include_select && sql.statement_type.eq_ignore_ascii_case("select") {
+                    continue;
+                }
+                let ast = engine::parser::parse_sql_to_ast(&sql.processed_sql, config.dialect);
+                for stmt in &ast.statements {
+                    if stmt.kind == "PARSE_ERROR" {
+                        continue;
+                    }
+                    let original = extract_sql_lines(&sql.processed_sql, stmt.line as usize, stmt.end_line as usize);
+                    let source = crate::rollback::SourceRef {
+                        file: file_path.to_string_lossy().to_string(),
+                        line: sql.raw_xml_line as i64 + stmt.line - 1,
+                        end_line: sql.raw_xml_line as i64 + stmt.end_line - 1,
+                        statement_id: Some(sql.statement_id.clone()),
+                        variant_label: None,
+                    };
+                    let pair = generator.generate(stmt, source, &original);
+                    pairs.push(pair);
+                }
+            }
+        }
+    }
+
+    eprintln!(
+        "Generated {} rollback pair(s): {} irreversible, {} partial, {} unreliable",
+        pairs.len(),
+        pairs.iter().filter(|p| p.safety.irreversible).count(),
+        pairs.iter().filter(|p| p.safety.partial).count(),
+        pairs.iter().filter(|p| !p.safety.reliable).count()
+    );
+
+    // 渲染输出
+    let backup_sql = crate::rollback::render::render_backup(&pairs, &config.rollback, &*renderer);
+    let rollback_sql = crate::rollback::render::render_rollback(&pairs, &config.rollback, &*renderer);
+    let cleanup_sql = crate::rollback::render::render_cleanup(&pairs, &config.rollback, &*renderer);
+
+    let backup_path = absolute_output.join(&config.rollback.backup_file);
+    let rollback_path = absolute_output.join(&config.rollback.rollback_file);
+    let cleanup_path = absolute_output.join(&config.rollback.cleanup_file);
+    let manifest_path = absolute_output.join(&config.rollback.manifest_file);
+
+    fs::write(&backup_path, &backup_sql).map_err(SqlGuardError::IoError)?;
+    fs::write(&rollback_path, &rollback_sql).map_err(SqlGuardError::IoError)?;
+    fs::write(&cleanup_path, &cleanup_sql).map_err(SqlGuardError::IoError)?;
+
+    // 构建并写 manifest
+    let manifest = crate::rollback::Manifest::from_pairs(&pairs, dialect.as_str(), Vec::new());
+    let manifest_json = crate::rollback::serialize_manifest(&manifest)
+        .map_err(|e| SqlGuardError::CheckError(format!("Failed to serialize manifest: {}", e)))?;
+    fs::write(&manifest_path, &manifest_json).map_err(SqlGuardError::IoError)?;
+
+    eprintln!("Wrote {}", backup_path.display());
+    eprintln!("Wrote {}", rollback_path.display());
+    eprintln!("Wrote {}", cleanup_path.display());
+    eprintln!("Wrote {}", manifest_path.display());
+
+    let exit_code = manifest.exit_code(fail_on_warning, allow_partial);
+    eprintln!(
+        "Exit code {} (fail_on_warning={}, allow_partial={})",
+        exit_code, fail_on_warning, allow_partial
+    );
+    Ok(exit_code)
+}
+
+/// 从 SQL 文本中按行号提取语句片段（1-indexed, inclusive）。
+fn extract_sql_lines(content: &str, start_line: usize, end_line: usize) -> String {
+    content
+        .lines()
+        .skip(start_line.saturating_sub(1))
+        .take(end_line.saturating_sub(start_line.saturating_sub(1)))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 // ===== run_init =====

@@ -2075,3 +2075,65 @@ fn test_init_registers_dml007() {
 
     let _ = std::fs::remove_dir_all(dir);
 }
+
+#[test]
+fn test_gen_rollback_end_to_end() {
+    // 端到端验证 gen-rollback 子命令：生成 4 个文件 + manifest 统计正确
+    let dir = "/tmp/sqlguard-test-gen-rollback";
+    let _ = std::fs::remove_dir_all(dir);
+    std::fs::create_dir_all(format!("{}/sql/dml", dir)).unwrap();
+    std::fs::create_dir_all(format!("{}/out", dir)).unwrap();
+
+    // 3 条 DML：INSERT（增量备份 + DELETE 回滚）、UPDATE（备份 + UPDATE 回滚）、DELETE（备份 + INSERT 回滚）
+    std::fs::write(
+        format!("{}/sql/dml/users.sql", dir),
+        "INSERT INTO users (id, name) VALUES (1, 'alice');\nUPDATE users SET name = 'bob' WHERE id = 1;\nDELETE FROM users WHERE id = 2;\n",
+    ).unwrap();
+    std::fs::write(
+        format!("{}/sqlguard.toml", dir),
+        "[structure]\npaths = [\"sql\"]\nstrict = false\nallow_extra = [\"*\"]\n[classification]\nrules = []\ndefault_type = \"other\"\n[rollback]\nenabled = true\ndialect = \"mysql\"\n",
+    ).unwrap();
+
+    let output = Command::new(&binary_abs_path())
+        .args(["gen-rollback", dir, "-c", &format!("{}/sqlguard.toml", dir), "-o", &format!("{}/out", dir)])
+        .output()
+        .expect("Failed to run sqlguard gen-rollback");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("Generated 3 rollback pair(s)"),
+        "应生成 3 个 pair，stderr: {}",
+        stderr
+    );
+
+    // 4 个输出文件存在
+    assert!(Path::new(&format!("{}/out/backup.sql", dir)).exists(), "backup.sql 应存在");
+    assert!(Path::new(&format!("{}/out/rollback.sql", dir)).exists(), "rollback.sql 应存在");
+    assert!(Path::new(&format!("{}/out/cleanup.sql", dir)).exists(), "cleanup.sql 应存在");
+    assert!(Path::new(&format!("{}/out/rollback-manifest.json", dir)).exists(), "manifest 应存在");
+
+    // manifest 内容校验
+    let manifest_text = std::fs::read_to_string(format!("{}/out/rollback-manifest.json", dir)).unwrap();
+    let manifest: serde_json::Value = serde_json::from_str(&manifest_text).expect("manifest 应为合法 JSON");
+    assert_eq!(manifest["source_count"], 3, "source_count 应为 3");
+    assert_eq!(manifest["dialect"], "mysql", "dialect 应为 mysql");
+    assert_eq!(
+        manifest["items"].as_array().unwrap().len(),
+        3,
+        "items 应有 3 条"
+    );
+
+    // backup.sql 应包含 bks_ 备份表（UPDATE/DELETE 需要全表备份）
+    let backup_sql = std::fs::read_to_string(format!("{}/out/backup.sql", dir)).unwrap();
+    assert!(
+        backup_sql.contains("bks_users_") && backup_sql.contains("CREATE TABLE"),
+        "backup.sql 应包含 bks_ 备份表 CREATE 语句"
+    );
+
+    // rollback.sql 应包含 DELETE/UPDATE/INSERT 回滚语句
+    let rollback_sql = std::fs::read_to_string(format!("{}/out/rollback.sql", dir)).unwrap();
+    assert!(rollback_sql.contains("DELETE FROM"), "rollback.sql 应包含 DELETE 回滚");
+    assert!(rollback_sql.contains("UPDATE"), "rollback.sql 应包含 UPDATE 回滚");
+
+    let _ = std::fs::remove_dir_all(dir);
+}
