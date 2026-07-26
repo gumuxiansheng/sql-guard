@@ -1,5 +1,7 @@
 use std::path::PathBuf;
 
+use serde::{Deserialize, Serialize};
+
 #[derive(Debug)]
 pub enum SqlGuardError {
     ConfigError(String),
@@ -33,7 +35,7 @@ impl From<std::io::Error> for SqlGuardError {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Violation {
     pub rule_id: String,
     pub rule_name: String,

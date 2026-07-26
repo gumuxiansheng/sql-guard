@@ -8,6 +8,7 @@ mod mapper;
 mod git_diff;
 mod replay_export;
 mod rollback;
+mod cache;
 
 use std::path::{Path, PathBuf};
 use std::fs;
@@ -36,6 +37,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             exclude_rules,
             exclude_groups,
             dialect,
+            cache,
+            no_cache,
         } => {
             run_check(
                 &path,
@@ -47,6 +50,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 &exclude_rules,
                 &exclude_groups,
                 dialect.as_deref(),
+                cache,
+                no_cache,
             )?;
         }
         Commands::Init { path } => {
@@ -169,6 +174,7 @@ fn check_files(
     engine_instance: &rhai::Engine,
     sql_files: &[PathBuf],
     mapper_files: &[PathBuf],
+    cache: &mut cache::FileCache,
 ) -> Result<(Vec<Violation>, usize), SqlGuardError> {
     let mut all_violations = Vec::new();
     let files_checked = sql_files.len() + mapper_files.len();
@@ -176,10 +182,20 @@ fn check_files(
     // 脚本模式
     for file_path in sql_files {
         let classification_result = classification::classify_file(file_path, &config.classification)?;
+        // 编码 / 换行符检查属于轻量的文件属性检查，不进缓存（每次都跑）
         all_violations.extend(encoding::check_file(file_path, &classification_result.script_type, &config.file_check, filter));
+
+        // 查缓存：命中则跳过读文件 + 解析 + 规则执行
+        if let Some(cached) = cache.get(file_path) {
+            all_violations.extend(cached);
+            continue;
+        }
+
         let sql_content = fs::read_to_string(file_path)
             .map_err(|e| SqlGuardError::CheckError(format!("Failed to read '{}': {}", file_path.display(), e)))?;
         let violations = engine::run_rules_for_file(engine_instance, file_path, &sql_content, &classification_result.script_type, config, config_dir, filter, 0)?;
+        // 写入缓存（clone 一份，原始 violations 用于本次输出）
+        cache.insert(file_path, violations.clone());
         all_violations.extend(violations);
     }
 
@@ -190,6 +206,13 @@ fn check_files(
                 .map(|r| r.script_type)
                 .unwrap_or_else(|_| "mapper".to_string());
             all_violations.extend(encoding::check_file(file_path, &mapper_script_type, &config.file_check, filter));
+
+            // 查缓存：命中则跳过 XML 解析 + 逐条规则执行
+            if let Some(cached) = cache.get(file_path) {
+                all_violations.extend(cached);
+                continue;
+            }
+
             let extracted = match mapper::extract_sql_from_xml(file_path) {
                 Ok(v) => v,
                 Err(e) => {
@@ -197,12 +220,15 @@ fn check_files(
                     continue;
                 }
             };
+            let mut file_violations = Vec::new();
             for sql in extracted {
                 let script_type = mapper::map_statement_type(&sql.statement_type, &config.mapper.statement_type_mapping);
                 let line_offset = sql.raw_xml_line.saturating_sub(1);
                 let violations = engine::run_rules_for_file(engine_instance, file_path, &sql.processed_sql, script_type, config, config_dir, filter, line_offset)?;
-                all_violations.extend(violations);
+                file_violations.extend(violations);
             }
+            cache.insert(file_path, file_violations.clone());
+            all_violations.extend(file_violations);
         }
     }
 
@@ -221,7 +247,14 @@ fn run_check(
     exclude_rules: &Option<String>,
     exclude_groups: &Option<String>,
     dialect_override: Option<&str>,
+    cache_flag: bool,
+    no_cache_flag: bool,
 ) -> Result<(), SqlGuardError> {
+    if cache_flag && no_cache_flag {
+        return Err(SqlGuardError::CheckError(
+            "--cache and --no-cache are mutually exclusive".to_string(),
+        ));
+    }
     let (mut config, config_dir) = load_config(config_path)?;
     if let Some(d) = dialect_override {
         config.dialect = crate::config::CheckDialect::from_str(d);
@@ -251,8 +284,40 @@ fn run_check(
     let sql_files = classification::collect_sql_files(&absolute_target, &effective_scan_paths, exclude_dirs);
     let mapper_files = mapper::collect_mapper_files(&absolute_target, &config.mapper, exclude_dirs);
 
+    // 缓存开关优先级：CLI --no-cache > CLI --cache > [cache].enabled
+    let cache_enabled = if no_cache_flag {
+        false
+    } else if cache_flag {
+        true
+    } else {
+        config.cache.enabled
+    };
+
+    let mut file_cache = if cache_enabled {
+        let run_signature = cache::compute_run_signature(
+            config_path,
+            &config,
+            &config_dir,
+            config.dialect,
+            &filter,
+        );
+        let cache_path = absolute_target.join(&config.cache.cache_file);
+        let cache = cache::FileCache::load(cache_path, absolute_target.clone(), run_signature);
+        eprintln!(
+            "File cache enabled: {} (signature {})",
+            config.cache.cache_file,
+            cache.run_signature()
+        );
+        cache
+    } else {
+        cache::FileCache::disabled()
+    };
+
     let engine_instance = engine::build_engine();
-    let (all_violations, files_checked) = check_files(&config, &config_dir, &filter, &engine_instance, &sql_files, &mapper_files)?;
+    let (all_violations, files_checked) = check_files(&config, &config_dir, &filter, &engine_instance, &sql_files, &mapper_files, &mut file_cache)?;
+
+    // 写回缓存（仅在启用且有变更时实际落盘）
+    file_cache.flush();
 
     let formats = parse_formats(format);
     let output_dir_path = resolve_output_dir(output_dir, &absolute_target);
@@ -1029,6 +1094,7 @@ fn generate_default_config() -> Config {
         scan: crate::config::ScanConfig::default(),
         file_check: crate::config::FileCheckConfig::default(),
         rollback: crate::config::RollbackConfig::default(),
+        cache: crate::config::CacheConfig::default(),
         dialect: crate::config::CheckDialect::default(),
     }
 }

@@ -28,6 +28,7 @@
 - **增量校验**：`check-diff` 子命令通过 `git diff` 获取改动语句，按语句级 `[line, end_line] ∩ hunk` 过滤，CI 中只校验本次提交改动的 SQL
 - **备份回滚生成**：对每条 DDL/DML 自动生成 `backup.sql` / `rollback.sql` / `rollback-manifest.json` / `cleanup.sql`，支持 MySQL / PostgreSQL 双方言、多模式锁策略、长事务预检查、binlog 控制、锁合并、schema 漂移校验、分区表检测，配合发布平台在变更失败时回滚（详见 [docs/backup-rollback-design.md](docs/backup-rollback-design.md)）
 - **动态重放清单导出**：`replay-export` 子命令把 SQL 脚本与 Mapper 语句导出为 `sql-manifest.json`，供分离的 Java 工程 [`replay/`](replay/) 在镜像库上做 EXPLAIN 重放、识别慢 SQL。**注意：SqlGuard 二进制本身只导出清单，不执行重放**；重放由 `sqlguard-replay`（Java/Maven，仅面向 GaussDB/openGauss）完成，需自备 JDBC 驱动
+- **文件级缓存**（P2-8）：`[cache].enabled = true` 或 CLI `--cache` 启用后，对未修改的文件（mtime + size 不变）复用上次检查的 violations，大仓库重复 `check` 时显著提速；运行签名（配置 + 规则脚本 + 方言 + filter + 版本）变化时整体失效
 - **CI 友好**：`error` 级违规返回非零退出码，`warning` 级仅提示不阻断
 
 ## 架构
@@ -247,6 +248,7 @@ SqlGuard/
 │   │   ├── render.rs        # SQL 文本渲染（事务包裹、锁合并、预检查）
 │   │   └── manifest.rs      # rollback-manifest.json 序列化
 │   ├── replay_export.rs     # replay-export 子命令：导出 sql-manifest.json（只导出不重放）
+│   ├── cache.rs             # 文件级 mtime/size 缓存（P2-8，默认关闭）
 │   └── reporter/
 │       ├── mod.rs
 │       ├── plain.rs         # 终端彩色报告
@@ -405,6 +407,32 @@ line_ending_severity = "warning"    # 换行符违规级别（提示）
 两条检查归入 `file-format` 分组，缺省（未写 `[file_check]` 段）时按默认值启用。
 可用 `--exclude-rules FILE001,FILE002` 或 `--exclude-groups file-format` 临时关闭。
 
+### `[cache]` 文件级缓存（P2-8）
+
+对未修改的文件（mtime + size 不变）复用上次检查的 violations，跳过解析与规则执行，大仓库重复 `check` 时显著提速。默认关闭。
+
+```toml
+[cache]
+enabled = false                        # 默认关闭，大仓库可设 true 启用
+cache_file = ".sqlguard-cache.json"    # 缓存文件名（相对 target_dir）
+```
+
+缓存失效策略（整体清空，保证正确性）：
+
+| 变化项 | 失效方式 |
+|--------|----------|
+| 文件 mtime 或 size 变化 | 单文件 miss，重跑后更新 |
+| SqlGuard 版本 | 整体失效（签名含 `CARGO_PKG_VERSION`） |
+| `[dialect]` 或 CLI `--dialect` | 整体失效 |
+| CLI `--rules/--groups/--exclude-*` | 整体失效（filter 不同则结果不同） |
+| 主配置文件 `sqlguard.toml` mtime/size | 整体失效 |
+| 规则配置文件 `sqlguard.rules.toml` mtime/size | 整体失效 |
+| 任一 `.rhai` 规则脚本 mtime/size | 整体失效（递归扫描 `rules_dir`） |
+
+CLI 覆盖：`--cache` 强制启用、`--no-cache` 强制禁用（优先级高于配置，二者互斥）。
+
+> 编码 / 换行符检查（FILE001/FILE002）属于轻量文件属性检查，不进缓存，每次都跑。
+
 ### `[rollback]` 备份回滚生成
 
 对每条 DDL/DML 自动生成 `backup.sql` / `rollback.sql` / `rollback-manifest.json` / `cleanup.sql`，配合发布平台在变更失败时回滚。总开关默认 `false`，不启用时 `check` 流程不触发回滚生成，保持纯检查工具行为。详见 [docs/backup-rollback-design.md](docs/backup-rollback-design.md)。
@@ -481,7 +509,15 @@ sqlguard check [OPTIONS] [PATH]
       --groups <G>      仅执行指定分组的规则
       --exclude-rules <IDS>  排除指定 id
       --exclude-groups <G>   排除指定分组
+      --dialect <D>     覆盖 [dialect]：generic / mysql / postgresql / ansi
+      --cache           强制启用文件缓存（覆盖 [cache].enabled = false）
+      --no-cache        强制禁用文件缓存（覆盖 [cache].enabled = true）
 ```
+
+> 文件缓存（P2-8）：对未修改的文件（mtime + size 不变）复用上次检查的
+> violations，大仓库重复 `check` 时提速。默认关闭，配置 `[cache].enabled = true`
+> 或 CLI `--cache` 启用。运行签名（配置 + 规则脚本 + 方言 + filter + 版本）
+> 变化时整体失效。详见下方「文件级缓存」小节。
 
 ### `sqlguard init`
 

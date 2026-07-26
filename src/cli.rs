@@ -47,6 +47,16 @@ pub enum Commands {
         /// Override [dialect] in config: generic / mysql / postgresql / ansi
         #[clap(long)]
         dialect: Option<String>,
+
+        /// Force-enable file cache (overrides [cache].enabled = false).
+        /// Mutually exclusive with --no-cache.
+        #[clap(long)]
+        cache: bool,
+
+        /// Force-disable file cache (overrides [cache].enabled = true).
+        /// Mutually exclusive with --cache.
+        #[clap(long)]
+        no_cache: bool,
     },
     /// Export a SQL manifest (sql-manifest.json) for dynamic replay.
     ///

@@ -35,6 +35,9 @@ pub struct Config {
     /// 回滚脚本生成配置。缺省时使用 RollbackConfig::default()（不启用）。
     #[serde(default)]
     pub rollback: RollbackConfig,
+    /// 文件级缓存配置（P2-8）。缺省时禁用——大仓库重复 check 时可启用提速。
+    #[serde(default)]
+    pub cache: CacheConfig,
     /// check 流程使用的 SQL 方言。缺省为 `generic`（兼容旧行为）。
     /// 影响 sqlparser 解析：mysql 方言支持 `INSERT IGNORE` / `ON DUPLICATE KEY UPDATE` 等
     /// MySQL 专有语法；postgresql 方言支持 PG 扩展语法。
@@ -295,6 +298,37 @@ impl Default for FileCheckConfig {
             line_ending_severity: default_line_ending_severity(),
         }
     }
+}
+
+/// 文件级缓存配置（P2-8）。
+///
+/// 启用后，`check` 与 `check-diff` 会对未修改的文件（mtime + size 不变）
+/// 复用上次检查的 violations，跳过解析与规则执行。缓存文件默认写到
+/// `target_dir` 下的 `.sqlguard-cache.json`，运行签名（配置 + 规则脚本 +
+/// 方言 + filter + 版本）变化时整体失效。
+///
+/// 默认关闭——大仓库重复 check 时可显式 `enabled = true` 启用。
+#[derive(Debug, Deserialize, Clone)]
+pub struct CacheConfig {
+    /// 总开关。`false` 时完全跳过缓存读写。
+    #[serde(default)]
+    pub enabled: bool,
+    /// 缓存文件名（相对 target_dir 解析）。默认 `.sqlguard-cache.json`。
+    #[serde(default = "default_cache_file")]
+    pub cache_file: String,
+}
+
+impl Default for CacheConfig {
+    fn default() -> Self {
+        CacheConfig {
+            enabled: false,
+            cache_file: default_cache_file(),
+        }
+    }
+}
+
+fn default_cache_file() -> String {
+    ".sqlguard-cache.json".to_string()
 }
 
 fn default_true() -> bool {

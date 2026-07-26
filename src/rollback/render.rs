@@ -841,6 +841,7 @@ mod tests {
                 scan: crate::config::ScanConfig::default(),
                 file_check: crate::config::FileCheckConfig::default(),
                 rollback: RollbackConfig::default(),
+                cache: crate::config::CacheConfig::default(),
                 dialect: crate::config::CheckDialect::default(),
             }
         }
@@ -963,6 +964,7 @@ mod tests {
                 scan: crate::config::ScanConfig::default(),
                 file_check: crate::config::FileCheckConfig::default(),
                 rollback: RollbackConfig::default(),
+                cache: crate::config::CacheConfig::default(),
                 dialect: crate::config::CheckDialect::default(),
             }
         }

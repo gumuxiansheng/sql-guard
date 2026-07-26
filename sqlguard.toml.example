@@ -170,3 +170,18 @@ line_ending_severity = "warning"
 # # [[rollback.primary_keys]]
 # # table = "users"
 # # columns = ["id"]
+
+# ================================================================================
+# 文件级缓存 [cache]
+# ================================================================================
+# 对未修改的文件（mtime + size 不变）复用上次检查的 violations，
+# 跳过解析与规则执行，大仓库重复 `sqlguard check` 时显著提速。
+#
+# 默认关闭。启用后缓存文件写到 target_dir 下的 .sqlguard-cache.json，
+# 运行签名（配置 + 规则脚本 + 方言 + filter + 版本）变化时整体失效。
+#
+# 可用 CLI `--cache` / `--no-cache` 临时覆盖配置。
+#
+# [cache]
+# enabled = false                    # 默认关闭
+# cache_file = ".sqlguard-cache.json"
