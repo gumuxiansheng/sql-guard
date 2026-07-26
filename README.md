@@ -85,7 +85,7 @@ cp deploy/sqlguard-x86_64-apple-darwin /usr/local/bin/sqlguard
 sqlguard init .
 ```
 
-生成 `sqlguard.toml`（主配置）+ `sqlguard.rules.toml`（规则配置）+ 16 条内置规则脚本（2 DDL + 14 DML）+ 示例 SQL 目录结构。规则配置单独拆分到 `sqlguard.rules.toml`，避免主配置文件随规则增多而过长。
+生成 `sqlguard.toml`（主配置）+ `sqlguard.rules.toml`（规则配置）+ 21 条内置规则脚本（6 DDL + 15 DML）+ 示例 SQL 目录结构。规则配置单独拆分到 `sqlguard.rules.toml`，避免主配置文件随规则增多而过长。
 
 ### 编写 SQL 脚本
 
@@ -185,14 +185,15 @@ SqlGuard/
 │           ├── no_order_by_in_subquery.rhai
 │           ├── union_all_preferred.rhai
 │           ├── no_nested_case.rhai
-│           └── no_constant_where.rhai
+│           ├── no_constant_where.rhai
+│           └── order_by_required_for_pagination.rhai
 ├── tests/
 │   └── integration_test.rs  # 集成测试（含 Mapper 模式）
 ├── sqlguard.toml.example    # 主配置示例（不含规则）
 ├── sqlguard.rules.toml.example  # 规则配置示例（[[rules]]）
 ├── docs/
 │   ├── rule-scripting.md    # 规则脚本编写手册
-│   ├── default-rules.md     # 默认规则手册（16 条内置规则）
+│   ├── default-rules.md     # 默认规则手册（21 条内置规则）
 │   └── backup-rollback-design.md  # 备份回滚设计文档
 ├── deploy/
 │   ├── sqlguard-x86_64-apple-darwin

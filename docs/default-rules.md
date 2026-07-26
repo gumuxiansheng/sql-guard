@@ -1,6 +1,6 @@
 # SqlGuard 默认规则手册
 
-SqlGuard 内置 16 条默认规则，分为 **P0（8 条，默认启用）** 和 **P1（8 条，默认禁用）** 两档。
+SqlGuard 内置 21 条默认规则，分为 **P0（13 条，默认启用）** 和 **P1（8 条，默认禁用）** 两档（6 DDL + 15 DML）。
 
 ## 规则总览
 
@@ -8,12 +8,17 @@ SqlGuard 内置 16 条默认规则，分为 **P0（8 条，默认启用）** 和
 |------|------|------|--------|-------|----------|
 | DDL001 | `no_drop_table` | ddl-safety | error | P0 | — |
 | DDL002 | `primary_key_required` | ddl-safety | warning | P0 | — |
+| DDL003 | `no_reserved_keyword_naming` | ddl-safety | error | P0 | — |
+| DDL004 | `backup_table_naming` | ddl-convention | warning | P0 | — |
+| DDL005 | `index_naming_convention` | ddl-convention | warning | P0 | — |
+| DDL006 | `no_redundant_index` | ddl-performance | warning | P0 | — |
 | DML001 | `no_select_all` | dml-safety | error | P0 | SQLFluff / GoSQLX |
 | DML002 | `no_delete_update_without_where` | dml-safety | error | P0 | GoSQLX |
 | DML003 | `insert_columns_required` | dml-safety | error | P0 | SQLFluff AM07 |
 | DML004 | `subquery_alias_required` | dml-style | error | P0 | SQLFluff AL10 |
 | DML005 | `column_references_qualified` | dml-style | warning | P0 | SQLFluff RF02 |
 | DML006 | `no_join_without_condition` | dml-safety | error | P0 | SQLFluff AM05 |
+| DML007 | `order_by_required_for_pagination` | dml-safety | error | P0 | — |
 | DML101 | `no_unused_join` | dml-performance | warning | P1 | SQLFluff ST11 |
 | DML102 | `no_unused_cte` | dml-performance | warning | P1 | SQLFluff ST03 |
 | DML103 | `use_is_null` | dml-convention | error | P1 | SQLFluff CV05 |
@@ -101,6 +106,122 @@ ALTER TABLE sessions ADD CONSTRAINT pk_sessions PRIMARY KEY (token);
 **注意**：规则基于整个 SQL 文件的最终状态判断。
 - `CREATE TABLE` 无内联主键、但同文件内有 `ALTER TABLE ... ADD PRIMARY KEY` 补建 → 视为合规（修复了旧版本把这种情况误报的漏洞）。
 - `CREATE TABLE` 有内联主键、但同文件内 `ALTER TABLE ... DROP PRIMARY KEY` 移除 → 仍会报违规（最终无主键）。
+
+---
+
+### DDL003 — `no_reserved_keyword_naming`
+
+| 字段 | 值 |
+|------|-----|
+| 文件 | `config/rules/ddl/no_reserved_keyword_naming.rhai` |
+| 分组 | `ddl-safety` |
+| 严重度 | `error` |
+| 检测方式 | AST（精确） |
+
+**校验原因**：使用 SQL 保留关键字（`SELECT`/`ORDER`/`FROM`/`WHERE` 等）作为表名、列名、索引名等标识符会导致歧义、可移植性问题，并在某些数据库中需要转义。
+
+**反面案例**：
+```sql
+CREATE TABLE SELECT (id INT, name VARCHAR(100));
+CREATE TABLE users (order INT, group VARCHAR(100));
+CREATE INDEX INDEX ON users (id);
+```
+
+**正面案例**：
+```sql
+CREATE TABLE user_orders (order_id INT, group_no VARCHAR(100));
+CREATE TABLE users (order_no INT, group_name VARCHAR(100));
+CREATE INDEX idx_users_id ON users (id);
+```
+
+---
+
+### DDL004 — `backup_table_naming`
+
+| 字段 | 值 |
+|------|-----|
+| 文件 | `config/rules/ddl/backup_table_naming.rhai` |
+| 分组 | `ddl-convention` |
+| 严重度 | `warning` |
+| 检测方式 | AST（精确） |
+
+**校验原因**：通过 `CREATE TABLE AS SELECT` 创建的备份表必须以 `bks_` 前缀命名，便于审计与清理。与 `[rollback].backup_table_prefix` 配置对齐。
+
+**豁免**：如确属非备份表（如物化中间结果），需在语句同行或上一行加显式注释 `NOT_BACKUP`，普通注释不豁免。
+
+**反面案例**：
+```sql
+CREATE TABLE tmp_users AS SELECT * FROM users;
+```
+
+**正面案例**：
+```sql
+CREATE TABLE bks_users_20240101 AS SELECT * FROM users;
+-- NOT_BACKUP: 物化中间结果，非备份表
+CREATE TABLE report_snapshot AS SELECT * FROM users;
+```
+
+---
+
+### DDL005 — `index_naming_convention`
+
+| 字段 | 值 |
+|------|-----|
+| 文件 | `config/rules/ddl/index_naming_convention.rhai` |
+| 分组 | `ddl-convention` |
+| 严重度 | `warning` |
+| 检测方式 | AST（精确） |
+
+**校验原因**：索引命名规范化，便于识别索引类型与覆盖列：
+- 非唯一索引：`idx_<col>[_<col>]`
+- 唯一索引：`uk_<col>[_<col>]`
+- 主键：`pk_<table>`
+
+**反面案例**：
+```sql
+CREATE TABLE t (a INT, b INT, INDEX my_idx (a, b));      -- 应为 idx_a_b
+CREATE UNIQUE INDEX my_uk ON t (b);                      -- 应为 uk_b
+CREATE TABLE t2 (id INT, PRIMARY KEY pk_t (id));         -- 应为 pk_t2
+```
+
+**正面案例**：
+```sql
+CREATE TABLE t (a INT, b INT, INDEX idx_a_b (a, b));
+CREATE UNIQUE INDEX uk_b ON t (b);
+CREATE TABLE t2 (id INT, PRIMARY KEY pk_t2 (id));
+```
+
+---
+
+### DDL006 — `no_redundant_index`
+
+| 字段 | 值 |
+|------|-----|
+| 文件 | `config/rules/ddl/no_redundant_index.rhai` |
+| 分组 | `ddl-performance` |
+| 严重度 | `warning` |
+| 检测方式 | AST（精确，跨语句聚合） |
+
+**校验原因**：冗余索引浪费写入与存储：
+1. 与主键列完全相同、或为主键列前缀的非唯一索引冗余。
+2. 根据最左前缀原则，某非唯一索引的列是另一索引列的真前缀则冗余（如已有 `idx(a,b)` 时 `idx(a)` 冗余）。
+
+唯一索引（UNIQUE）出于约束语义不视为冗余。跨语句收集 `CREATE TABLE` 表级 `INDEX` + `CREATE INDEX`，按表聚合判定，避免重复报告。
+
+**反面案例**：
+```sql
+-- idx_a 是 idx_a_b 的最左前缀，冗余
+CREATE TABLE t (id INT PRIMARY KEY, a INT, b INT, INDEX idx_a (a), INDEX idx_a_b (a, b));
+-- idx_id 与主键列完全相同，冗余
+CREATE TABLE t2 (id INT PRIMARY KEY, a INT, INDEX idx_id (id));
+```
+
+**正面案例**：
+```sql
+CREATE TABLE t (id INT PRIMARY KEY, a INT, b INT, INDEX idx_a_b (a, b));
+-- 唯一索引出于约束语义，不视为冗余
+CREATE TABLE t3 (id INT PRIMARY KEY, a INT, UNIQUE KEY uk_a (a));
+```
 
 ---
 
@@ -251,6 +372,34 @@ SELECT * FROM users JOIN orders;
 ```sql
 SELECT * FROM users u JOIN orders o ON u.id = o.user_id;
 SELECT * FROM users CROSS JOIN orders;  -- 显式 CROSS JOIN 豁免
+```
+
+---
+
+### DML007 — `order_by_required_for_pagination`
+
+| 字段 | 值 |
+|------|-----|
+| 文件 | `config/rules/dml/order_by_required_for_pagination.rhai` |
+| 分组 | `dml-safety` |
+| 严重度 | `error` |
+| 检测方式 | AST（精确，递归子查询） |
+
+**校验原因**：分页查询（`LIMIT` / `OFFSET` / `FETCH`）不带 `ORDER BY` 时结果集顺序不确定，分页会出现重复或漏取。子查询内的分页同样检查。
+
+**豁免**：如业务确实需要随机排序，在 SQL 中加注释 `-- RANDOM_ORDER` 或 `/* RANDOM_ORDER */` 即可跳过。
+
+**反面案例**：
+```sql
+SELECT id FROM users LIMIT 10;            -- 分页却无 ORDER BY
+SELECT id FROM users OFFSET 20;           -- OFFSET 分页同样需要 ORDER BY
+```
+
+**正面案例**：
+```sql
+SELECT id FROM users ORDER BY id LIMIT 10;
+-- RANDOM_ORDER
+SELECT id FROM users ORDER BY RANDOM() LIMIT 10;
 ```
 
 ---

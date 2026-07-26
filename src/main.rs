@@ -505,6 +505,7 @@ fn run_init(target_dir: &Path) -> Result<(), SqlGuardError> {
         ("union_all_preferred", "dml", include_str!("../config/rules/dml/union_all_preferred.rhai")),
         ("no_nested_case", "dml", include_str!("../config/rules/dml/no_nested_case.rhai")),
         ("no_constant_where", "dml", include_str!("../config/rules/dml/no_constant_where.rhai")),
+        ("order_by_required_for_pagination", "dml", include_str!("../config/rules/dml/order_by_required_for_pagination.rhai")),
     ];
 
     for (name, rule_type, content) in rules {
@@ -516,7 +517,7 @@ fn run_init(target_dir: &Path) -> Result<(), SqlGuardError> {
     println!("  - sqlguard.toml          # 主配置（结构/分类/输出/扫描/文件检查）");
     println!("  - sqlguard.rules.toml    # 规则配置（[[rules]] 单独拆分，避免文件过长）");
     println!("  - config/rules/ddl/ (6 rule files)");
-    println!("  - config/rules/dml/ (14 rule files)");
+    println!("  - config/rules/dml/ (15 rule files)");
     println!();
     println!("Run: sqlguard check <project_path>");
     Ok(())
@@ -669,6 +670,16 @@ fn generate_default_config() -> Config {
                 description: Some("JOIN must have ON or USING condition".to_string()),
                 enabled: true,
                 script_path: "config/rules/dml/no_join_without_condition.rhai".into(),
+                applies_to: vec!["dml".to_string()],
+                severity: "error".to_string(),
+            },
+            crate::config::RuleConfig {
+                id: "DML007".to_string(),
+                name: "order_by_required_for_pagination".to_string(),
+                group: Some("dml-safety".to_string()),
+                description: Some("Pagination queries (LIMIT/OFFSET/FETCH) must have ORDER BY for deterministic results".to_string()),
+                enabled: true,
+                script_path: "config/rules/dml/order_by_required_for_pagination.rhai".into(),
                 applies_to: vec!["dml".to_string()],
                 severity: "error".to_string(),
             },
@@ -995,6 +1006,16 @@ group = "dml-safety"
 description = "JOIN must have ON or USING condition"
 enabled = true
 script_path = "config/rules/dml/no_join_without_condition.rhai"
+applies_to = ["dml"]
+severity = "error"
+
+[[rules]]
+id = "DML007"
+name = "order_by_required_for_pagination"
+group = "dml-safety"
+description = "Pagination queries (LIMIT/OFFSET/FETCH) must have ORDER BY for deterministic results"
+enabled = true
+script_path = "config/rules/dml/order_by_required_for_pagination.rhai"
 applies_to = ["dml"]
 severity = "error"
 
