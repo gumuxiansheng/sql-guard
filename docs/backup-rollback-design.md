@@ -1,10 +1,26 @@
 # DDL/DML 备份与回滚自动生成 — 需求说明与技术方案
 
-> 状态：设计稿（待评审）
+> 状态：**已实现（M1-M5 全部完成）**
 > 日期：2026-07-26
 > 作者：SqlGuard Team
-> 关联模块：`src/rule/engine/`、`src/mapper/`、`src/cli.rs`
+> 关联模块：`src/rollback/`、`src/rule/engine/`、`src/mapper/`、`src/cli.rs`、`src/config.rs`
 > 支持方言：MySQL 8.0+ / PostgreSQL 12+
+
+---
+
+## 实现状态
+
+| 里程碑 | 内容 | 状态 | 提交 |
+|--------|------|------|------|
+| **M1** | 骨架 + 方言层：`mod/generator/dialect/naming/manifest/pk/render` 模块骨架，`DialectRenderer` trait 封装 MySQL/PG 差异，`NamingAllocator` 生成 `bks_<table>_<YYYYMMDD>_<NNNN>`，`Manifest` 序列化 | ✅ 完成 | `ce9546e` |
+| **M2** | DML 核心：`dml.rs` 实现 INSERT/UPDATE/DELETE/TRUNCATE/REPLACE，增量备份 + JOIN 回滚 + PK 定位 | ✅ 完成 | `ce9546e` |
+| **M3** | DDL 核心：`ddl.rs` 补全 ALTER 反向操作（RENAME COLUMN/TABLE、ADD_CONSTRAINT 按类型分支） | ✅ 完成 | `2feb132` |
+| **M4** | ddl_like 推断：`expected_schema.columns` / `has_auto_increment_or_serial` / partition check warning | ✅ 完成 | `9d7101d` |
+| **M5** | 校验与防护：`render_backup/rollback/cleanup` 完整实现 + coalesce + 长事务预检查 + R2 预检 + 端到端集成测试 | ✅ 完成 | `b10807e` |
+
+**测试覆盖**：125 个 `rollback` 单元测试全过（含 2 个端到端集成测试，覆盖 `generate → render` 完整生命周期、双方言、LIFO、coalesce、manifest）。
+
+**关键契约落地**：F9 幂等 / F12 原子 RENAME / F13 schema 校验 / F14 段内锁 / F15 分区检测 / F16 binlog 控制 / F18 长事务预检查（含 processlist，N10）/ D1 lock_scope auto 决策 / D6 coalesce / R2 table 锁风险确认。
 
 ---
 

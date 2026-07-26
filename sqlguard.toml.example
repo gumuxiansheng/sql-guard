@@ -93,3 +93,58 @@ check_encoding = true
 check_line_ending = true
 encoding_severity = "error"
 line_ending_severity = "warning"
+
+# ================================================================================
+# 备份回滚自动生成 [rollback]
+# ================================================================================
+# 对每条 DDL/DML 语句自动生成 backup.sql / rollback.sql / rollback-manifest.json，
+# 配合发布平台在变更失败时回滚。详见 docs/backup-rollback-design.md。
+#
+# 总开关默认 false：不启用时 check 流程不触发回滚生成，保持纯检查工具行为。
+# 启用后通过 `sqlguard gen-rollback` 子命令生成回滚脚本。
+#
+# [rollback]
+# enabled = false
+# dialect = "mysql"                  # mysql / postgresql（影响标识符引用、LIKE 语法、RENAME 等）
+# backup_mode = "auto"               # auto（DML 增量 + ALTER 按上下文）/ full / incremental
+# backup_file = "backup.sql"
+# rollback_file = "rollback.sql"
+# manifest_file = "rollback-manifest.json"
+# cleanup_file = "cleanup.sql"
+# wrap_transaction = true            # 仅 PG 生效；MySQL DDL 隐式提交无效
+# backup_table_prefix = "bks_"       # 与 DDL004 对齐
+# backup_table_with_date = true      # bks_xxx_YYYYMMDD_NNNN
+# backup_table_date_format = "%Y%m%d"
+# cleanup_backup_tables_after_rollback = false  # 默认保留备份表便于审计
+# lock_tables_during_backup = true   # 旧配置，保留兼容
+#
+# # ★ D1 锁策略（F14）
+# lock_scope = "auto"                # auto / global / table / snapshot / none
+# lock_timeout = 30                  # FTWRL 等待超时（秒）
+# on_long_transaction = "abort"      # abort / warn / ignore
+# long_transaction_threshold = 5     # 长事务阈值（秒）
+#
+# # ★ D2 binlog 控制（F16）
+# disable_binlog_for_bks = true      # 旧配置，保留兼容
+# binlog_strategy = "auto"           # auto / always / never
+#
+# # schema 漂移校验（F13）与分区表策略（F15）
+# assert_on_schema_mismatch = "abort"  # abort / warn / ignore
+# on_partitioned_table = "abort"       # abort / warn / fallback
+#
+# include_select = false             # Mapper 模式下是否对 SELECT 生成回滚
+#
+# # ★ D5 备份表保留天数（F19）
+# backup_table_retention_days = 7
+#
+# # ★ D6 锁合并（N9）
+# coalesce_locks = true
+# coalesce_locks_mode = "conservative"  # conservative / aggressive
+#
+# # ★ R2 lock_scope=table 必须显式确认
+# accept_table_lock_risk = false
+#
+# # 显式主键声明（未声明时按 StmtInfo.create_table / bks_ JOIN 推断）
+# # [[rollback.primary_keys]]
+# # table = "users"
+# # columns = ["id"]

@@ -1,6 +1,6 @@
 # SqlGuard
 
-一个面向 CI/CD 流水线的 SQL 脚本检查工具，支持**传统 SQL 脚本**和 **MyBatis Mapper XML** 两种模式，使用 [Rhai](https://rhai.rs/) 脚本编写自定义规则，提供目录结构校验、文件分类、多格式报告输出、**语句级增量校验**。
+一个面向 CI/CD 流水线的 SQL 脚本检查工具，支持**传统 SQL 脚本**和 **MyBatis Mapper XML** 两种模式，使用 [Rhai](https://rhai.rs/) 脚本编写自定义规则，提供目录结构校验、文件分类、多格式报告输出、**语句级增量校验**、**备份回滚脚本自动生成**。
 
 ## 两种检查模式
 
@@ -26,6 +26,7 @@
 - **目录结构校验**：强制要求的目录结构，支持严格模式和允许列表
 - **三种报告格式**：终端彩色输出（plain）、结构化 JSON、深色主题 HTML 网页报告
 - **增量校验**：`check-diff` 子命令通过 `git diff` 获取改动语句，按语句级 `[line, end_line] ∩ hunk` 过滤，CI 中只校验本次提交改动的 SQL
+- **备份回滚生成**：对每条 DDL/DML 自动生成 `backup.sql` / `rollback.sql` / `rollback-manifest.json` / `cleanup.sql`，支持 MySQL / PostgreSQL 双方言、多模式锁策略、长事务预检查、binlog 控制、锁合并、schema 漂移校验、分区表检测，配合发布平台在变更失败时回滚（详见 [docs/backup-rollback-design.md](docs/backup-rollback-design.md)）
 - **CI 友好**：`error` 级违规返回非零退出码，`warning` 级仅提示不阻断
 
 ## 架构
@@ -147,6 +148,17 @@ SqlGuard/
 │   │   ├── parser.rs        # XML 解析与 SQL 提取（quick-xml）
 │   │   ├── include.rs       # <include refid="..."/> 引用解析
 │   │   └── placeholder.rs   # #{} / ${} 占位符标准化
+│   ├── rollback/            # 备份回滚生成（gen-rollback）
+│   │   ├── mod.rs           # 模块入口、SafetyClass / BackupRollbackPair
+│   │   ├── dialect.rs       # 方言适配（MySQL / PostgreSQL）
+│   │   ├── naming.rs        # 备份表命名 bks_xxx_YYYYMMDD_NNNN
+│   │   ├── generator.rs     # 主调度，按 StmtInfo.kind 分发
+│   │   ├── ddl.rs           # DDL 反向操作（CREATE/ALTER ADD/RENAME）
+│   │   ├── ddl_like.rs      # CREATE TABLE LIKE 统一模式（DROP/ALTER DROP/MODIFY）
+│   │   ├── dml.rs           # DML 增量备份（INSERT/UPDATE/DELETE/TRUNCATE/REPLACE）
+│   │   ├── pk.rs            # 主键解析（配置 → StmtInfo → bks_ JOIN 推断）
+│   │   ├── render.rs        # SQL 文本渲染（事务包裹、锁合并、预检查）
+│   │   └── manifest.rs      # rollback-manifest.json 序列化
 │   └── reporter/
 │       ├── mod.rs
 │       ├── plain.rs         # 终端彩色报告
@@ -179,7 +191,9 @@ SqlGuard/
 ├── sqlguard.toml.example    # 主配置示例（不含规则）
 ├── sqlguard.rules.toml.example  # 规则配置示例（[[rules]]）
 ├── docs/
-│   └── rule-scripting.md    # 规则脚本编写手册
+│   ├── rule-scripting.md    # 规则脚本编写手册
+│   ├── default-rules.md     # 默认规则手册（16 条内置规则）
+│   └── backup-rollback-design.md  # 备份回滚设计文档
 ├── deploy/
 │   ├── sqlguard-x86_64-apple-darwin
 │   ├── sqlguard-x86_64-linux-musl
@@ -295,6 +309,64 @@ line_ending_severity = "warning"    # 换行符违规级别（提示）
 
 两条检查归入 `file-format` 分组，缺省（未写 `[file_check]` 段）时按默认值启用。
 可用 `--exclude-rules FILE001,FILE002` 或 `--exclude-groups file-format` 临时关闭。
+
+### `[rollback]` 备份回滚生成
+
+对每条 DDL/DML 自动生成 `backup.sql` / `rollback.sql` / `rollback-manifest.json` / `cleanup.sql`，配合发布平台在变更失败时回滚。总开关默认 `false`，不启用时 `check` 流程不触发回滚生成，保持纯检查工具行为。详见 [docs/backup-rollback-design.md](docs/backup-rollback-design.md)。
+
+```toml
+[rollback]
+enabled = false                       # 总开关，默认不启用
+dialect = "mysql"                     # mysql / postgresql
+backup_mode = "auto"                  # auto / full / incremental
+backup_file = "backup.sql"
+rollback_file = "rollback.sql"
+manifest_file = "rollback-manifest.json"
+cleanup_file = "cleanup.sql"
+wrap_transaction = true               # 仅 PG 生效；MySQL DDL 隐式提交无效
+backup_table_prefix = "bks_"          # 与 DDL004 对齐
+backup_table_with_date = true         # bks_xxx_YYYYMMDD_NNNN
+
+# ★ D1 锁策略（F14）
+lock_scope = "auto"                   # auto / global / table / snapshot / none
+lock_timeout = 30                     # FTWRL 等待超时（秒）
+on_long_transaction = "abort"         # abort / warn / ignore
+long_transaction_threshold = 5        # 长事务阈值（秒）
+
+# ★ D2 binlog 控制（F16）
+binlog_strategy = "auto"              # auto / always / never
+
+# schema 漂移校验（F13）与分区表策略（F15）
+assert_on_schema_mismatch = "abort"   # abort / warn / ignore
+on_partitioned_table = "abort"        # abort / warn / fallback
+
+# ★ D5 备份表保留天数（F19）
+backup_table_retention_days = 7
+
+# ★ D6 锁合并（N9）
+coalesce_locks = true
+coalesce_locks_mode = "conservative"  # conservative / aggressive
+
+# ★ R2 lock_scope=table 必须显式确认
+accept_table_lock_risk = false
+
+# 显式主键声明（未声明时按 StmtInfo.create_table / bks_ JOIN 推断）
+# [[rollback.primary_keys]]
+# table = "users"
+# columns = ["id"]
+```
+
+关键字段说明：
+
+| 字段 | 说明 |
+|------|------|
+| `dialect` | 影响标识符引用、`CREATE TABLE LIKE` 语法、`RENAME` 等差异 |
+| `lock_scope` | `auto`：脚本含 DDL 或 backup 含 DDL → `global`，纯 DML → `snapshot`；`table` 模式需配 `accept_table_lock_risk = true` |
+| `binlog_strategy` | `auto`：含 DDL 不设 `sql_log_bin=0`，纯 DML 设；`always` 始终设；`never` 不设（避免 GTID 主从不一致） |
+| `on_long_transaction` | 备份前查询 `innodb_trx` + `processlist`（MySQL）或 `pg_stat_activity`（PG），超阈值按策略处理 |
+| `coalesce_locks` | 合并连续同表段的锁区间，组内统一发射锁/解锁；`conservative` 仅全表 LIKE 合并，`aggressive` 同表增量也合并 |
+| `assert_on_schema_mismatch` | 执行期比对 `expected_schema` 与实际 schema，漂移时按策略处理 |
+| `on_partitioned_table` | 分区表 `CREATE TABLE LIKE` 生成非分区表，按策略决定 abort / warn / fallback |
 
 ## CLI 命令
 
@@ -482,6 +554,71 @@ patterns = ["**/*Mapper.xml", "**/*.xml"]
 - `<include>` 仅支持同文件内引用（不跨 namespace）
 - 动态 SQL 标签剥离后，sqlparser 可能因条件分支导致语法不完整而解析失败
 - statement 类型统一映射为 `dml`（当前版本）
+
+## 备份回滚生成
+
+`rollback` 模块对每条 DDL/DML 语句自动生成 backup / rollback / manifest / cleanup 四件套，配合发布平台在变更失败时回滚。完整设计见 [docs/backup-rollback-design.md](docs/backup-rollback-design.md)。
+
+### 工作流程
+
+```
+SQL 脚本 → rollback::RollbackGenerator::generate()
+        ↓
+   按 StmtInfo.kind 分发
+   ├── DDL（CREATE/ALTER/DROP/RENAME）→ ddl.rs / ddl_like.rs
+   └── DML（INSERT/UPDATE/DELETE/TRUNCATE/REPLACE）→ dml.rs
+        ↓
+   生成 BackupRollbackPair（backup + rollback + SafetyClass + ExpectedSchema）
+        ↓
+   render.rs 渲染为 backup.sql / rollback.sql / cleanup.sql
+        ↓
+   manifest.rs 序列化为 rollback-manifest.json
+```
+
+### 产物说明
+
+| 文件 | 作用 | 执行时机 |
+|------|------|----------|
+| `backup.sql` | 备份变更前数据/结构（建备份表、`INSERT INTO bks_ SELECT * FROM t`） | 变更前 |
+| `rollback.sql` | 失败时回滚（按 LIFO 序：DELETE → 还原 → RENAME 切换 → DROP 临时对象） | 变更失败 |
+| `rollback-manifest.json` | 元数据清单（语句序号、安全分类、期望 schema、警告） | 发布平台读取 |
+| `cleanup.sql` | 回滚成功后清理备份表（默认不自动执行，保留便于审计） | 回滚后（可选） |
+
+### 关键特性
+
+- **双方言支持**：`MySqlRenderer` / `PostgreSqlRenderer` 封装标识符引用、`CREATE TABLE LIKE`、`RENAME` 等差异
+- **多模式锁策略**（D1/F14）：`auto` / `global` / `snapshot` / `table` / `none`，`auto` 根据脚本成分动态决策
+- **CREATE TABLE LIKE 统一模式**：DROP TABLE / ALTER DROP COLUMN / ALTER MODIFY COLUMN 等"无法静态反向"的 DDL 通过备份表 + 原子 RENAME 切换回滚（F12）
+- **DML 增量备份**：INSERT 直接生成 DELETE；UPDATE/DELETE 按 WHERE 增量备份；TRUNCATE 全表备份；REPLACE 部分支持（备份被覆盖旧行）
+- **长事务预检查**（F18/N10）：备份前查询 `innodb_trx` + `information_schema.processlist`（MySQL）或 `pg_stat_activity`（PG），超阈值按 `abort` / `warn` / `ignore` 策略处理
+- **binlog 控制**（F16/D2）：`auto` 模式下含 DDL 不设 `sql_log_bin=0`，纯 DML 设；避免 GTID 主从数据不一致
+- **锁合并**（D6/N9）：合并连续同表段的锁区间，减少锁等待；`conservative`（默认）仅全表 LIKE 合并，`aggressive` 同表增量也合并
+- **schema 漂移校验**（F13）：manifest 记录 `expected_schema`，发布平台执行期比对实际 schema，漂移按 `abort` / `warn` / `ignore` 处理
+- **分区表检测**（F15）：`CREATE TABLE LIKE` 生成非分区表，按 `abort` / `warn` / `fallback` 处理
+- **安全分类聚合**（C2）：`SafetyClass` 聚合 `reliable` / `partial` / `irreversible` / `counter_unrestored` / `requires_lock` 等标志，CI 按分类决策退出码
+- **幂等执行**（F9）：`backup.sql` 多次执行结果一致，`CREATE TABLE IF NOT EXISTS bks_` + `INSERT IGNORE`（MySQL）/ `ON CONFLICT DO NOTHING`（PG）
+
+### 已支持语句
+
+| 类型 | 语句 | 回滚策略 |
+|------|------|----------|
+| DDL | `CREATE TABLE` | `DROP TABLE IF EXISTS` |
+| DDL | `CREATE INDEX` | `DROP INDEX IF EXISTS` |
+| DDL | `CREATE VIEW` | `DROP VIEW IF EXISTS` |
+| DDL | `DROP TABLE` | CREATE TABLE LIKE + 原子 RENAME 切换 |
+| DDL | `ALTER TABLE ADD COLUMN` | metadata-only 反向 `DROP COLUMN`（无约束时）/ 全表 LIKE 降级（有约束时） |
+| DDL | `ALTER TABLE DROP COLUMN` | CREATE TABLE LIKE + 原子 RENAME 切换 |
+| DDL | `ALTER TABLE MODIFY COLUMN` | CREATE TABLE LIKE + 原子 RENAME 切换 |
+| DDL | `ALTER TABLE RENAME COLUMN` | 反向 RENAME COLUMN |
+| DDL | `ALTER TABLE RENAME TO` | 反向 RENAME TO |
+| DDL | `ALTER TABLE ADD CONSTRAINT` | 按约束类型分支反向 DROP（PK / UNIQUE / FK / CHECK / DEFAULT） |
+| DML | `INSERT` | 反向 `DELETE`（按 WHERE / PK 定位） |
+| DML | `UPDATE` | 备份旧值 + `UPDATE ... SET ... FROM bks_ JOIN` 还原 |
+| DML | `DELETE` | 备份被删行 + `INSERT SELECT` 还原 |
+| DML | `TRUNCATE` | 全表备份 + `INSERT SELECT` 还原 |
+| DML | `REPLACE` | 部分支持：备份被覆盖旧行，新增行无法回滚（`partial = true`） |
+
+> 注：`AUTO_INCREMENT` / `SEQUENCE` 当前值无法静态还原，会在 `SafetyClass.counter_unrestored` 标记，需 DBA 手工修复。
 
 ## 报告格式
 
