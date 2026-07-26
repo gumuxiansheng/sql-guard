@@ -17,54 +17,83 @@ import java.util.Map;
 
 /**
  * 占位符绑定器：统计 SQL 中 {@code ?} 个数（忽略字符串字面量内的），
- * 把 fixture 中的值绑定到 PreparedStatement；未提供 fixture 的占位符绑 NULL。
+ * 把 fixture 中的值绑定到 PreparedStatement；未提供 fixture 的占位符绑 NULL
+ * 或使用 auto-param 模式生成默认值。
  *
  * <p>fixture 文件格式：{@code {"<statement id>": ["v1","v2"], ...}}，
  * 每个值以 String 绑定，由 JDBC 驱动做类型转换。
+ *
+ * <p>auto-param 模式：当语句无 fixture 时，不绑 NULL（NULL 会导致 WHERE col = NULL
+ * 恒为假，EXPLAIN 计划失真），而是绑一个默认值。默认值通过 DefaultParamStrategy 生成。
  */
 public final class ParamBinder {
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
     private final Map<String, List<String>> fixtures;   // statement id -> values
+    private final DefaultParamStrategy autoParamStrategy;
 
     public ParamBinder() {
         this.fixtures = Collections.emptyMap();
+        this.autoParamStrategy = null;
     }
 
     public ParamBinder(Map<String, List<String>> fixtures) {
+        this(fixtures, null);
+    }
+
+    public ParamBinder(Map<String, List<String>> fixtures, DefaultParamStrategy autoParamStrategy) {
         this.fixtures = fixtures == null
                 ? Collections.<String, List<String>>emptyMap()
                 : Collections.unmodifiableMap(new LinkedHashMap<String, List<String>>(fixtures));
+        this.autoParamStrategy = autoParamStrategy;
     }
 
     /**
-     * 从 JSON 文件加载 fixture。
+     * 从 JSON 文件加载 fixture。支持传入 autoParamStrategy 启用自动参数生成。
+     */
+    public static ParamBinder load(Path fixturePath, DefaultParamStrategy autoParamStrategy)
+            throws IOException {
+        Map<String, List<String>> m;
+        if (fixturePath == null) {
+            m = Collections.emptyMap();
+        } else {
+            try (java.io.InputStream in = Files.newInputStream(fixturePath)) {
+                m = MAPPER.readValue(in,
+                        new TypeReference<Map<String, List<String>>>() {
+                        });
+            }
+        }
+        return new ParamBinder(m, autoParamStrategy);
+    }
+
+    /**
+     * 从 JSON 文件加载 fixture（兼容旧接口，不启用 auto-param）。
      */
     public static ParamBinder load(Path fixturePath) throws IOException {
-        if (fixturePath == null) {
-            return new ParamBinder();
-        }
-        try (java.io.InputStream in = Files.newInputStream(fixturePath)) {
-            Map<String, List<String>> m = MAPPER.readValue(in,
-                    new TypeReference<Map<String, List<String>>>() {
-                    });
-            return new ParamBinder(m);
-        }
+        return load(fixturePath, null);
     }
 
     /**
      * 绑定参数到 PreparedStatement。
      *
      * <p>对每个 {@code ?}（按出现顺序），优先使用 fixture 中对应的值；
-     * 未提供则绑 NULL。
+     * 未提供则：若 autoParamStrategy 不为 null，用策略生成默认值；否则绑 NULL。
      */
     public void bind(PreparedStatement ps, ManifestStatement s) throws SQLException {
         int count = countPlaceholders(s.getSql());
         List<String> values = s.getId() == null ? null : fixtures.get(s.getId());
+        boolean hasFixture = values != null;
         for (int i = 1; i <= count; i++) {
-            if (values != null && (i - 1) < values.size()) {
+            if (hasFixture && (i - 1) < values.size()) {
                 String v = values.get(i - 1);
+                if (v == null) {
+                    ps.setNull(i, Types.NULL);
+                } else {
+                    ps.setObject(i, v);
+                }
+            } else if (autoParamStrategy != null) {
+                String v = autoParamStrategy.generate(s, i);
                 if (v == null) {
                     ps.setNull(i, Types.NULL);
                 } else {
@@ -79,9 +108,15 @@ public final class ParamBinder {
     /**
      * 判断指定 statement id 是否有 fixture（即使列表为空也算"有定义"）。
      * 用于在 Replayer 中产出"全绑 NULL"警告。
+     *
+     * <p>如果启用了 auto-param 模式，即使无 fixture 也返回 true（因为会生成默认值）。
      */
     public boolean hasFixture(String statementId) {
-        return statementId != null && fixtures.containsKey(statementId);
+        if (statementId != null && fixtures.containsKey(statementId)) {
+            return true;
+        }
+        // auto-param 模式下，无 fixture 也有默认值
+        return autoParamStrategy != null;
     }
 
     /**

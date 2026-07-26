@@ -23,6 +23,10 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.Callable;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 
 /**
  * sqlguard-replay 入口：解析 CLI、加载驱动、构建连接池、重放、写报告。
@@ -96,26 +100,24 @@ public final class Main {
             List<ManifestStatement> filtered = filterStatements(all, config);
 
             // 5. 加载参数 fixture
-            ParamBinder binder = ParamBinder.load(config.getParamFixture());
+            ParamBinder binder;
+            if (config.isAutoParam()) {
+                String autoVal = config.getAutoParamValue();
+                binder = ParamBinder.load(config.getParamFixture(),
+                        new com.sqlguard.replay.param.FixedValueStrategy(autoVal));
+                System.err.println("[replay] auto-param enabled, default value: " + autoVal);
+            } else {
+                binder = ParamBinder.load(config.getParamFixture());
+            }
 
-            // 6. 逐条重放
+            // 6. 重放（并发或串行）
             Replayer replayer = new Replayer(config, pool, binder);
-            List<ReplayResult> results = new ArrayList<ReplayResult>(filtered.size());
-            for (ManifestStatement s : filtered) {
-                System.err.println("[replay] " + s.getId() + " (" + s.getType() + ") ...");
-                ReplayResult r;
-                try {
-                    r = replayer.replay(s);
-                } catch (Throwable t) {
-                    // Replayer 自身已吞 SQLException；这里只兜底防进程崩
-                    r = new ReplayResult(
-                            s.getId(), s.getType(), s.getSource(), s.getLine(), s.getSql(),
-                            null, ReplayResult.SlowLevel.none,
-                            "unexpected: " + t.getClass().getSimpleName() + ": " + t.getMessage(),
-                            null, null, 0.0, null, false, null);
-                }
-                results.add(r);
-                printProgress(s, r);
+            List<ReplayResult> results;
+            int parallel = config.getPoolSize();
+            if (parallel > 1) {
+                results = replayParallel(replayer, filtered, parallel);
+            } else {
+                results = replaySerial(replayer, filtered);
             }
 
             // 7. 聚合并写报告（SlowDetector + PlanAnalyzer 已在 Replayer 内完成）
@@ -217,6 +219,66 @@ public final class Main {
         return out;
     }
 
+    // ----------------------- 重放（串行 / 并发） -----------------------
+
+    private static List<ReplayResult> replaySerial(Replayer replayer,
+                                                   List<ManifestStatement> stmts) {
+        List<ReplayResult> results = new ArrayList<ReplayResult>(stmts.size());
+        for (ManifestStatement s : stmts) {
+            System.err.println("[replay] " + s.getId() + " (" + s.getType() + ") ...");
+            ReplayResult r = safeReplay(replayer, s);
+            results.add(r);
+            printProgress(s, r);
+        }
+        return results;
+    }
+
+    private static List<ReplayResult> replayParallel(Replayer replayer,
+                                                     List<ManifestStatement> stmts,
+                                                     int threads) {
+        ExecutorService exec = Executors.newFixedThreadPool(threads);
+        List<Future<ReplayResult>> futures = new ArrayList<Future<ReplayResult>>(stmts.size());
+        for (final ManifestStatement s : stmts) {
+            futures.add(exec.submit(new Callable<ReplayResult>() {
+                @Override
+                public ReplayResult call() {
+                    return safeReplay(replayer, s);
+                }
+            }));
+        }
+        List<ReplayResult> results = new ArrayList<ReplayResult>(stmts.size());
+        for (int i = 0; i < futures.size(); i++) {
+            try {
+                ReplayResult r = futures.get(i).get();
+                results.add(r);
+                printProgress(stmts.get(i), r);
+            } catch (Exception e) {
+                ManifestStatement s = stmts.get(i);
+                ReplayResult r = new ReplayResult(
+                        s.getId(), s.getType(), s.getSource(), s.getLine(), s.getSql(),
+                        null, ReplayResult.SlowLevel.none,
+                        "executor failed: " + e.getClass().getSimpleName() + ": " + e.getMessage(),
+                        null, null, 0.0, null, false, null);
+                results.add(r);
+                printProgress(s, r);
+            }
+        }
+        exec.shutdown();
+        return results;
+    }
+
+    private static ReplayResult safeReplay(Replayer replayer, ManifestStatement s) {
+        try {
+            return replayer.replay(s);
+        } catch (Throwable t) {
+            return new ReplayResult(
+                    s.getId(), s.getType(), s.getSource(), s.getLine(), s.getSql(),
+                    null, ReplayResult.SlowLevel.none,
+                    "unexpected: " + t.getClass().getSimpleName() + ": " + t.getMessage(),
+                    null, null, 0.0, null, false, null);
+        }
+    }
+
     // ----------------------- 进度打印 -----------------------
 
     private static void printProgress(ManifestStatement s, ReplayResult r) {
@@ -264,6 +326,8 @@ public final class Main {
         int iterations = parseInt(getOpt(kv, "iterations", "3"), 3);
         int warmup = parseInt(getOpt(kv, "warmup", "1"), 1);
         boolean allowDdl = flags.contains("allow-ddl") || "true".equalsIgnoreCase(kv.get("allow-ddl"));
+        boolean autoParam = flags.contains("auto-param") || "true".equalsIgnoreCase(kv.get("auto-param"));
+        String autoParamValue = getOpt(kv, "auto-param-value", "1");
         Set<String> types = ReplayConfig.parseTypes(getOpt(kv, "types", ""));
         long slowWarnMs = parseLong(getOpt(kv, "slow-warn-ms", "100"), 100L);
         long slowErrorMs = parseLong(getOpt(kv, "slow-error-ms", "1000"), 1000L);
@@ -274,13 +338,15 @@ public final class Main {
         Path driverJar = ReplayConfig.toPathOrNull(kv.get("driver-jar"));
         String driverClass = getOpt(kv, "driver-class", "org.postgresql.Driver");
         long seqScanRows = parseLong(getOpt(kv, "seq-scan-rows", "10000"), 10000L);
+        int maxInClauseParams = parseInt(getOpt(kv, "max-in-params", "1000"), 1000);
         int poolSize = parseInt(getOpt(kv, "pool-size", "4"), 4);
         long statementTimeoutMs = parseLong(getOpt(kv, "statement-timeout-ms", "30000"), 30000L);
 
         return new ReplayConfig(
-                manifestPath, outputDir, mode, iterations, warmup, allowDdl, types,
+                manifestPath, outputDir, mode, iterations, warmup, allowDdl,
+                autoParam, autoParamValue, types,
                 slowWarnMs, slowErrorMs, paramFixture, jdbcUrl, jdbcUser, jdbcPassword,
-                driverJar, driverClass, seqScanRows, poolSize, statementTimeoutMs);
+                driverJar, driverClass, seqScanRows, maxInClauseParams, poolSize, statementTimeoutMs);
     }
 
     private static String getOpt(Map<String, String> kv, String key, String def) {

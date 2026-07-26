@@ -259,8 +259,8 @@ public final class Replayer {
                         ? new ArrayList<com.sqlguard.replay.plan.PlanFinding>()
                         : PlanAnalyzer.analyze(topNode, config.getSeqScanRows());
 
-        // PARAM001: 有占位符但无 fixture → 全绑 NULL，计时/计划结果不可信
         if (!skipped) {
+            // PARAM001: 有占位符但无 fixture → 全绑 NULL，计时/计划结果不可信
             int phCount = ParamBinder.countPlaceholders(s.getSql());
             if (phCount > 0 && !binder.hasFixture(s.getId())) {
                 findings.add(new com.sqlguard.replay.plan.PlanFinding(
@@ -268,6 +268,18 @@ public final class Replayer {
                         com.sqlguard.replay.plan.PlanFinding.Severity.warning,
                         "SQL 含 " + phCount + " 个占位符但无 fixture，全绑 NULL → "
                                 + "计时/慢SQL 检测结果不可信（WHERE col = NULL 恒为假）",
+                        null, null));
+            }
+
+            // DYN003: 超大 IN 子句检测
+            int maxInParams = countMaxInClauseParams(s.getSql());
+            if (maxInParams > config.getMaxInClauseParams()) {
+                findings.add(new com.sqlguard.replay.plan.PlanFinding(
+                        "DYN003",
+                        com.sqlguard.replay.plan.PlanFinding.Severity.warning,
+                        "IN 子句包含 " + maxInParams + " 个参数（阈值 "
+                                + config.getMaxInClauseParams() + "），"
+                                + "可能导致查询计划退化或超出数据库 IN 限制",
                         null, null));
             }
         }
@@ -315,5 +327,93 @@ public final class Replayer {
 
     private static String describe(String phase, SQLException e) {
         return phase + " failed: " + e.getClass().getSimpleName() + ": " + e.getMessage();
+    }
+
+    /**
+     * 统计 SQL 中最大的 IN 子句占位符数量。
+     *
+     * <p>扫描所有 {@code IN ( ? , ? , ... )} 模式，返回单条 IN 子句中 ? 的最大数量。
+     * 用于检测 MyBatis foreach 生成的超大 IN 子句。
+     */
+    static int countMaxInClauseParams(String sql) {
+        if (sql == null || sql.isEmpty()) {
+            return 0;
+        }
+        int maxCount = 0;
+        int len = sql.length();
+        int i = 0;
+        while (i < len) {
+            // 查找 IN 关键字（大小写不敏感，前面是空白或行首）
+            if (isInKeyword(sql, i)) {
+                // 跳过 "IN"
+                int j = i + 2;
+                // 跳过空白
+                while (j < len && Character.isWhitespace(sql.charAt(j))) {
+                    j++;
+                }
+                // 期望 '('
+                if (j < len && sql.charAt(j) == '(') {
+                    j++; // 跳过 '('
+                    int count = 0;
+                    // 统计括号内的 ? 数量
+                    while (j < len && sql.charAt(j) != ')') {
+                        if (sql.charAt(j) == '?') {
+                            count++;
+                        }
+                        // 跳过字符串字面量
+                        if (sql.charAt(j) == '\'') {
+                            j++;
+                            while (j < len) {
+                                if (sql.charAt(j) == '\'') {
+                                    if (j + 1 < len && sql.charAt(j + 1) == '\'') {
+                                        j += 2;
+                                    } else {
+                                        j++;
+                                        break;
+                                    }
+                                } else {
+                                    j++;
+                                }
+                            }
+                            continue;
+                        }
+                        j++;
+                    }
+                    if (count > maxCount) {
+                        maxCount = count;
+                    }
+                    i = j;
+                    continue;
+                }
+            }
+            i++;
+        }
+        return maxCount;
+    }
+
+    /**
+     * 检查 sql 在位置 i 处是否为 IN 关键字（大小写不敏感，前面须为空白或行首）。
+     */
+    private static boolean isInKeyword(String sql, int i) {
+        if (i + 2 > sql.length()) {
+            return false;
+        }
+        char c1 = sql.charAt(i);
+        char c2 = sql.charAt(i + 1);
+        if (!(Character.toUpperCase(c1) == 'I' && Character.toUpperCase(c2) == 'N')) {
+            return false;
+        }
+        // 后面不能跟字母（避免匹配 INDEX, INSERT 等）
+        if (i + 2 < sql.length() && Character.isLetter(sql.charAt(i + 2))) {
+            return false;
+        }
+        // 前面须为空白或行首
+        if (i > 0) {
+            char prev = sql.charAt(i - 1);
+            if (!Character.isWhitespace(prev) && prev != '(') {
+                return false;
+            }
+        }
+        return true;
     }
 }

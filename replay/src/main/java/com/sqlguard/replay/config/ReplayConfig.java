@@ -21,6 +21,8 @@ public final class ReplayConfig {
     private final int iterations;
     private final int warmup;
     private final boolean allowDdl;
+    private final boolean autoParam;
+    private final String autoParamValue;
     private final Set<String> types;            // 空 = 不过滤
     private final long slowWarnMs;
     private final long slowErrorMs;
@@ -31,6 +33,7 @@ public final class ReplayConfig {
     private final Path driverJar;
     private final String driverClass;
     private final long seqScanRows;             // DP001/DP003/DP007 阈值
+    private final int maxInClauseParams;          // DYN003 阈值
     private final int poolSize;
     private final long statementTimeoutMs;
 
@@ -40,6 +43,8 @@ public final class ReplayConfig {
                         int iterations,
                         int warmup,
                         boolean allowDdl,
+                        boolean autoParam,
+                        String autoParamValue,
                         Set<String> types,
                         long slowWarnMs,
                         long slowErrorMs,
@@ -50,6 +55,7 @@ public final class ReplayConfig {
                         Path driverJar,
                         String driverClass,
                         long seqScanRows,
+                        int maxInClauseParams,
                         int poolSize,
                         long statementTimeoutMs) {
         this.manifestPath = manifestPath;
@@ -58,6 +64,8 @@ public final class ReplayConfig {
         this.iterations = iterations;
         this.warmup = warmup;
         this.allowDdl = allowDdl;
+        this.autoParam = autoParam;
+        this.autoParamValue = autoParamValue;
         this.types = types == null
                 ? Collections.<String>emptySet()
                 : Collections.unmodifiableSet(new LinkedHashSet<String>(types));
@@ -70,6 +78,7 @@ public final class ReplayConfig {
         this.driverJar = driverJar;
         this.driverClass = driverClass;
         this.seqScanRows = seqScanRows;
+        this.maxInClauseParams = maxInClauseParams;
         this.poolSize = poolSize;
         this.statementTimeoutMs = statementTimeoutMs;
     }
@@ -96,6 +105,14 @@ public final class ReplayConfig {
 
     public boolean isAllowDdl() {
         return allowDdl;
+    }
+
+    public boolean isAutoParam() {
+        return autoParam;
+    }
+
+    public String getAutoParamValue() {
+        return autoParamValue;
     }
 
     public Set<String> getTypes() {
@@ -136,6 +153,10 @@ public final class ReplayConfig {
 
     public long getSeqScanRows() {
         return seqScanRows;
+    }
+
+    public int getMaxInClauseParams() {
+        return maxInClauseParams;
     }
 
     public int getPoolSize() {
