@@ -35,6 +35,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             groups,
             exclude_rules,
             exclude_groups,
+            dialect,
         } => {
             run_check(
                 &path,
@@ -45,6 +46,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 &groups,
                 &exclude_rules,
                 &exclude_groups,
+                dialect.as_deref(),
             )?;
         }
         Commands::Init { path } => {
@@ -60,6 +62,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             groups,
             exclude_rules,
             exclude_groups,
+            dialect,
         } => {
             run_check_diff(
                 &base,
@@ -71,6 +74,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 &groups,
                 &exclude_rules,
                 &exclude_groups,
+                dialect.as_deref(),
             )?;
         }
         Commands::ReplayExport {
@@ -192,8 +196,13 @@ fn run_check(
     groups: &Option<String>,
     exclude_rules: &Option<String>,
     exclude_groups: &Option<String>,
+    dialect_override: Option<&str>,
 ) -> Result<(), SqlGuardError> {
-    let (config, config_dir) = load_config(config_path)?;
+    let (mut config, config_dir) = load_config(config_path)?;
+    if let Some(d) = dialect_override {
+        config.dialect = crate::config::CheckDialect::from_str(d);
+        eprintln!("Dialect override: {} → {}", config.dialect.as_str(), d);
+    }
 
     let filter = engine::RuleFilter::from_cli(rules, groups, exclude_rules, exclude_groups);
     if !filter.is_empty() {
@@ -299,8 +308,13 @@ fn run_check_diff(
     groups: &Option<String>,
     exclude_rules: &Option<String>,
     exclude_groups: &Option<String>,
+    dialect_override: Option<&str>,
 ) -> Result<(), SqlGuardError> {
-    let (config, config_dir) = load_config(config_path)?;
+    let (mut config, config_dir) = load_config(config_path)?;
+    if let Some(d) = dialect_override {
+        config.dialect = crate::config::CheckDialect::from_str(d);
+        eprintln!("Dialect override: {} → {}", config.dialect.as_str(), d);
+    }
 
     let filter = engine::RuleFilter::from_cli(rules, groups, exclude_rules, exclude_groups);
     if !filter.is_empty() {
@@ -775,6 +789,7 @@ fn generate_default_config() -> Config {
         scan: crate::config::ScanConfig::default(),
         file_check: crate::config::FileCheckConfig::default(),
         rollback: crate::config::RollbackConfig::default(),
+        dialect: crate::config::CheckDialect::default(),
     }
 }
 

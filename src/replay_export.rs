@@ -95,7 +95,7 @@ pub fn build_manifest(
             SqlGuardError::CheckError(format!("Failed to read '{}': {}", file_path.display(), e))
         })?;
         let mut seq: usize = 0;
-        let ast = parse_sql_to_ast(&content);
+        let ast = parse_sql_to_ast(&content, crate::config::CheckDialect::Generic);
         let total_lines = content.lines().count() as i64;
         let source = display_path(file_path, target_dir);
         let stmt_count = ast.statements.len();
@@ -173,7 +173,7 @@ pub fn build_manifest(
 
             for (vi, v) in variants.iter().enumerate() {
                 // 解析变体 SQL 仅用于检测语法错误，不改写导出文本
-                let parsed = parse_sql_to_ast(&v.sql);
+                let parsed = parse_sql_to_ast(&v.sql, crate::config::CheckDialect::Generic);
                 let parse_error = parsed
                     .parse_error
                     .clone()

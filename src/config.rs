@@ -35,6 +35,54 @@ pub struct Config {
     /// 回滚脚本生成配置。缺省时使用 RollbackConfig::default()（不启用）。
     #[serde(default)]
     pub rollback: RollbackConfig,
+    /// check 流程使用的 SQL 方言。缺省为 `generic`（兼容旧行为）。
+    /// 影响 sqlparser 解析：mysql 方言支持 `INSERT IGNORE` / `ON DUPLICATE KEY UPDATE` 等
+    /// MySQL 专有语法；postgresql 方言支持 PG 扩展语法。
+    #[serde(default)]
+    pub dialect: CheckDialect,
+}
+
+/// check 流程的 SQL 方言选择。
+///
+/// - `Generic`：默认，兼容大多数标准 SQL（向后兼容）
+/// - `MySql`：支持 MySQL 专有语法（INSERT IGNORE / ON DUPLICATE KEY UPDATE / 反引号标识符等）
+/// - `PostgreSql`：支持 PostgreSQL 扩展语法
+/// - `Ansi`：严格 ANSI SQL
+#[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum CheckDialect {
+    Generic,
+    MySql,
+    PostgreSql,
+    Ansi,
+}
+
+impl Default for CheckDialect {
+    fn default() -> Self {
+        CheckDialect::Generic
+    }
+}
+
+impl CheckDialect {
+    /// 从字符串解析方言（用于 CLI `--dialect` 覆盖配置）。
+    /// 不区分大小写，未知值回退到 Generic。
+    pub fn from_str(s: &str) -> Self {
+        match s.trim().to_lowercase().as_str() {
+            "mysql" => CheckDialect::MySql,
+            "postgres" | "postgresql" | "pg" => CheckDialect::PostgreSql,
+            "ansi" => CheckDialect::Ansi,
+            _ => CheckDialect::Generic,
+        }
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            CheckDialect::Generic => "generic",
+            CheckDialect::MySql => "mysql",
+            CheckDialect::PostgreSql => "postgresql",
+            CheckDialect::Ansi => "ansi",
+        }
+    }
 }
 
 #[derive(Debug, Deserialize, Clone)]

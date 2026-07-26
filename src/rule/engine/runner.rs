@@ -23,6 +23,9 @@ const HELPERS_SCRIPT: &str = include_str!("../../../config/rules/lib/helpers.rha
 /// - 脚本模式传 `0`
 /// - Mapper 模式传 `raw_xml_line - 1`（即 `<select>` 标签起始行号减 1），
 ///   使违规行号指向 XML 文件中的实际行
+///
+/// **方言**：使用 `config.dialect` 解析 SQL。解析失败时插入一条 `PARSE` violation
+/// （warning），并在 stderr 输出提示，避免静默跳过所有 AST 规则。
 pub fn run_rules_for_file(
     engine: &Engine,
     file_path: &Path,
@@ -35,7 +38,67 @@ pub fn run_rules_for_file(
 ) -> Result<Vec<Violation>, SqlGuardError> {
     let mut violations = Vec::new();
 
-    let ast = parse_sql_to_ast(sql_content);
+    let ast = parse_sql_to_ast(sql_content, config.dialect);
+
+    // 解析失败显式上报：避免 AST 规则全部静默跳过导致用户误以为合规
+    // 两种失败模式：
+    //   1) 顶层 tokenize 失败 → ast.parse_error = Some(...)
+    //   2) 单条语句 parse_statement 失败 → 该语句 kind = "PARSE_ERROR"
+    let has_parse_error_stmt = ast
+        .statements
+        .iter()
+        .any(|s| s.kind == "PARSE_ERROR");
+    if let Some(err) = &ast.parse_error {
+        eprintln!(
+            "Warning: {} failed to tokenize with {} dialect ({}); AST rules will be skipped",
+            file_path.display(),
+            config.dialect.as_str(),
+            err
+        );
+        violations.push(Violation {
+            rule_id: "PARSE".to_string(),
+            rule_name: "parse_error".to_string(),
+            rule_group: Some("engine".to_string()),
+            severity: "warning".to_string(),
+            message: format!(
+                "SQL tokenize error with {} dialect: {}",
+                config.dialect.as_str(),
+                err
+            ),
+            file_path: file_path.to_path_buf(),
+            script_type: script_type.to_string(),
+            line: None,
+            end_line: None,
+            column: None,
+        });
+    } else if has_parse_error_stmt {
+        let count = ast.statements.iter().filter(|s| s.kind == "PARSE_ERROR").count();
+        eprintln!(
+            "Warning: {} has {} statement(s) failed to parse with {} dialect; those statements are skipped",
+            file_path.display(),
+            count,
+            config.dialect.as_str()
+        );
+        // 为每条 PARSE_ERROR 语句生成一条 violation（带行号）
+        for s in ast.statements.iter().filter(|s| s.kind == "PARSE_ERROR") {
+            violations.push(Violation {
+                rule_id: "PARSE".to_string(),
+                rule_name: "parse_error".to_string(),
+                rule_group: Some("engine".to_string()),
+                severity: "warning".to_string(),
+                message: format!(
+                    "SQL parse error with {} dialect at line {} (statement skipped)",
+                    config.dialect.as_str(),
+                    s.line
+                ),
+                file_path: file_path.to_path_buf(),
+                script_type: script_type.to_string(),
+                line: Some(s.line as usize),
+                end_line: Some(s.end_line as usize),
+                column: Some(s.column as usize),
+            });
+        }
+    }
 
     let context = RuleContext {
         sql_content: sql_content.to_string(),

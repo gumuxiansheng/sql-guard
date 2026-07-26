@@ -3,23 +3,29 @@ use sqlparser::ast::{
     OrderByExpr, Statement, TableConstraint,
     TableFactor,
 };
-use sqlparser::dialect::GenericDialect;
+use sqlparser::dialect::{AnsiDialect, GenericDialect, MySqlDialect, PostgreSqlDialect};
 use sqlparser::parser::Parser;
 use sqlparser::tokenizer::Token;
 
 use super::analyzer::analyze_query;
 use super::ast::*;
 use super::scanner::{collect_comments, detect_comma_join_in_sql};
+use crate::config::CheckDialect;
 
 /// 把 SQL 文本解析为 AST，每条语句记录其在源文件中的行号/列号。
 /// 解析失败时返回带 `parse_error` 的空 AST，不影响后续规则运行。
 ///
 /// 利用 `Parser::peek_token()` 在解析每条语句前读取起始位置，
 /// 避免 sqlparser 的 `Statement` 本身不携带位置信息的限制。
-pub(crate) fn parse_sql_to_ast(sql: &str) -> SqlAst {
-    let dialect = GenericDialect {};
+pub(crate) fn parse_sql_to_ast(sql: &str, dialect: CheckDialect) -> SqlAst {
+    let parser_dialect: Box<dyn sqlparser::dialect::Dialect> = match dialect {
+        CheckDialect::Generic => Box::new(GenericDialect {}),
+        CheckDialect::MySql => Box::new(MySqlDialect {}),
+        CheckDialect::PostgreSql => Box::new(PostgreSqlDialect {}),
+        CheckDialect::Ansi => Box::new(AnsiDialect {}),
+    };
 
-    let mut parser = match Parser::new(&dialect).try_with_sql(sql) {
+    let mut parser = match Parser::new(&*parser_dialect).try_with_sql(sql) {
         Ok(p) => p,
         Err(e) => {
             return SqlAst {

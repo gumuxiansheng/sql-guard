@@ -95,6 +95,18 @@ encoding_severity = "error"
 line_ending_severity = "warning"
 
 # ================================================================================
+# SQL 方言 dialect
+# ================================================================================
+# check 流程使用的 SQL 方言，影响 sqlparser 解析。
+# - generic（默认）：兼容大多数标准 SQL
+# - mysql：支持 MySQL 专有语法（INSERT IGNORE / ON DUPLICATE KEY UPDATE / 反引号标识符等）
+# - postgresql：支持 PostgreSQL 扩展语法
+# - ansi：严格 ANSI SQL
+#
+# 可用 CLI `--dialect mysql` 临时覆盖配置。
+# dialect = "generic"
+
+# ================================================================================
 # 备份回滚自动生成 [rollback]
 # ================================================================================
 # 对每条 DDL/DML 语句自动生成 backup.sql / rollback.sql / rollback-manifest.json，

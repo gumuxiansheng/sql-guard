@@ -1969,3 +1969,109 @@ formats = ["json"]
 
     let _ = std::fs::remove_dir_all(dir);
 }
+
+#[test]
+fn test_check_dialect_override() {
+    // 验证 --dialect CLI 覆盖配置中的方言，stderr 应打印 override 提示
+    let dir = "/tmp/sqlguard-test-dialect";
+    let _ = std::fs::remove_dir_all(dir);
+    std::fs::create_dir_all(format!("{}/sql/dml", dir)).unwrap();
+    std::fs::write(
+        format!("{}/sql/dml/t.sql", dir),
+        "SELECT id, name FROM users LIMIT 10;",
+    ).unwrap();
+    std::fs::write(
+        format!("{}/sqlguard.toml", dir),
+        "[structure]\npaths = [\"sql\"]\nstrict = false\nallow_extra = [\"*\"]\n[classification]\nrules = []\ndefault_type = \"other\"\n",
+    ).unwrap();
+
+    let output = Command::new(&binary_abs_path())
+        .args(["check", dir, "-c", &format!("{}/sqlguard.toml", dir), "--dialect", "mysql"])
+        .output()
+        .expect("Failed to run sqlguard check");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("Dialect override") && stderr.contains("mysql"),
+        "stderr 应包含 dialect override 提示，实际: {}",
+        stderr
+    );
+
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn test_check_parse_error_reporting() {
+    // 验证解析失败时显式上报 PARSE violation，不再静默跳过
+    let dir = "/tmp/sqlguard-test-parse-error";
+    let _ = std::fs::remove_dir_all(dir);
+    std::fs::create_dir_all(format!("{}/sql/dml", dir)).unwrap();
+    // 故意写一条无法解析的 SQL（INSERT INTO 后缺表名）
+    std::fs::write(
+        format!("{}/sql/dml/bad.sql", dir),
+        "INSERT INTO VALUES (1);\n",
+    ).unwrap();
+    std::fs::write(
+        format!("{}/sqlguard.toml", dir),
+        "[structure]\npaths = [\"sql\"]\nstrict = false\nallow_extra = [\"*\"]\n[classification]\nrules = []\ndefault_type = \"other\"\n",
+    ).unwrap();
+
+    let output = Command::new(&binary_abs_path())
+        .args(["check", dir, "-c", &format!("{}/sqlguard.toml", dir), "-f", "json", "-o", dir])
+        .output()
+        .expect("Failed to run sqlguard check");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    // stderr 应有 Warning 提示
+    assert!(
+        stderr.contains("failed to parse"),
+        "stderr 应包含解析失败提示，实际: {}",
+        stderr
+    );
+
+    // JSON 报告应包含 rule_id = PARSE 的 violation
+    let report_path = format!("{}/sqlguard-report.json", dir);
+    let report_text = std::fs::read_to_string(&report_path)
+        .expect("JSON report file should exist");
+    let report: serde_json::Value = serde_json::from_str(&report_text)
+        .expect("JSON report should be valid");
+    if let Some(violations) = report["violations"].as_array() {
+        let has_parse = violations.iter().any(|v| {
+            v["rule_id"].as_str() == Some("PARSE")
+        });
+        assert!(
+            has_parse,
+            "应包含 PARSE violation，实际 violations: {}",
+            violations.len()
+        );
+    } else {
+        panic!("violations 应为数组，report: {}", report_text);
+    }
+
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn test_init_registers_dml007() {
+    // 验证 init 生成的配置包含 DML007 order_by_required_for_pagination
+    let dir = "/tmp/sqlguard-test-init-dml007";
+    let _ = std::fs::remove_dir_all(dir);
+
+    let output = Command::new(&binary_abs_path())
+        .args(["init", dir])
+        .output()
+        .expect("Failed to run sqlguard init");
+    assert!(output.status.success());
+
+    // 规则文件存在
+    assert!(Path::new(dir).join("config/rules/dml/order_by_required_for_pagination.rhai").exists());
+
+    // sqlguard.rules.toml 包含 DML007
+    let rules_content = std::fs::read_to_string(format!("{}/sqlguard.rules.toml", dir)).unwrap();
+    assert!(
+        rules_content.contains("DML007") && rules_content.contains("order_by_required_for_pagination"),
+        "sqlguard.rules.toml 应包含 DML007，实际:\n{}",
+        rules_content
+    );
+
+    let _ = std::fs::remove_dir_all(dir);
+}

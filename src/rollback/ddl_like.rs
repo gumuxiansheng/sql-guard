@@ -219,7 +219,7 @@ mod tests {
     }
 
     fn make_cfg() -> Config {
-        Config { structure: crate::config::StructureConfig { paths: vec![], strict: false, allow_extra: vec![] }, classification: crate::config::ClassificationConfig { rules: vec![], default_type: "other".to_string() }, rules: vec![], rules_file: None, rules_dir: std::path::PathBuf::new(), output: crate::config::OutputConfig::default(), mapper: crate::config::MapperConfig::default(), scan: crate::config::ScanConfig::default(), file_check: crate::config::FileCheckConfig::default(), rollback: RollbackConfig::default() }
+        Config { structure: crate::config::StructureConfig { paths: vec![], strict: false, allow_extra: vec![] }, classification: crate::config::ClassificationConfig { rules: vec![], default_type: "other".to_string() }, rules: vec![], rules_file: None, rules_dir: std::path::PathBuf::new(), output: crate::config::OutputConfig::default(), mapper: crate::config::MapperConfig::default(), scan: crate::config::ScanConfig::default(), file_check: crate::config::FileCheckConfig::default(), rollback: RollbackConfig::default(), dialect: crate::config::CheckDialect::default() }
     }
 
     fn make_alter_drop_column_stmt() -> StmtInfo {

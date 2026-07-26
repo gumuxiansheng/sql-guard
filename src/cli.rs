@@ -43,6 +43,10 @@ pub enum Commands {
         /// Only run rules whose group matches (comma-separated, supports prefix wildcard)
         #[clap(long)]
         exclude_groups: Option<String>,
+
+        /// Override [dialect] in config: generic / mysql / postgresql / ansi
+        #[clap(long)]
+        dialect: Option<String>,
     },
     /// Export a SQL manifest (sql-manifest.json) for dynamic replay.
     ///
@@ -114,5 +118,9 @@ pub enum Commands {
         /// Exclude rules whose group matches (comma-separated, supports prefix wildcard).
         #[clap(long)]
         exclude_groups: Option<String>,
+
+        /// Override [dialect] in config: generic / mysql / postgresql / ansi
+        #[clap(long)]
+        dialect: Option<String>,
     },
 }

@@ -987,6 +987,7 @@ mod tests {
             scan: crate::config::ScanConfig::default(),
             file_check: crate::config::FileCheckConfig::default(),
             rollback: rc.clone(),
+            dialect: crate::config::CheckDialect::default(),
         };
         (cfg, rc)
     }
