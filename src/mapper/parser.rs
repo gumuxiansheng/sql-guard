@@ -5,12 +5,12 @@
 //! 2. 第二遍：扫描 `<select>/<insert>/<update>/<delete>` 标签：
 //!    - 收集标签内文本内容（动态 SQL 标签如 `<if>/<where>/<foreach>` 剥离，
 //!      仅保留其内部文本，由事件流自然实现，不用 regex）
-//!    - 解析 `<include refid="..."/>`（同文件内）
+//!    - 解析 `<include refid="..."/>`（同文件内 + 跨 namespace）
 //!    - 标准化 `#{}` / `${}` 占位符
 //!    - 记录 `<select>` 标签在 XML 中的起始行号
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use quick_xml::events::Event;
 use quick_xml::Reader;
@@ -39,7 +39,9 @@ pub struct ExtractedSql {
     pub processed_sql: String,
 }
 
-/// 从 Mapper XML 文件提取所有 SQL 语句。
+/// 从单个 Mapper XML 文件提取所有 SQL 语句（仅同文件内 include 解析）。
+///
+/// 跨 namespace 引用需使用 [`extract_sql_from_xmls`] 批量提取，构建全局片段表。
 pub fn extract_sql_from_xml(xml_path: &Path) -> Result<Vec<ExtractedSql>, SqlGuardError> {
     let content = std::fs::read_to_string(xml_path).map_err(|e| {
         SqlGuardError::MapperError(format!(
@@ -50,7 +52,83 @@ pub fn extract_sql_from_xml(xml_path: &Path) -> Result<Vec<ExtractedSql>, SqlGua
     })?;
 
     let fragments = collect_sql_fragments(&content)?;
-    extract_statements(&content, &fragments)
+    extract_statements(&content, &fragments, None)
+}
+
+/// 从多个 Mapper XML 文件批量提取 SQL，构建跨 namespace 全局片段表。
+///
+/// 两阶段流程：
+/// 1. **收集阶段**：扫描所有文件的 `<mapper namespace="...">` 与 `<sql id="...">`，
+///    把每个片段注册到全局表，key 为 `namespace.id`（如 `com.example.UserMapper.cols`）。
+/// 2. **提取阶段**：逐文件提取 `<select>/<insert>/<update>/<delete>`，
+///    解析 `<include refid="..."/>` 时优先查本地片段，未命中且 refid 含点时查全局表。
+///
+/// 返回 `Vec<(PathBuf, Vec<ExtractedSql>)>`，保持输入顺序。
+///
+/// # 跨 namespace 引用规则
+/// - `<include refid="cols"/>`（无点）→ 仅查当前文件本地片段
+/// - `<include refid="com.example.UserMapper.cols"/>`（含点）→ 查全局表
+pub fn extract_sql_from_xmls(
+    xml_paths: &[PathBuf],
+) -> Result<Vec<(PathBuf, Vec<ExtractedSql>)>, SqlGuardError> {
+    // 阶段 1：收集所有文件的 namespace + 本地片段，注册到全局表
+    let mut global: HashMap<String, String> = HashMap::new();
+    let mut per_file: Vec<(PathBuf, String, HashMap<String, String>)> = Vec::new();
+
+    for path in xml_paths {
+        let content = std::fs::read_to_string(path).map_err(|e| {
+            SqlGuardError::MapperError(format!(
+                "Failed to read mapper XML '{}': {}",
+                path.display(),
+                e
+            ))
+        })?;
+
+        let namespace = extract_mapper_namespace(&content);
+        let local_frags = collect_sql_fragments(&content)?;
+
+        // 注册到全局表：每个片段同时按 `namespace.id` 注册
+        // （namespace 缺失时跳过全局注册，仍可作为本地片段使用）
+        if let Some(ref ns) = namespace {
+            for (id, content) in &local_frags {
+                global.insert(format!("{}.{}", ns, id), content.clone());
+            }
+        }
+
+        per_file.push((path.clone(), content, local_frags));
+    }
+
+    // 阶段 2：逐文件提取，传入全局片段表
+    let mut results = Vec::with_capacity(per_file.len());
+    for (path, content, local_frags) in per_file {
+        let stmts = extract_statements(&content, &local_frags, Some(&global))?;
+        results.push((path, stmts));
+    }
+    Ok(results)
+}
+
+/// 提取 `<mapper namespace="...">` 的 namespace 属性值。
+///
+/// 扫描第一个 `mapper` 开始标签的 `namespace` 属性。
+/// 缺失或解析失败时返回 `None`（向后兼容无 namespace 的 mapper）。
+fn extract_mapper_namespace(content: &str) -> Option<String> {
+    let mut scanner = XmlScanner::new(content);
+    while let Some(result) = scanner.next_event() {
+        let (event, _line) = match result {
+            Ok(r) => r,
+            Err(_) => return None,
+        };
+        if let Event::Start(e) = event {
+            let name = lowercased_name(&e);
+            if name == "mapper" {
+                if let Ok(Some(ns)) = extract_attr(e.attributes(), "namespace") {
+                    return Some(ns);
+                }
+                return None;
+            }
+        }
+    }
+    None
 }
 
 // ===== 内部实现 =====
@@ -77,9 +155,12 @@ fn collect_sql_fragments(content: &str) -> Result<HashMap<String, String>, SqlGu
 }
 
 /// 第二遍：扫描 SQL 标签并提取每条语句。
+///
+/// `global` 为 `Some` 时启用跨 namespace include 解析；为 `None` 时退化为单文件模式。
 fn extract_statements(
     content: &str,
     fragments: &HashMap<String, String>,
+    global: Option<&HashMap<String, String>>,
 ) -> Result<Vec<ExtractedSql>, SqlGuardError> {
     let mut scanner = XmlScanner::new(content);
     let mut results = Vec::new();
@@ -94,7 +175,7 @@ fn extract_statements(
                 if raw_sql.trim().is_empty() {
                     continue;
                 }
-                let with_includes = resolve_includes(&raw_sql, fragments)?;
+                let with_includes = resolve_includes(&raw_sql, fragments, global)?;
                 let with_where = process_where_markers(&with_includes);
                 let processed = normalize_placeholders(&with_where);
                 results.push(ExtractedSql {
