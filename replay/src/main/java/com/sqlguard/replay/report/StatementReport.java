@@ -38,6 +38,14 @@ public class StatementReport {
     @JsonProperty("planTotalCost")
     private double planTotalCost;
 
+    /**
+     * 原始 EXPLAIN JSON 字符串，便于深度调试与离线分析。
+     * 无计划时省略（{@link JsonInclude.Include#NON_NULL}）。
+     */
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    @JsonProperty("planJson")
+    private String planJson;
+
     @JsonProperty("findings")
     private List<Finding> findings;
 
@@ -141,6 +149,8 @@ public class StatementReport {
     public void setPlanTopNode(String planTopNode) { this.planTopNode = planTopNode; }
     public double getPlanTotalCost() { return planTotalCost; }
     public void setPlanTotalCost(double planTotalCost) { this.planTotalCost = planTotalCost; }
+    public String getPlanJson() { return planJson; }
+    public void setPlanJson(String planJson) { this.planJson = planJson; }
     public List<Finding> getFindings() { return findings; }
     public void setFindings(List<Finding> findings) { this.findings = findings; }
     public String getError() { return error; }

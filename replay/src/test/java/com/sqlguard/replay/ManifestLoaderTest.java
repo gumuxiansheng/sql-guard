@@ -170,4 +170,26 @@ class ManifestLoaderTest {
         // fixture 命中
         // （不实际绑定到真实 PreparedStatement，仅验证 fixture 映射与占位符计数契约）
     }
+
+    @Test
+    void manifestVersionIsCheckedOnLoad() throws Exception {
+        // 样例清单的 version 应为 1（SUPPORTED_VERSION），正常加载
+        Manifest m = loadSample();
+        assertEquals(ManifestLoader.SUPPORTED_VERSION, m.getVersion());
+    }
+
+    @Test
+    void unsupportedManifestVersionThrows() throws Exception {
+        // 写一个 version=2 的清单文件，应抛 UnsupportedManifestVersionException
+        String json = "{\"version\":2,\"statements\":[]}";
+        Path tmp = Files.createTempFile("sqlguard-bad-version-", ".json");
+        Files.write(tmp, json.getBytes("UTF-8"));
+        com.sqlguard.replay.manifest.UnsupportedManifestVersionException ex =
+                org.junit.jupiter.api.Assertions.assertThrows(
+                        com.sqlguard.replay.manifest.UnsupportedManifestVersionException.class,
+                        () -> ManifestLoader.load(tmp));
+        assertEquals(2, ex.getActualVersion());
+        assertEquals(ManifestLoader.SUPPORTED_VERSION, ex.getSupportedVersion());
+        Files.deleteIfExists(tmp);
+    }
 }

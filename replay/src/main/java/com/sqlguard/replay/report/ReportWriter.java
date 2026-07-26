@@ -78,6 +78,7 @@ public final class ReportWriter {
         sr.setSlowLevel(r.getSlowLevel().name());
         sr.setPlanTopNode(r.getPlanTopNode());
         sr.setPlanTotalCost(r.getPlanTotalCost());
+        sr.setPlanJson(r.getPlanJson());
 
         List<StatementReport.Finding> findings = new ArrayList<StatementReport.Finding>(r.getFindings().size());
         for (PlanFinding f : r.getFindings()) {
@@ -126,6 +127,10 @@ public final class ReportWriter {
         sb.append(".slow-error{color:#f85149;font-weight:bold;}\n");
         sb.append(".slow-none{color:#58a6ff;}\n");
         sb.append(".skipped{color:#8b949e;}\n");
+        sb.append(".plan-json-row td{padding:0;}\n");
+        sb.append(".plan-json-row details{margin:0;}\n");
+        sb.append(".plan-json-row summary{cursor:pointer;padding:4px 8px;background:#161b22;color:#8b949e;font-size:12px;}\n");
+        sb.append(".plan-json-row pre{margin:0;padding:8px;max-height:400px;overflow:auto;font-size:11px;background:#0d1117;}\n");
         sb.append("pre{white-space:pre-wrap;word-break:break-all;margin:0;max-width:480px;}\n");
         sb.append(".summary{margin-bottom:16px;padding:10px;background:#161b22;border:1px solid #30363d;}\n");
         sb.append("</style>\n</head>\n<body>\n");
@@ -170,6 +175,13 @@ public final class ReportWriter {
             sb.append("<td class=\"").append(st.isSkipped() ? "skipped" : "slow-error").append("\">")
                     .append(esc(note)).append("</td>");
             sb.append("</tr>\n");
+            // 可折叠的原始 planJson 展示（仅在存在时渲染）
+            if (st.getPlanJson() != null && !st.getPlanJson().isEmpty()) {
+                sb.append("<tr class=\"plan-json-row\"><td colspan=\"10\">");
+                sb.append("<details><summary>EXPLAIN JSON</summary><pre>");
+                sb.append(esc(st.getPlanJson()));
+                sb.append("</pre></details></td></tr>\n");
+            }
         }
         sb.append("</tbody>\n</table>\n</body>\n</html>\n");
         return sb.toString();

@@ -93,9 +93,9 @@ public final class Replayer {
     // ----------------------- 分支实现 -----------------------
 
     private ReplayResult replayDdlPlanOnly(ManifestStatement s) {
-        String sqlUpper = s.getSql() == null ? "" : s.getSql().trim().toUpperCase();
-        boolean hasAsSelect = sqlUpper.contains(" AS SELECT");
-        if (!hasAsSelect) {
+        // 检测 CTAS（CREATE TABLE ... AS SELECT / CREATE VIEW ... AS SELECT）
+        // 用 token 扫描器避免子串匹配误判注释/字符串字面量中的 "AS SELECT"
+        if (!isCreateAsSelect(s.getSql())) {
             return skipped(s, "ddl: EXPLAIN not supported for non-CTAS DDL");
         }
         try (Connection c = pool.getConnection()) {
@@ -104,6 +104,137 @@ public final class Replayer {
         } catch (SQLException e) {
             return buildResultWithPlan(s, null, describe("plan", e), null, false, null);
         }
+    }
+
+    /**
+     * 判断 DDL 是否为 CREATE TABLE/VIEW ... AS SELECT 形态（CTAS）。
+     *
+     * <p>用 token 扫描器跳过字符串字面量、行注释、块注释，再匹配 {@code AS} 后紧接
+     * {@code SELECT} 关键字（大小写不敏感）。避免原 {@code sql.contains(" AS SELECT")}
+     * 误匹配 {@code -- AS SELECT} 注释或 {@code 'AS SELECT'} 字符串字面量的问题。
+     */
+    static boolean isCreateAsSelect(String sql) {
+        if (sql == null || sql.isEmpty()) {
+            return false;
+        }
+        int len = sql.length();
+        int i = 0;
+        while (i < len) {
+            char ch = sql.charAt(i);
+
+            // 跳过单引号字符串
+            if (ch == '\'') {
+                i++;
+                while (i < len) {
+                    if (sql.charAt(i) == '\'') {
+                        if (i + 1 < len && sql.charAt(i + 1) == '\'') {
+                            i += 2;
+                        } else {
+                            i++;
+                            break;
+                        }
+                    } else {
+                        i++;
+                    }
+                }
+                continue;
+            }
+
+            // 跳过行注释 -- ... \n
+            if (ch == '-' && i + 1 < len && sql.charAt(i + 1) == '-') {
+                i += 2;
+                while (i < len && sql.charAt(i) != '\n') {
+                    i++;
+                }
+                continue;
+            }
+
+            // 跳过块注释 /* ... */（支持嵌套）
+            if (ch == '/' && i + 1 < len && sql.charAt(i + 1) == '*') {
+                i += 2;
+                int depth = 1;
+                while (i < len && depth > 0) {
+                    if (sql.charAt(i) == '/' && i + 1 < len && sql.charAt(i + 1) == '*') {
+                        depth++;
+                        i += 2;
+                    } else if (sql.charAt(i) == '*' && i + 1 < len && sql.charAt(i + 1) == '/') {
+                        depth--;
+                        i += 2;
+                    } else {
+                        i++;
+                    }
+                }
+                continue;
+            }
+
+            // 跳过双引号标识符（PG 引用标识符）
+            if (ch == '"') {
+                i++;
+                while (i < len) {
+                    if (sql.charAt(i) == '"') {
+                        if (i + 1 < len && sql.charAt(i + 1) == '"') {
+                            i += 2;
+                        } else {
+                            i++;
+                            break;
+                        }
+                    } else {
+                        i++;
+                    }
+                }
+                continue;
+            }
+
+            // 匹配 AS 关键字（前后需为非字母数字/下划线边界）
+            if (matchesKeyword(sql, i, "AS")) {
+                int afterAsPos = i + 2;
+                // 跳过 AS 后的空白
+                while (afterAsPos < len && Character.isWhitespace(sql.charAt(afterAsPos))) {
+                    afterAsPos++;
+                }
+                if (matchesKeyword(sql, afterAsPos, "SELECT")) {
+                    return true;
+                }
+                // AS 后非 SELECT（如 AS alias），继续扫描
+                i = afterAsPos;
+                continue;
+            }
+
+            i++;
+        }
+        return false;
+    }
+
+    /**
+     * 在 sql 位置 i 处匹配关键字 keyword（大小写不敏感），
+     * 要求关键字前后均为非字母数字/下划线边界（避免 INDEX 误匹配 IN、BETWEEN 误匹配 AS）。
+     */
+    private static boolean matchesKeyword(String sql, int i, String keyword) {
+        int len = sql.length();
+        if (i + keyword.length() > len) {
+            return false;
+        }
+        // 前边界
+        if (i > 0) {
+            char prev = sql.charAt(i - 1);
+            if (Character.isLetterOrDigit(prev) || prev == '_') {
+                return false;
+            }
+        }
+        for (int k = 0; k < keyword.length(); k++) {
+            if (Character.toUpperCase(sql.charAt(i + k)) != keyword.charAt(k)) {
+                return false;
+            }
+        }
+        // 后边界
+        int after = i + keyword.length();
+        if (after < len) {
+            char next = sql.charAt(after);
+            if (Character.isLetterOrDigit(next) || next == '_') {
+                return false;
+            }
+        }
+        return true;
     }
 
     private ReplayResult replayReadonly(ManifestStatement s, String type) {
@@ -178,11 +309,20 @@ public final class Replayer {
     }
 
     private void runOnceReadonly(Connection c, ManifestStatement s) throws SQLException {
+        long maxRows = config.getMaxRows();
         try (PreparedStatement ps = c.prepareStatement(s.getSql())) {
             binder.bind(ps, s);
             try (ResultSet rs = ps.executeQuery()) {
-                while (rs.next()) {
-                    rs.getObject(1);
+                if (maxRows > 0) {
+                    long counted = 0;
+                    while (rs.next() && counted < maxRows) {
+                        counted++;
+                    }
+                } else {
+                    // 无限制：保持原有行为，全量物化结果集
+                    while (rs.next()) {
+                        rs.getObject(1);
+                    }
                 }
             }
         }

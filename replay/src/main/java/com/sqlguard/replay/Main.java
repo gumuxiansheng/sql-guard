@@ -34,6 +34,9 @@ import java.util.concurrent.Future;
  */
 public final class Main {
 
+    /** 工具版本，与 pom.xml 中 <version> 保持一致。 */
+    private static final String VERSION = "0.1.0";
+
     private Main() {
     }
 
@@ -49,6 +52,18 @@ public final class Main {
     }
 
     private static int run(String[] args) throws Exception {
+        // 短路：--help / --version 直接输出后退出，不解析其他参数
+        for (String a : args) {
+            if ("--help".equals(a) || "-h".equals(a)) {
+                printHelp(System.out);
+                return 0;
+            }
+            if ("--version".equals(a) || "-V".equals(a)) {
+                System.out.println("sqlguard-replay " + VERSION);
+                return 0;
+            }
+        }
+
         ReplayConfig config = parseArgs(args);
 
         // 校验必填项
@@ -302,6 +317,69 @@ public final class Main {
 
     // ----------------------- CLI 解析 -----------------------
 
+    /**
+     * 输出 --help 文本到指定流。所有参数与默认值与 {@link #parseArgs} 保持同步。
+     */
+    private static void printHelp(java.io.PrintStream out) {
+        out.println("sqlguard-replay " + VERSION);
+        out.println("Replay SQL manifest on a mirror database, collect EXPLAIN plans and timings,");
+        out.println("and identify slow SQL and suboptimal plans.");
+        out.println();
+        out.println("Usage:");
+        out.println("  java -jar sqlguard-replay-" + VERSION + ".jar [OPTIONS]");
+        out.println();
+        out.println("Required:");
+        out.println("  --manifest <PATH>           Path to sql-manifest.json (default: sql-manifest.json)");
+        out.println("  --jdbc-url <URL>            JDBC URL of the mirror database");
+        out.println("                              (or env REPLAY_DB_URL)");
+        out.println();
+        out.println("Connection:");
+        out.println("  --jdbc-user <USER>          DB user (or env REPLAY_DB_USER)");
+        out.println("  --jdbc-password <PWD>       DB password (or env REPLAY_DB_PASSWORD)");
+        out.println("  --driver-jar <PATH>         JDBC driver jar (auto-discovered from replay/lib/ if absent)");
+        out.println("  --driver-class <CLASS>      Driver class (inferred from URL by default:");
+        out.println("                              org.postgresql.Driver / com.mysql.cj.jdbc.Driver)");
+        out.println("  --dialect <D>               pg | mysql (inferred from URL by default)");
+        out.println("  --pool-size <N>             Connection pool size, >1 enables parallel replay (default: 4)");
+        out.println("  --statement-timeout-ms <MS> Per-statement timeout (default: 30000)");
+        out.println();
+        out.println("Replay:");
+        out.println("  --explain-mode <MODE>       explain | analyze | auto (default: auto)");
+        out.println("  --iterations <N>            Timing iterations (default: 3)");
+        out.println("  --warmup <N>                Warmup runs not counted in samples (default: 1)");
+        out.println("  --max-rows <N>              Max rows fetched per SELECT during timing,");
+        out.println("                              0 = unlimited (default: 0)");
+        out.println("  --types <CSV>               Filter by type: select,insert,update,delete,merge,ddl,other");
+        out.println("  --allow-ddl                 Allow DDL replay (only CTAS goes through EXPLAIN)");
+        out.println();
+        out.println("Parameters:");
+        out.println("  --auto-param                Bind a default value when no fixture exists");
+        out.println("                              (avoids all-NULL WHERE col = NULL)");
+        out.println("  --auto-param-value <V>      Default value used by --auto-param (default: 1)");
+        out.println("  --param-fixture <PATH>      JSON fixture: {\"<stmt id>\": [\"v1\",\"v2\",...]}");
+        out.println();
+        out.println("Detection thresholds:");
+        out.println("  --slow-warn-ms <MS>         Slow SQL warn threshold, p50-based (default: 100)");
+        out.println("  --slow-error-ms <MS>        Slow SQL error threshold (default: 1000)");
+        out.println("  --seq-scan-rows <N>         DP001/DP003/DP007 row threshold (default: 10000)");
+        out.println("  --max-in-params <N>         DYN003 IN-clause param threshold (default: 1000)");
+        out.println();
+        out.println("Output:");
+        out.println("  --output-dir <DIR>          Report output directory (default: .)");
+        out.println("                              Generates replay-report.json + replay-report.html");
+        out.println();
+        out.println("Misc:");
+        out.println("  -h, --help                  Show this help and exit");
+        out.println("  -V, --version               Show version and exit");
+        out.println();
+        out.println("Exit codes:");
+        out.println("  0  All statements passed (no slowError, no execution error)");
+        out.println("  1  At least one slowError or execution error");
+        out.println("  2  Configuration / system error");
+        out.println();
+        out.println("Both --key=value and --key value forms are supported.");
+    }
+
     private static ReplayConfig parseArgs(String[] args) {
         Map<String, String> kv = new HashMap<String, String>();
         Set<String> flags = new java.util.HashSet<String>();
@@ -357,6 +435,7 @@ public final class Main {
         int maxInClauseParams = parseInt(getOpt(kv, "max-in-params", "1000"), 1000);
         int poolSize = parseInt(getOpt(kv, "pool-size", "4"), 4);
         long statementTimeoutMs = parseLong(getOpt(kv, "statement-timeout-ms", "30000"), 30000L);
+        long maxRows = parseLong(getOpt(kv, "max-rows", "0"), 0L);
 
         // 方言：显式指定优先，否则从 JDBC URL 自动推断
         DbDialect dialect;
@@ -371,7 +450,8 @@ public final class Main {
                 manifestPath, outputDir, mode, iterations, warmup, allowDdl,
                 autoParam, autoParamValue, types,
                 slowWarnMs, slowErrorMs, paramFixture, jdbcUrl, jdbcUser, jdbcPassword,
-                driverJar, driverClass, seqScanRows, maxInClauseParams, poolSize, statementTimeoutMs, dialect);
+                driverJar, driverClass, seqScanRows, maxInClauseParams, poolSize, statementTimeoutMs,
+                maxRows, dialect);
     }
 
     private static String getOpt(Map<String, String> kv, String key, String def) {

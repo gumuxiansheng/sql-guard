@@ -387,7 +387,7 @@ class ReplayerIntegrationTest {
                 2, 1, false, false, "1", Collections.<String>emptySet(),
                 100L, 1000L, null,
                 null, null, null, null, "org.h2.Driver",
-                10000L, 1000, 4, 60000L, DbDialect.POSTGRESQL);
+                10000L, 1000, 4, 60000L, 0L, DbDialect.POSTGRESQL);
     }
 
     private ReplayConfig buildMySqlConfig() {
@@ -396,6 +396,6 @@ class ReplayerIntegrationTest {
                 2, 1, false, false, "1", Collections.<String>emptySet(),
                 100L, 1000L, null,
                 null, null, null, null, "org.h2.Driver",
-                10000L, 1000, 2, 60000L, DbDialect.MYSQL);
+                10000L, 1000, 2, 60000L, 0L, DbDialect.MYSQL);
     }
 }

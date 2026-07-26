@@ -37,6 +37,7 @@ public final class ReplayConfig {
     private final int maxInClauseParams;          // DYN003 阈值
     private final int poolSize;
     private final long statementTimeoutMs;
+    private final long maxRows;                   // SELECT 计时单次最大行数，<=0 表示不限制
     private final DbDialect dialect;
 
     public ReplayConfig(Path manifestPath,
@@ -60,6 +61,7 @@ public final class ReplayConfig {
                         int maxInClauseParams,
                         int poolSize,
                         long statementTimeoutMs,
+                        long maxRows,
                         DbDialect dialect) {
         this.manifestPath = manifestPath;
         this.outputDir = outputDir;
@@ -84,6 +86,7 @@ public final class ReplayConfig {
         this.maxInClauseParams = maxInClauseParams;
         this.poolSize = poolSize;
         this.statementTimeoutMs = statementTimeoutMs;
+        this.maxRows = maxRows;
         this.dialect = dialect;
     }
 
@@ -169,6 +172,10 @@ public final class ReplayConfig {
 
     public long getStatementTimeoutMs() {
         return statementTimeoutMs;
+    }
+
+    public long getMaxRows() {
+        return maxRows;
     }
 
     public DbDialect getDialect() {
