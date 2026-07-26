@@ -389,6 +389,83 @@ formats = ["json"]
 }
 
 #[test]
+fn test_check_sarif_output() {
+    // 验证 SARIF v2.1.0 报告：
+    // - 文件生成到 output_dir/sqlguard-report.sarif
+    // - 包含 $schema / version / runs[] / tool.driver / results[] 等必备字段
+    // - 规则元数据与 violation 都被正确序列化（camelCase）
+    let dir = "/tmp/sqlguard-test-sarif";
+    let _ = std::fs::remove_dir_all(dir);
+
+    setup_test_project(dir);
+    std::fs::write(format!("{}/sqlguard.toml", dir), r#"
+[structure]
+paths = ["sql/ddl", "sql/dml"]
+strict = false
+
+[classification]
+default_type = "sql"
+
+[[classification.rules]]
+name = "ddl-by-dir"
+pattern = "**/ddl/**"
+type = "ddl"
+priority = 10
+
+[[classification.rules]]
+name = "dml-by-dir"
+pattern = "**/dml/**"
+type = "dml"
+priority = 10
+
+[[rules]]
+id = "DDL001"
+name = "no_drop_table"
+group = "ddl-safety"
+enabled = true
+script_path = "config/rules/ddl/no_drop_table.rhai"
+applies_to = ["ddl"]
+severity = "error"
+
+[output]
+formats = ["sarif"]
+"#).unwrap();
+
+    std::fs::create_dir_all(format!("{}/config/rules/ddl", dir)).unwrap();
+    std::fs::write(format!("{}/config/rules/ddl/no_drop_table.rhai", dir),
+        "let sql = context[\"sql_content\"];\nlet upper = sql.to_upper();\nif upper.contains(\"DROP TABLE\") { violations.push(\"DROP TABLE not allowed\"); }\n"
+    ).unwrap();
+
+    let output = Command::new(&binary_abs_path())
+        .args(["check", dir, "-c", &format!("{}/sqlguard.toml", dir), "-f", "sarif", "-o", dir])
+        .output()
+        .expect("Failed to run sqlguard check with SARIF");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("SARIF report saved"), "SARIF report should be saved: {}", stderr);
+
+    let report_path = format!("{}/sqlguard-report.sarif", dir);
+    assert!(Path::new(&report_path).exists(), "SARIF report file should exist");
+
+    let content = std::fs::read_to_string(&report_path).unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&content)
+        .expect("SARIF output must be valid JSON");
+
+    assert_eq!(parsed["version"], "2.1.0");
+    assert!(parsed["$schema"].as_str().unwrap().contains("sarif"));
+    assert_eq!(parsed["runs"][0]["tool"]["driver"]["name"], "SqlGuard");
+    assert_eq!(parsed["runs"][0]["tool"]["driver"]["rules"][0]["id"], "DDL001");
+
+    let results = parsed["runs"][0]["results"].as_array().unwrap();
+    assert!(!results.is_empty(), "should report DROP TABLE violation");
+    assert_eq!(results[0]["ruleId"], "DDL001");
+    assert_eq!(results[0]["level"], "error");
+    assert!(results[0]["message"]["text"].as_str().unwrap().contains("DROP TABLE"));
+
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn test_check_ddl002_alter_primary_key() {
     // 验证 DDL002 跨语句识别：
     // - CREATE 无内联 PK + ALTER ADD PRIMARY KEY 不误报（修复漏洞）

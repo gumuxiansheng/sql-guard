@@ -95,11 +95,11 @@ pub enum Commands {
         #[clap(short, long, default_value = "sqlguard.toml")]
         config: PathBuf,
 
-        /// Output format(s): plain, json, html, all.
+        /// Output format(s): plain, json, html, sarif, all.
         #[clap(short, long, default_value = "plain")]
         format: String,
 
-        /// Output directory for reports (required for json/html).
+        /// Output directory for reports (required for json/html/sarif).
         #[clap(short, long)]
         output_dir: Option<PathBuf>,
 

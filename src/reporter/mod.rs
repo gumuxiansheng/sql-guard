@@ -1,6 +1,7 @@
 pub mod json;
 pub mod plain;
 pub mod html;
+pub mod sarif;
 
 use std::path::Path;
 
@@ -8,7 +9,7 @@ use crate::error::{DirectoryIssue, Violation};
 
 /// 报告格式 trait。
 ///
-/// 每种格式（plain / json / html / 未来 SARIF 等）实现此 trait，
+/// 每种格式（plain / json / html / sarif）实现此 trait，
 /// 由 [`output_reports`] 统一调度。新增格式只需实现 trait 并在
 /// [`get_reporter`] 中注册，无需修改 `main.rs` 的调度逻辑。
 pub trait Reporter {
@@ -36,6 +37,7 @@ pub fn get_reporter(fmt: &str) -> Option<Box<dyn Reporter>> {
         "plain" => Some(Box::new(plain::PlainReporter)),
         "json" => Some(Box::new(json::JsonReporter)),
         "html" => Some(Box::new(html::HtmlReporter)),
+        "sarif" => Some(Box::new(sarif::SarifReporter)),
         _ => None,
     }
 }

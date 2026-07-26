@@ -157,7 +157,7 @@ fn resolve_output_dir(output_dir: Option<&Path>, target_dir: &Path) -> PathBuf {
 
 fn parse_formats(format: &str) -> Vec<&str> {
     match format {
-        "all" => vec!["plain", "json", "html"],
+        "all" => vec!["plain", "json", "html", "sarif"],
         f => f.split(',').map(|s| s.trim()).collect(),
     }
 }
@@ -1077,7 +1077,8 @@ priority = 0
 rules_file = "sqlguard.rules.toml"
 
 [output]
-formats = ["plain", "json", "html"]
+# 可用格式：plain（控制台）/ json / html / sarif（接 GitHub/Azure/GitLab code scanning）
+formats = ["plain", "json", "html", "sarif"]
 
 # MyBatis Mapper 模式：扫描 XML 中的 <select>/<insert>/<update>/<delete>。
 # 缺省或 enabled = false 时完全保持现有行为（仅扫描 .sql/.ddl/.dml）。

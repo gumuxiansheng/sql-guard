@@ -57,7 +57,8 @@
 │  4. 报告输出       (reporter/)                                  │
 │     ├── plain.rs    终端彩色输出                                │
 │     ├── json.rs     结构化 JSON 报告                            │
-│     └── html.rs     深色主题网页报告                            │
+│     ├── html.rs     深色主题网页报告                            │
+│     └── sarif.rs    SARIF v2.1.0（GitHub/Azure/GitLab 扫描）   │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -655,10 +656,16 @@ SQL 脚本 → rollback::RollbackGenerator::generate()
 
 `sqlguard-report.html`：深色主题网页报告，卡片式统计数据，可排序表格，适合归档。
 
+### sarif
+
+`sqlguard-report.sarif`：符合 [SARIF v2.1.0](https://docs.oasis-open.org/sarif/sarif/v2.1.0/sarif-v2.1.0.html) 规范的 JSON，可直接上传到 GitHub Code Scanning / Azure DevOps / GitLab code scanning，在 PR 里以代码注释形式展示违规。包含去重的规则元数据（`runs[].tool.driver.rules[]`）和带行列号的 `results[].locations[]`。
+
 ### 多格式输出
 
 ```bash
 sqlguard check ./sql -f all -o reports/
+# 或显式指定 sarif：
+sqlguard check ./sql -f json,sarif -o reports/
 ```
 
 ## CI/CD 集成
@@ -706,6 +713,31 @@ jobs:
 ```
 
 `check-diff` 同样返回退出码 1 阻断流水线，但只上报本次改动语句的违规。新增文件整体算改动（全文件校验），修改文件按 hunk 过滤。
+
+### 上传 SARIF 到 GitHub Code Scanning
+
+`-f sarif` 生成符合规范的 `sqlguard-report.sarif`，通过 `github/codeql-action/upload-sarif` 上传后，违规会以代码注释形式显示在 PR 文件视图：
+
+```yaml
+name: sqlguard-sarif
+on: [pull_request]
+
+jobs:
+  sarif:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write    # ★ 上传 SARIF 必需
+    steps:
+      - uses: actions/checkout@v4
+      - name: SqlGuard check
+        run: |
+          sqlguard check ./sql -f sarif -o reports/
+      - name: Upload SARIF
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: reports/sqlguard-report.sarif
+```
 
 ### 分阶段检查
 
