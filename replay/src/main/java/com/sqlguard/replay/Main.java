@@ -6,6 +6,7 @@ import com.sqlguard.replay.manifest.Manifest;
 import com.sqlguard.replay.manifest.ManifestLoader;
 import com.sqlguard.replay.manifest.ManifestStatement;
 import com.sqlguard.replay.param.ParamBinder;
+import com.sqlguard.replay.replay.DbDialect;
 import com.sqlguard.replay.replay.ExplainMode;
 import com.sqlguard.replay.replay.ReplayResult;
 import com.sqlguard.replay.replay.Replayer;
@@ -336,17 +337,41 @@ public final class Main {
         String jdbcUser = getOpt(kv, "jdbc-user", System.getenv("REPLAY_DB_USER"));
         String jdbcPassword = getOpt(kv, "jdbc-password", System.getenv("REPLAY_DB_PASSWORD"));
         Path driverJar = ReplayConfig.toPathOrNull(kv.get("driver-jar"));
-        String driverClass = getOpt(kv, "driver-class", "org.postgresql.Driver");
+        String driverClassDefault = "org.postgresql.Driver";
+        {
+            // 如果未显式指定 driver-class，根据 dialect 选默认值
+            String dc = kv.get("driver-class");
+            if (dc != null && !dc.isEmpty()) {
+                driverClassDefault = dc;
+            } else {
+                DbDialect d = (kv.get("dialect") != null && !kv.get("dialect").isEmpty())
+                        ? DbDialect.parse(kv.get("dialect"))
+                        : DbDialect.fromJdbcUrl(getOpt(kv, "jdbc-url", System.getenv("REPLAY_DB_URL")));
+                if (d == DbDialect.MYSQL) {
+                    driverClassDefault = "com.mysql.cj.jdbc.Driver";
+                }
+            }
+        }
+        String driverClass = getOpt(kv, "driver-class", driverClassDefault);
         long seqScanRows = parseLong(getOpt(kv, "seq-scan-rows", "10000"), 10000L);
         int maxInClauseParams = parseInt(getOpt(kv, "max-in-params", "1000"), 1000);
         int poolSize = parseInt(getOpt(kv, "pool-size", "4"), 4);
         long statementTimeoutMs = parseLong(getOpt(kv, "statement-timeout-ms", "30000"), 30000L);
 
+        // 方言：显式指定优先，否则从 JDBC URL 自动推断
+        DbDialect dialect;
+        String dialectStr = kv.get("dialect");
+        if (dialectStr != null && !dialectStr.isEmpty()) {
+            dialect = DbDialect.parse(dialectStr);
+        } else {
+            dialect = DbDialect.fromJdbcUrl(getOpt(kv, "jdbc-url", System.getenv("REPLAY_DB_URL")));
+        }
+
         return new ReplayConfig(
                 manifestPath, outputDir, mode, iterations, warmup, allowDdl,
                 autoParam, autoParamValue, types,
                 slowWarnMs, slowErrorMs, paramFixture, jdbcUrl, jdbcUser, jdbcPassword,
-                driverJar, driverClass, seqScanRows, maxInClauseParams, poolSize, statementTimeoutMs);
+                driverJar, driverClass, seqScanRows, maxInClauseParams, poolSize, statementTimeoutMs, dialect);
     }
 
     private static String getOpt(Map<String, String> kv, String key, String def) {
