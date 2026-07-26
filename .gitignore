@@ -1,5 +1,6 @@
 /target
-Cargo.lock
+# Cargo.lock 应入库：二进制项目（bin）需要锁定依赖版本保证 CI 可复现。
+# 仅 library 项目才应忽略 Cargo.lock。
 .DS_Store
 *.report.*
 /deploy
