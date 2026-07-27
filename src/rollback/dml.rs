@@ -478,6 +478,24 @@ fn render_incremental_backup(
 
 // ===== 辅助：VALUES 提取 =====
 
+/// 把 `s[i..]` 的下一个 UTF-8 字符追加到 `current`，返回该字符的字节长度。
+///
+/// ★ 修复中文乱码 BUG：字节级解析中 `bytes[i] as char` 会把多字节 UTF-8 字符
+/// （如中文「张」= E5 BC A0）拆成 3 个 Latin-1 字符（å ¼ ），写入 String 后变乱码。
+/// 本函数按 UTF-8 字符边界推进，保证多字节字符完整保留。
+///
+/// 前提：`i` 必须在 UTF-8 字符边界上（本模块解析器只在 ASCII 字符处推进 1 字节，
+/// 其余位置用本函数推进，故 `i` 始终在字符边界上）。
+fn push_char_safe(s: &str, i: usize, current: &mut String) -> usize {
+    match s[i..].chars().next() {
+        Some(c) => {
+            current.push(c);
+            c.len_utf8()
+        }
+        None => 1, // 兜底：i 已超出 chars 范围（不应发生），返回 1 避免死循环
+    }
+}
+
 /// 从 INSERT/REPLACE 语句原文中提取 VALUES 元组列表。
 ///
 /// 支持：
@@ -598,14 +616,16 @@ fn parse_one_tuple(s: &str, start: usize) -> Option<(Vec<String>, usize)> {
                     // 反斜杠转义（MySQL 风格）
                     current.push('\\');
                     if i + 1 < bytes.len() {
-                        current.push(bytes[i + 1] as char);
-                        i += 2;
+                        // ★ 修复中文乱码：反斜杠后可能是多字节字符，按 UTF-8 边界推进
+                        let next_len = push_char_safe(s, i + 1, &mut current);
+                        i += 1 + next_len;
                     } else {
                         i += 1;
                     }
                 } else {
-                    current.push(b as char);
-                    i += 1;
+                    // ★ 修复中文乱码：字符串内多字节字符按 UTF-8 边界推进
+                    let len = push_char_safe(s, i, &mut current);
+                    i += len;
                 }
             }
             None => {
@@ -640,8 +660,9 @@ fn parse_one_tuple(s: &str, start: usize) -> Option<(Vec<String>, usize)> {
                         i += 1;
                     }
                     _ => {
-                        current.push(b as char);
-                        i += 1;
+                        // ★ 修复中文乱码：元组内非 ASCII 字符（如中文）按 UTF-8 边界推进
+                        let len = push_char_safe(s, i, &mut current);
+                        i += len;
                     }
                 }
             }
@@ -721,8 +742,9 @@ fn parse_set_targets(s: &str) -> Vec<String> {
                     in_string = None;
                     i += 1;
                 } else {
-                    current.push(b as char);
-                    i += 1;
+                    // ★ 修复中文乱码：字符串内多字节字符按 UTF-8 边界推进
+                    let len = push_char_safe(s, i, &mut current);
+                    i += len;
                 }
             }
             None => {
@@ -750,8 +772,9 @@ fn parse_set_targets(s: &str) -> Vec<String> {
                         i += 1;
                     }
                     _ => {
-                        current.push(b as char);
-                        i += 1;
+                        // ★ 修复中文乱码：SET 表达式中非 ASCII 字符按 UTF-8 边界推进
+                        let len = push_char_safe(s, i, &mut current);
+                        i += len;
                     }
                 }
             }
@@ -1086,6 +1109,34 @@ mod tests {
     }
 
     #[test]
+    fn extract_values_with_chinese_preserves_utf8() {
+        // ★ BUG#1 回归测试：中文 VALUES 不能因字节级解析变乱码
+        let sql = "INSERT INTO users (id, name) VALUES (1, '张三')";
+        let tuples = extract_values_tuples(sql);
+        assert_eq!(tuples.len(), 1);
+        assert_eq!(tuples[0], vec!["1", "'张三'"]);
+    }
+
+    #[test]
+    fn extract_values_with_chinese_multiple_tuples() {
+        let sql = "INSERT INTO users (id, name) VALUES (1, '张三'), (2, '李四'), (3, '王五')";
+        let tuples = extract_values_tuples(sql);
+        assert_eq!(tuples.len(), 3);
+        assert_eq!(tuples[0], vec!["1", "'张三'"]);
+        assert_eq!(tuples[1], vec!["2", "'李四'"]);
+        assert_eq!(tuples[2], vec!["3", "'王五'"]);
+    }
+
+    #[test]
+    fn extract_values_with_emoji_preserves_utf8() {
+        // 4 字节 UTF-8 字符（emoji）也必须正确处理
+        let sql = "INSERT INTO users (id, name) VALUES (1, '😀你好')";
+        let tuples = extract_values_tuples(sql);
+        assert_eq!(tuples.len(), 1);
+        assert_eq!(tuples[0], vec!["1", "'😀你好'"]);
+    }
+
+    #[test]
     fn extract_values_with_function_call() {
         let sql = "INSERT INTO orders (id, created_at) VALUES (1, NOW())";
         let tuples = extract_values_tuples(sql);
@@ -1150,6 +1201,32 @@ mod tests {
         let sql = "UPDATE t SET `order` = 1, \"limit\" = 2";
         let cols = extract_set_columns(sql);
         assert_eq!(cols, vec!["order", "limit"]);
+    }
+
+    #[test]
+    fn extract_set_with_chinese_value_preserves_utf8() {
+        // ★ BUG#1 回归测试：UPDATE SET 中文值不能因字节级解析变乱码
+        // 列名提取不受影响，但表达式会进入 current 用于后续 segment 切分，
+        // 此处验证列名提取正常且不 panic
+        let sql = "UPDATE users SET name = '张三', city = '北京' WHERE id = 1";
+        let cols = extract_set_columns(sql);
+        assert_eq!(cols, vec!["name", "city"]);
+    }
+
+    #[test]
+    fn insert_with_chinese_value_generates_correct_rollback() {
+        // ★ BUG#1 端到端回归：INSERT 含中文 VALUES，无 PK 全列匹配时生成的 DELETE 应保留中文
+        let (cfg, rc) = make_config_with_pk("users", &[]);  // 无 PK → 全列匹配
+        let mut gen = RollbackGenerator::new(&cfg, &rc, &MySqlRenderer);
+        let stmt = make_insert_stmt("users", &["id", "name"]);
+        let pair = gen_insert(
+            &stmt, 1, SourceRef::placeholder(),
+            "INSERT INTO users (id, name) VALUES (1, '张三')",
+            &mut gen,
+        );
+        let rollback = pair.rollback.expect("rollback should exist");
+        assert!(rollback.contains("'张三'"), "rollback must preserve Chinese: {}", rollback);
+        assert!(rollback.contains("`name` = '张三'"));
     }
 
     // === INSERT 测试 ===

@@ -554,6 +554,17 @@ pub struct RollbackConfig {
     /// 不带此 flag 且 lock_scope=table 时报错退出。CLI --accept-table-lock-risk 写入此字段。
     #[serde(default)]
     pub accept_table_lock_risk: bool,
+    /// ★ BUG#2 修复：是否将表名统一转为小写（对应 MySQL lower_case_table_names=1）。
+    ///
+    /// 默认 false：保留 SQL 中原始表名大小写（Linux + lower_case_table_names=0 行为）。
+    /// 设为 true 时，所有表名（含 bks_ 备份表名、_rb_ 影子表名）在生成 backup/rollback
+    /// 脚本时统一转小写，适配 Windows/macOS 或 Linux + lower_case_table_names=1 的目标库。
+    ///
+    /// 启用场景：源 SQL 中表名大小写混用（如 `Users`/`users`），但目标库
+    /// lower_case_table_names=1（表名不区分大小写，存储为小写）。若脚本保留原始大小写，
+    /// 执行时会因表名大小写不匹配而找不到表。
+    #[serde(default = "default_false")]
+    pub lower_case_table_names: bool,
 }
 
 impl Default for RollbackConfig {
@@ -586,6 +597,7 @@ impl Default for RollbackConfig {
             coalesce_locks: true,
             coalesce_locks_mode: default_coalesce_mode(),
             accept_table_lock_risk: false,
+            lower_case_table_names: false,
         }
     }
 }

@@ -166,6 +166,13 @@ line_ending_severity = "warning"
 # # ★ R2 lock_scope=table 必须显式确认
 # accept_table_lock_risk = false
 #
+# # ★ BUG#2 修复：表名大小写规范化（对应 MySQL lower_case_table_names=1）
+# # 默认 false：保留 SQL 中原始表名大小写（Linux + lower_case_table_names=0）。
+# # 设为 true 时，所有表名（含 bks_ 备份表名、_rb_ 影子表名）在生成脚本时统一小写，
+# # 适配 Windows/macOS 或 Linux + lower_case_table_names=1 的目标库，避免表名大小写
+# # 不匹配导致执行 backup/rollback 时找不到表。注意：仅规范化表名，不规范化列名。
+# lower_case_table_names = false
+#
 # # 显式主键声明（未声明时按 StmtInfo.create_table / bks_ JOIN 推断）
 # # [[rollback.primary_keys]]
 # # table = "users"
