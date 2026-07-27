@@ -29,7 +29,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     match cli.command {
         Commands::Check {
             path,
-            config: config_path,
+            config,
             format,
             output_dir,
             rules,
@@ -41,9 +41,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             cache,
             no_cache,
         } => {
+            let config_path = config.clone().unwrap_or_else(|| PathBuf::from("sqlguard.toml"));
+            let explicit_config = config.is_some();
             run_check(
                 &path,
                 &config_path,
+                explicit_config,
                 &format,
                 output_dir.as_deref(),
                 &rules,
@@ -62,7 +65,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Commands::CheckDiff {
             base,
             path,
-            config: config_path,
+            config,
             format,
             output_dir,
             rules,
@@ -72,10 +75,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             dialect,
             dialect_fallback,
         } => {
+            let config_path = config.clone().unwrap_or_else(|| PathBuf::from("sqlguard.toml"));
+            let explicit_config = config.is_some();
             run_check_diff(
                 &base,
                 &path,
                 &config_path,
+                explicit_config,
                 &format,
                 output_dir.as_deref(),
                 &rules,
@@ -88,15 +94,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         Commands::ReplayExport {
             path,
-            config: config_path,
+            config,
             output_dir,
             types,
         } => {
-            run_replay_export(&path, &config_path, &output_dir, &types)?;
+            let config_path = config.clone().unwrap_or_else(|| PathBuf::from("sqlguard.toml"));
+            let explicit_config = config.is_some();
+            run_replay_export(&path, &config_path, explicit_config, &output_dir, &types)?;
         }
         Commands::GenRollback {
             path,
-            config: config_path,
+            config,
             output_dir,
             dialect,
             lock_scope,
@@ -105,9 +113,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             fail_on_warning,
             allow_partial,
         } => {
+            let config_path = config.clone().unwrap_or_else(|| PathBuf::from("sqlguard.toml"));
+            let explicit_config = config.is_some();
             let code = run_gen_rollback(
                 &path,
                 &config_path,
+                explicit_config,
                 &output_dir,
                 dialect.as_deref(),
                 lock_scope.as_deref(),
@@ -125,7 +136,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 // ===== 公共辅助函数（任务 3：消除 run_check / run_check_diff 重复逻辑）=====
 
-fn load_config(config_path: &Path) -> Result<(Config, PathBuf), SqlGuardError> {
+/// 加载配置文件。
+///
+/// `explicit` 表示用户是否通过 `--config` 显式指定了配置文件路径。
+/// 当配置文件找不到时：
+/// - 显式指定（`--config <path>`）但文件不存在 → 直接报错，避免静默退回默认配置，
+///   否则用户写在配置里的 `[dialect]` 等设置会被「内置默认配置（dialect=generic）」
+///   悄悄覆盖而毫无提示，表现为「配置不生效，只能靠命令行才生效」。
+/// - 未显式指定（使用默认的 `sqlguard.toml`）→ 先尝试同目录的 `sqlguard.toml`，
+///   仍找不到则退回内置默认配置并打印警告，保留「零配置」开箱即用的行为。
+fn load_config(config_path: &Path, explicit: bool) -> Result<(Config, PathBuf), SqlGuardError> {
     let config_dir = config_path
         .parent()
         .unwrap_or_else(|| Path::new("."))
@@ -133,9 +153,23 @@ fn load_config(config_path: &Path) -> Result<(Config, PathBuf), SqlGuardError> {
         .unwrap_or_else(|_| config_path.parent().unwrap_or_else(|| Path::new(".")).to_path_buf());
     let config = if config_path.exists() {
         Config::load(config_path)?
+    } else if explicit {
+        return Err(SqlGuardError::ConfigError(format!(
+            "Config file not found: '{}'.\n\
+             The check would otherwise fall back to a built-in default config with dialect=generic,\n\
+             which ignores your [dialect] setting. Check the --config path (note: Windows paths like\n\
+             /tmp/... resolve to C:\\tmp\\..., not the Git-Bash /tmp).",
+            config_path.display()
+        )));
+    } else if config_dir.join("sqlguard.toml").exists() {
+        Config::load(&config_dir.join("sqlguard.toml"))?
     } else {
-        Config::load(&config_dir.join("sqlguard.toml"))
-            .unwrap_or_else(|_| generate_default_config())
+        eprintln!(
+            "Warning: config file '{}' not found; using built-in default config (dialect = generic).\n\
+             Set [dialect] in your config file (or pass --dialect) to change the SQL dialect.",
+            config_path.display()
+        );
+        generate_default_config()
     };
     Ok((config, config_dir))
 }
@@ -244,6 +278,7 @@ fn check_files(
 fn run_check(
     target_dir: &Path,
     config_path: &Path,
+    explicit_config: bool,
     format: &str,
     output_dir: Option<&Path>,
     rules: &Option<String>,
@@ -260,7 +295,7 @@ fn run_check(
             "--cache and --no-cache are mutually exclusive".to_string(),
         ));
     }
-    let (mut config, config_dir) = load_config(config_path)?;
+    let (mut config, config_dir) = load_config(config_path, explicit_config)?;
     if let Some(d) = dialect_override {
         config.dialect = crate::config::CheckDialect::from_str(d);
         eprintln!("Dialect override: {} → {}", config.dialect.as_str(), d);
@@ -366,10 +401,11 @@ fn run_check(
 fn run_replay_export(
     target_dir: &Path,
     config_path: &Path,
+    explicit_config: bool,
     output_dir: &Path,
     types: &Option<String>,
 ) -> Result<(), SqlGuardError> {
-    let (config, _config_dir) = load_config(config_path)?;
+    let (config, _config_dir) = load_config(config_path, explicit_config)?;
 
     let absolute_target = resolve_absolute_path(target_dir);
 
@@ -418,6 +454,7 @@ fn run_check_diff(
     base: &str,
     target_dir: &Path,
     config_path: &Path,
+    explicit_config: bool,
     format: &str,
     output_dir: Option<&Path>,
     rules: &Option<String>,
@@ -427,7 +464,7 @@ fn run_check_diff(
     dialect_override: Option<&str>,
     dialect_fallback_override: Option<&str>,
 ) -> Result<(), SqlGuardError> {
-    let (mut config, config_dir) = load_config(config_path)?;
+    let (mut config, config_dir) = load_config(config_path, explicit_config)?;
     if let Some(d) = dialect_override {
         config.dialect = crate::config::CheckDialect::from_str(d);
         eprintln!("Dialect override: {} → {}", config.dialect.as_str(), d);
@@ -634,6 +671,7 @@ fn filter_violations_by_diff(
 fn run_gen_rollback(
     target_dir: &Path,
     config_path: &Path,
+    explicit_config: bool,
     output_dir: &Path,
     dialect_override: Option<&str>,
     lock_scope_override: Option<&str>,
@@ -642,7 +680,7 @@ fn run_gen_rollback(
     fail_on_warning: bool,
     allow_partial: bool,
 ) -> Result<i32, SqlGuardError> {
-    let (mut config, _config_dir) = load_config(config_path)?;
+    let (mut config, _config_dir) = load_config(config_path, explicit_config)?;
 
     // 应用 CLI 覆盖到 rollback 配置
     let rc: &mut crate::config::RollbackConfig = &mut config.rollback;

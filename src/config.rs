@@ -662,3 +662,47 @@ fn default_backup_file() -> String { "backup.sql".to_string() }
 fn default_rollback_file() -> String { "rollback.sql".to_string() }
 fn default_manifest_file() -> String { "rollback-manifest.json".to_string() }
 fn default_bks_prefix() -> String { "bks_".to_string() }
+
+#[cfg(test)]
+mod dialect_config_tests {
+    use super::*;
+
+    #[test]
+    fn config_dialect_from_toml_postgresql() {
+        let toml = r#"
+dialect = "postgresql"
+
+[structure]
+paths = ["x"]
+
+[classification]
+default_type = "other"
+
+[[classification.rules]]
+name = "sql-by-ext"
+pattern = "*.sql"
+type = "sql"
+"#;
+        let cfg: Config = toml::from_str(toml).expect("parse");
+        eprintln!("parsed dialect = {:?} (as_str={})", cfg.dialect, cfg.dialect.as_str());
+        assert_eq!(cfg.dialect, CheckDialect::PostgreSql, "config dialect should be PostgreSql");
+    }
+
+    #[test]
+    fn config_dialect_default_is_generic() {
+        let toml = r#"
+[structure]
+paths = ["x"]
+
+[classification]
+default_type = "other"
+
+[[classification.rules]]
+name = "sql-by-ext"
+pattern = "*.sql"
+type = "sql"
+"#;
+        let cfg: Config = toml::from_str(toml).expect("parse");
+        assert_eq!(cfg.dialect, CheckDialect::Generic);
+    }
+}

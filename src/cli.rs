@@ -17,8 +17,8 @@ pub enum Commands {
         path: PathBuf,
 
         /// Path to configuration file
-        #[clap(short, long, default_value = "sqlguard.toml")]
-        config: PathBuf,
+        #[clap(short, long)]
+        config: Option<PathBuf>,
 
         /// Output format(s): plain, json, html, all
         #[clap(short, long, default_value = "plain")]
@@ -75,8 +75,8 @@ pub enum Commands {
         path: PathBuf,
 
         /// Path to configuration file.
-        #[clap(short, long, default_value = "sqlguard.toml")]
-        config: PathBuf,
+        #[clap(short, long)]
+        config: Option<PathBuf>,
 
         /// Output directory for sql-manifest.json.
         #[clap(short, long, default_value = ".")]
@@ -108,8 +108,8 @@ pub enum Commands {
         path: PathBuf,
 
         /// Path to configuration file.
-        #[clap(short, long, default_value = "sqlguard.toml")]
-        config: PathBuf,
+        #[clap(short, long)]
+        config: Option<PathBuf>,
 
         /// Output format(s): plain, json, html, sarif, all.
         #[clap(short, long, default_value = "plain")]
@@ -156,8 +156,8 @@ pub enum Commands {
         path: PathBuf,
 
         /// Path to configuration file.
-        #[clap(short, long, default_value = "sqlguard.toml")]
-        config: PathBuf,
+        #[clap(short, long)]
+        config: Option<PathBuf>,
 
         /// Output directory for backup.sql / rollback.sql / manifest / cleanup.
         #[clap(short, long, default_value = ".")]
