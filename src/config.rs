@@ -45,6 +45,22 @@ pub struct Config {
     /// MySQL 专有语法；postgresql 方言支持 PG 扩展语法。
     #[serde(default)]
     pub dialect: CheckDialect,
+    /// 方言回退链的第二候选方言（可选）。
+    ///
+    /// 当某条语句用主 `dialect` 解析失败时，按「主方言 → 本字段（若存在）
+    /// → Generic」的顺序用后续方言重试解析，首个成功即采用。适用于
+    /// GaussDB 等「PG 内核 + Oracle 外壳」的混合方言：主方言设 `postgresql`、
+    /// 本字段设 `oracle`，即可让含 `CONNECT BY` / `MINUS` / `(+)` 外连接 /
+    /// `DUAL` / `ROWNUM` / `NVL` / `DECODE` 等 Oracle 兼容语法的语句被正确解析。
+    ///
+    /// 解析优先级与行为：
+    /// - 主方言成功 → 直接采用，不再尝试回退（不会用回退方言覆盖已成功的解析）。
+    /// - 主方言失败 → 依次用回退链方言重试；全部失败才记 `PARSE_ERROR`。
+    /// - 不配置时：`postgresql` 主方言默认回退到 `oracle`，其余默认仅回退到 `Generic`
+    ///   （见 `CheckDialect::default_fallback`）。CLI `--dialect-fallback` 可覆盖本值，
+    ///   传 `generic` 可显式关闭回退（链退化为「主方言 → Generic」）。
+    #[serde(default)]
+    pub dialect_fallback: Option<CheckDialect>,
 }
 
 /// check 流程的 SQL 方言选择。
@@ -53,6 +69,8 @@ pub struct Config {
 /// - `MySql`：支持 MySQL 专有语法（INSERT IGNORE / ON DUPLICATE KEY UPDATE / 反引号标识符等）
 /// - `PostgreSql`：支持 PostgreSQL 扩展语法
 /// - `Ansi`：严格 ANSI SQL
+/// - `Oracle`：支持 Oracle 兼容语法（CONNECT BY / MINUS / `(+)` 外连接 / DUAL / ROWNUM 等），
+///   适用于 GaussDB 等「PG 内核 + Oracle 外壳」的混合方言场景。
 #[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum CheckDialect {
@@ -60,6 +78,7 @@ pub enum CheckDialect {
     MySql,
     PostgreSql,
     Ansi,
+    Oracle,
 }
 
 impl Default for CheckDialect {
@@ -76,6 +95,7 @@ impl CheckDialect {
             "mysql" => CheckDialect::MySql,
             "postgres" | "postgresql" | "pg" => CheckDialect::PostgreSql,
             "ansi" => CheckDialect::Ansi,
+            "oracle" => CheckDialect::Oracle,
             _ => CheckDialect::Generic,
         }
     }
@@ -86,6 +106,21 @@ impl CheckDialect {
             CheckDialect::MySql => "mysql",
             CheckDialect::PostgreSql => "postgresql",
             CheckDialect::Ansi => "ansi",
+            CheckDialect::Oracle => "oracle",
+        }
+    }
+
+    /// 主方言未显式配置 `dialect_fallback` 时采用的默认第二候选。
+    ///
+    /// - `PostgreSql` → `Oracle`：覆盖 GaussDB（PG 内核 + Oracle 外壳）的
+    ///   Oracle 兼容语法，开箱即用（只需 `dialect = "postgresql"`）。
+    /// - 其余 → `None`：仅回退到链尾的 `Generic`。
+    ///
+    /// CLI `--dialect-fallback` 与配置 `dialect_fallback` 均优先于本默认值。
+    pub fn default_fallback(&self) -> Option<CheckDialect> {
+        match self {
+            CheckDialect::PostgreSql => Some(CheckDialect::Oracle),
+            _ => None,
         }
     }
 }

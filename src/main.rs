@@ -37,6 +37,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             exclude_rules,
             exclude_groups,
             dialect,
+            dialect_fallback,
             cache,
             no_cache,
         } => {
@@ -50,6 +51,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 &exclude_rules,
                 &exclude_groups,
                 dialect.as_deref(),
+                dialect_fallback.as_deref(),
                 cache,
                 no_cache,
             )?;
@@ -68,6 +70,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             exclude_rules,
             exclude_groups,
             dialect,
+            dialect_fallback,
         } => {
             run_check_diff(
                 &base,
@@ -80,6 +83,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 &exclude_rules,
                 &exclude_groups,
                 dialect.as_deref(),
+                dialect_fallback.as_deref(),
             )?;
         }
         Commands::ReplayExport {
@@ -247,6 +251,7 @@ fn run_check(
     exclude_rules: &Option<String>,
     exclude_groups: &Option<String>,
     dialect_override: Option<&str>,
+    dialect_fallback_override: Option<&str>,
     cache_flag: bool,
     no_cache_flag: bool,
 ) -> Result<(), SqlGuardError> {
@@ -259,6 +264,27 @@ fn run_check(
     if let Some(d) = dialect_override {
         config.dialect = crate::config::CheckDialect::from_str(d);
         eprintln!("Dialect override: {} → {}", config.dialect.as_str(), d);
+    }
+    // 解析方言回退链：CLI --dialect-fallback > 配置 dialect_fallback > 主方言默认回退。
+    let fallback = if let Some(fb) = dialect_fallback_override {
+        Some(crate::config::CheckDialect::from_str(fb))
+    } else if let Some(cfg_fb) = config.dialect_fallback {
+        Some(cfg_fb)
+    } else {
+        config.dialect.default_fallback()
+    };
+    config.dialect_fallback = fallback;
+    if let Some(fb) = fallback {
+        eprintln!(
+            "Dialect fallback chain: {} → {} → generic",
+            config.dialect.as_str(),
+            fb.as_str()
+        );
+    } else {
+        eprintln!(
+            "Dialect fallback chain: {} → generic (no second candidate)",
+            config.dialect.as_str()
+        );
     }
 
     let filter = engine::RuleFilter::from_cli(rules, groups, exclude_rules, exclude_groups);
@@ -299,6 +325,7 @@ fn run_check(
             &config,
             &config_dir,
             config.dialect,
+            config.dialect_fallback,
             &filter,
         );
         let cache_path = absolute_target.join(&config.cache.cache_file);
@@ -398,11 +425,33 @@ fn run_check_diff(
     exclude_rules: &Option<String>,
     exclude_groups: &Option<String>,
     dialect_override: Option<&str>,
+    dialect_fallback_override: Option<&str>,
 ) -> Result<(), SqlGuardError> {
     let (mut config, config_dir) = load_config(config_path)?;
     if let Some(d) = dialect_override {
         config.dialect = crate::config::CheckDialect::from_str(d);
         eprintln!("Dialect override: {} → {}", config.dialect.as_str(), d);
+    }
+    // 解析方言回退链：CLI --dialect-fallback > 配置 dialect_fallback > 主方言默认回退。
+    let fallback = if let Some(fb) = dialect_fallback_override {
+        Some(crate::config::CheckDialect::from_str(fb))
+    } else if let Some(cfg_fb) = config.dialect_fallback {
+        Some(cfg_fb)
+    } else {
+        config.dialect.default_fallback()
+    };
+    config.dialect_fallback = fallback;
+    if let Some(fb) = fallback {
+        eprintln!(
+            "Dialect fallback chain: {} → {} → generic",
+            config.dialect.as_str(),
+            fb.as_str()
+        );
+    } else {
+        eprintln!(
+            "Dialect fallback chain: {} → generic (no second candidate)",
+            config.dialect.as_str()
+        );
     }
 
     let filter = engine::RuleFilter::from_cli(rules, groups, exclude_rules, exclude_groups);
@@ -673,7 +722,7 @@ fn run_gen_rollback(
         let content = fs::read_to_string(file_path).map_err(|e| {
             SqlGuardError::CheckError(format!("Failed to read '{}': {}", file_path.display(), e))
         })?;
-        let ast = engine::parser::parse_sql_to_ast(&content, config.dialect);
+        let ast = engine::parser::parse_sql_to_ast_fb(&content, config.dialect, config.dialect_fallback);
 
         if let Some(err) = &ast.parse_error {
             eprintln!(
@@ -724,7 +773,7 @@ fn run_gen_rollback(
                 if !config.rollback.include_select && sql.statement_type.eq_ignore_ascii_case("select") {
                     continue;
                 }
-                let ast = engine::parser::parse_sql_to_ast(&sql.processed_sql, config.dialect);
+                let ast = engine::parser::parse_sql_to_ast_fb(&sql.processed_sql, config.dialect, config.dialect_fallback);
                 for stmt in &ast.statements {
                     if stmt.kind == "PARSE_ERROR" {
                         continue;
@@ -1117,6 +1166,7 @@ fn generate_default_config() -> Config {
         rollback: crate::config::RollbackConfig::default(),
         cache: crate::config::CacheConfig::default(),
         dialect: crate::config::CheckDialect::default(),
+        dialect_fallback: None,
     }
 }
 

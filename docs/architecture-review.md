@@ -87,6 +87,8 @@ sqlparser 的 Statement enum 本身就是完整的 AST，项目又包了一层 `
 
 **对 CI/CD 工具来说，位置不准 = 误报/漏报。** 增量校验（check-diff）直接依赖行号做 hunk 交集，位置错了过滤就错了。
 
+> **已改进（2026-07-27）。** 位置切片改用 **字符级** 偏移（`location_to_byte_offset`，因 sqlparser 0.60 的 `Location` 是 char 级、1-based，byte 偏移在多字节字符下会错位，且兼容 LF/CRLF）。同时新增 **逐语句方言回退链**（`dialect_fallback` 配置 + `--dialect-fallback` CLI），解决 GaussDB「PG 内核 + Oracle 外壳」混合方言解析：每条语句按「主方言 → 回退方言 → Generic」重试，首个成功即采用；并修复了「PG 把 `CONNECT BY` 当残缺前缀静默吞掉、回退链永不触发」的软失败问题（改用以 `;`/`EOF` 判定的「干净解析」检查）。详见 [docs/dialect-fallback.md](docs/dialect-fallback.md)。
+
 ### 3.4 Mapper 模式的 statement_type 硬编码
 
 `mapper::map_statement_type` 把 `<select>` / `<insert>` / `<update>` / `<delete>` 硬编码映射到 `"dml"`。这意味着：

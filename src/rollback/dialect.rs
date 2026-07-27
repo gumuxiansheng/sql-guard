@@ -385,8 +385,12 @@ impl DialectRenderer for PostgreSqlRenderer {
             .lines()
             .filter(|line| {
                 let trimmed = line.trim();
-                !trimmed.to_uppercase().contains("LOCK TABLE")
-                    || !trimmed.to_uppercase().contains("IN ACCESS SHARE MODE;")
+                // PG 备份导出会包含 `LOCK TABLE ... IN ACCESS SHARE MODE;` 锁提示语句，
+                // 回滚时无需执行，应过滤掉。仅当一行**同时**包含两个标记时才视为锁语句。
+                // （等价于原 De Morgan 写法 `!contains(A) || !contains(B)`，此处显式提取可读性更好。）
+                let is_lock_stmt = trimmed.to_uppercase().contains("LOCK TABLE")
+                    && trimmed.to_uppercase().contains("IN ACCESS SHARE MODE;");
+                !is_lock_stmt
             })
             .collect::<Vec<_>>()
             .join("\n")

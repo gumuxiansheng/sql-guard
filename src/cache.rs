@@ -188,12 +188,17 @@ pub fn compute_run_signature(
     config: &Config,
     config_dir: &Path,
     dialect: CheckDialect,
+    dialect_fallback: Option<CheckDialect>,
     filter: &RuleFilter,
 ) -> String {
     let mut parts: Vec<String> = Vec::new();
 
     parts.push(format!("v={}", env!("CARGO_PKG_VERSION")));
     parts.push(format!("dialect={}", dialect.as_str()));
+    parts.push(format!(
+        "dialect_fb={}",
+        dialect_fallback.map(|d| d.as_str()).unwrap_or("none")
+    ));
     parts.push(format!("ir={}", filter.include_rules.join(",")));
     parts.push(format!("ig={}", filter.include_groups.join(",")));
     parts.push(format!("er={}", filter.exclude_rules.join(",")));

@@ -16,7 +16,7 @@ globset = "0.4"
 walkdir = "2"
 anyhow = "1.0"
 colored = "2"
-sqlparser = "0.45"
+sqlparser = "0.60"
 quick-xml = "0.31"
 
 # Release 构建优化：显著减小二进制体积

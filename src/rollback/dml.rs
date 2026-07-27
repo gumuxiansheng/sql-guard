@@ -1020,7 +1020,7 @@ mod tests {
             file_check: crate::config::FileCheckConfig::default(),
             rollback: rc.clone(),
             cache: crate::config::CacheConfig::default(),
-            dialect: crate::config::CheckDialect::default(),
+            dialect: crate::config::CheckDialect::default(), dialect_fallback: None,
         };
         (cfg, rc)
     }

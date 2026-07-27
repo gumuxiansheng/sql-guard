@@ -1,9 +1,11 @@
 use sqlparser::ast::{
-    AlterTableOperation, ColumnOption, FromTable,
-    OrderByExpr, Statement, TableConstraint,
-    TableFactor,
+    AlterTable, AlterTableOperation, ColumnOption, CreateIndex, CreateTable, CreateView,
+    Delete, DropBehavior, FromTable, Insert, Statement, TableConstraint,
+    TableFactor, Truncate, Update,
 };
-use sqlparser::dialect::{AnsiDialect, GenericDialect, MySqlDialect, PostgreSqlDialect};
+use sqlparser::dialect::{
+    AnsiDialect, GenericDialect, MySqlDialect, OracleDialect, PostgreSqlDialect,
+};
 use sqlparser::parser::Parser;
 use sqlparser::tokenizer::Token;
 
@@ -17,13 +19,22 @@ use crate::config::CheckDialect;
 ///
 /// 利用 `Parser::peek_token()` 在解析每条语句前读取起始位置，
 /// 避免 sqlparser 的 `Statement` 本身不携带位置信息的限制。
-pub(crate) fn parse_sql_to_ast(sql: &str, dialect: CheckDialect) -> SqlAst {
-    let parser_dialect: Box<dyn sqlparser::dialect::Dialect> = match dialect {
-        CheckDialect::Generic => Box::new(GenericDialect {}),
-        CheckDialect::MySql => Box::new(MySqlDialect {}),
-        CheckDialect::PostgreSql => Box::new(PostgreSqlDialect {}),
-        CheckDialect::Ansi => Box::new(AnsiDialect {}),
-    };
+///
+/// **逐语句方言回退链**（GaussDB「PG 内核 + Oracle 外壳」混合方言场景）：
+/// - 每条语句先用主 `dialect` 解析；成功即采用，不尝试回退。
+/// - 主方言失败 → 切片出该语句文本，依次用回退链方言（`fallback` → `Generic`）
+///   重试，首个成功即采用。
+/// - 全部失败 → 记 `PARSE_ERROR` 语句。
+///
+/// 见 [`parse_sql_to_ast`]（2 参封装，回退为 `None`）。
+pub(crate) fn parse_sql_to_ast_fb(
+    sql: &str,
+    dialect: CheckDialect,
+    fallback: Option<CheckDialect>,
+) -> SqlAst {
+    let chain_enums = build_chain_enums(dialect, fallback);
+    let primary = *chain_enums.first().expect("dialect chain must be non-empty");
+    let parser_dialect: Box<dyn sqlparser::dialect::Dialect> = box_dialect(primary);
 
     let mut parser = match Parser::new(&*parser_dialect).try_with_sql(sql) {
         Ok(p) => p,
@@ -50,41 +61,66 @@ pub(crate) fn parse_sql_to_ast(sql: &str, dialect: CheckDialect) -> SqlAst {
         if peek.token == Token::EOF {
             break;
         }
-        let line = peek.location.line as i64;
-        let column = peek.location.column as i64;
+        let line = peek.span.start.line as i64;
+        let column = peek.span.start.column as i64;
+        // 主方言尝试前记录本语句起始字节偏移（用于失败回退时切片文本）
+        let start_offset = location_to_byte_offset(sql, peek.span.start.line, peek.span.start.column);
 
+        // 先尝试主方言
+        let mut recovered: Option<Statement> = None;
         match parser.parse_statement() {
             Ok(stmt) => {
-                // 计算 end_line：解析完语句后，下一个 token 的位置是该语句之后
-                // 的第一个 token（通常是 `;` 或 EOF 或下一条语句的首 token）。
-                // - 若下一 token 在新行，说明本语句末行 = next_line - 1
-                // - 若下一 token 在同一行（如 `;` 或 `SELECT 1; SELECT 2;`），
-                //   本语句末行就是当前 line
-                // - 若 EOF，用文件总行数
-                let next_tok = parser.peek_token();
-                let end_line = if next_tok.token == Token::EOF {
-                    total_lines.max(line)
-                } else {
-                    let next_line = next_tok.location.line as i64;
-                    // 下一个 token 还在本语句内（同行分号等）→ end = line
-                    // 下一个 token 在后续行 → end = next_line - 1
-                    if next_line > line {
-                        next_line - 1
-                    } else {
-                        line
-                    }
-                };
-                statements.push(convert_statement(&stmt, line, column, end_line));
+                // 主方言「干净地」解析到 `;`/EOF（下一 token 是分隔符或文件尾）→ 采用。
+                // 否则说明主方言只吞掉了前缀（如把 Oracle 的 `CONNECT BY` 误判为表别名），
+                // 不能采用残缺结果，需回退链重新解析整条语句。
+                let clean = matches!(
+                    parser.peek_token().token,
+                    Token::SemiColon | Token::EOF
+                );
+                if clean {
+                    let end_line = end_line_of(parser.peek_token(), line, total_lines);
+                    statements.push(convert_statement(&stmt, line, column, end_line));
+                    continue;
+                }
+                // 不干净：丢弃主方言结果，落入下方回退链统一处理
             }
             Err(_e) => {
-                // 单条语句解析失败时记录错误位置，然后跳过到下一个分号
-                let next_tok = parser.peek_token();
-                let end_line = if next_tok.token == Token::EOF {
-                    total_lines.max(line)
-                } else {
-                    let next_line = next_tok.location.line as i64;
-                    if next_line > line { next_line - 1 } else { line }
-                };
+                // 主方言硬错误：落入下方回退链统一处理
+            }
+        }
+
+        // ===== 回退链：切片整条语句，依次用后续方言重试 =====
+        // 1) 推进主 parser 到下一个 `;`/EOF（重新同步），并记录 `;` 的字节偏移
+        let mut end_offset = sql.len();
+        loop {
+            let t = parser.peek_token();
+            if t.token == Token::SemiColon {
+                end_offset = location_to_byte_offset(sql, t.span.start.line, t.span.start.column);
+                parser.next_token();
+                break;
+            } else if t.token == Token::EOF {
+                break;
+            }
+            parser.next_token();
+        }
+        let stmt_text: &str = if end_offset > start_offset {
+            &sql[start_offset..end_offset]
+        } else {
+            sql
+        };
+        // 2) 用回退链方言（跳过主方言）解析；首个成功即采用
+        for &fb in &chain_enums[1..] {
+            if let Ok(s) = parse_one_with(stmt_text, fb) {
+                recovered = Some(s);
+                break;
+            }
+        }
+        let end_line = end_line_of(parser.peek_token(), line, total_lines);
+        match recovered {
+            Some(stmt) => {
+                statements.push(convert_statement(&stmt, line, column, end_line));
+            }
+            None => {
                 statements.push(StmtInfo {
                     kind: "PARSE_ERROR".to_string(),
                     line,
@@ -102,16 +138,6 @@ pub(crate) fn parse_sql_to_ast(sql: &str, dialect: CheckDialect) -> SqlAst {
                     create_index: None,
                     transaction: None,
                 });
-                loop {
-                    let t = parser.peek_token();
-                    if t.token == Token::SemiColon || t.token == Token::EOF {
-                        if t.token == Token::SemiColon {
-                            parser.next_token();
-                        }
-                        break;
-                    }
-                    parser.next_token();
-                }
             }
         }
     }
@@ -124,16 +150,94 @@ pub(crate) fn parse_sql_to_ast(sql: &str, dialect: CheckDialect) -> SqlAst {
     }
 }
 
+/// 解析链枚举序列（主方言在前，去重，链尾兜底 Generic）。
+fn build_chain_enums(primary: CheckDialect, fallback: Option<CheckDialect>) -> Vec<CheckDialect> {
+    let mut dialects = vec![primary];
+    if let Some(fb) = fallback {
+        if fb != primary && !dialects.contains(&fb) {
+            dialects.push(fb);
+        }
+    }
+    if !dialects.contains(&CheckDialect::Generic) {
+        dialects.push(CheckDialect::Generic);
+    }
+    dialects
+}
+
+/// 把 `CheckDialect` 枚举构造为 sqlparser 的 `Box<dyn Dialect>`。
+fn box_dialect(d: CheckDialect) -> Box<dyn sqlparser::dialect::Dialect> {
+    match d {
+        CheckDialect::Generic => Box::new(GenericDialect {}),
+        CheckDialect::MySql => Box::new(MySqlDialect {}),
+        CheckDialect::PostgreSql => Box::new(PostgreSqlDialect {}),
+        CheckDialect::Ansi => Box::new(AnsiDialect {}),
+        CheckDialect::Oracle => Box::new(OracleDialect {}),
+    }
+}
+
+/// 用指定方言解析「单条语句」文本，返回 `Ok(Statement)` 或 `Err`。
+/// 供回退链对切片出的单条失败语句重试解析。
+fn parse_one_with(
+    stmt_text: &str,
+    dialect: CheckDialect,
+) -> Result<Statement, sqlparser::parser::ParserError> {
+    let d = box_dialect(dialect);
+    let mut p = Parser::new(&*d).try_with_sql(stmt_text)?;
+    p.parse_statement()
+}
+
+/// 根据语句之后的下一个 token 推算 end_line（与主方言成功/失败分支共用）。
+fn end_line_of(next_tok: sqlparser::tokenizer::TokenWithSpan, line: i64, total_lines: i64) -> i64 {
+    if next_tok.token == Token::EOF {
+        total_lines.max(line)
+    } else {
+        let next_line = next_tok.span.start.line as i64;
+        if next_line > line {
+            next_line - 1
+        } else {
+            line
+        }
+    }
+}
+
+/// 把 sqlparser 的 `(line, column)` 位置（1-based，按字符计数）映射到 `sql` 的字节偏移。
+///
+/// 用于在语句解析失败时精确切片出该语句的文本，交给回退方言重试。
+/// 兼容 LF 与 CRLF：sqlparser 把 `\r` 当作行内普通字符计入 column，
+/// 本函数按字符（而非字节）切片，与 sqlparser 的计数方式一致。
+fn location_to_byte_offset(sql: &str, line: u64, column: u64) -> usize {
+    let line_idx = (line.saturating_sub(1)) as usize;
+    let col_idx = (column.saturating_sub(1)) as usize;
+    let mut byte_pos: usize = 0;
+    for (i, l) in sql.split('\n').enumerate() {
+        if i == line_idx {
+            // 在本行内找第 col_idx 个字符的字节偏移
+            let mut char_count: usize = 0;
+            for (b, _ch) in l.char_indices() {
+                if char_count == col_idx {
+                    return byte_pos + b;
+                }
+                char_count += 1;
+            }
+            // column 超出本行长度：返回行尾
+            return byte_pos + l.len();
+        }
+        // 累加本行长度 + 1 个 '\n' 分隔符
+        byte_pos += l.len() + 1;
+    }
+    sql.len()
+}
+
 pub(crate) fn convert_statement(stmt: &Statement, line: i64, column: i64, end_line: i64) -> StmtInfo {
     match stmt {
-        Statement::CreateTable {
+        Statement::CreateTable(CreateTable {
             name,
             columns,
             constraints,
             if_not_exists,
             query,
             ..
-        } => {
+        }) => {
             let table_name = name.to_string();
             let mut cols = Vec::new();
             let mut pk_in_column = false;
@@ -168,45 +272,40 @@ pub(crate) fn convert_statement(stmt: &Statement, line: i64, column: i64, end_li
                         ColumnOption::Default(expr) => {
                             info.default_value = Some(expr.to_string());
                         }
-                        ColumnOption::Unique { is_primary, .. } => {
+                        ColumnOption::Unique(_u) => {
                             info.is_unique = true;
-                            if *is_primary {
-                                info.is_primary_key = true;
-                                pk_in_column = true;
-                                pk_columns.push(col_def.name.to_string());
-                            }
+                        }
+                        ColumnOption::PrimaryKey(_pk) => {
+                            info.is_primary_key = true;
+                            info.is_unique = true;
+                            pk_in_column = true;
+                            pk_columns.push(col_def.name.to_string());
                         }
                         ColumnOption::Comment(s) => {
                             info.comment = Some(s.clone());
                         }
-                        ColumnOption::Check(expr) => {
+                        ColumnOption::Check(c) => {
                             info.has_check = true;
                             checks.push(CheckInfo {
                                 name: String::new(),
-                                expr_text: expr.to_string(),
+                                expr_text: c.expr.to_string(),
                                 line: None,
                                 column: None,
                             });
                         }
-                        ColumnOption::ForeignKey {
-                            foreign_table,
-                            referred_columns,
-                            on_delete,
-                            on_update,
-                            ..
-                        } => {
+                        ColumnOption::ForeignKey(fk) => {
                             info.has_foreign_key = true;
-                            info.references_table = Some(foreign_table.to_string());
+                            info.references_table = Some(fk.foreign_table.to_string());
                             foreign_keys.push(ForeignKeyInfo {
                                 name: String::new(),
                                 columns: vec![col_def.name.to_string()],
-                                foreign_table: foreign_table.to_string(),
-                                referred_columns: referred_columns
+                                foreign_table: fk.foreign_table.to_string(),
+                                referred_columns: fk.referred_columns
                                     .iter()
                                     .map(|i| i.to_string())
                                     .collect(),
-                                on_delete: format_referral_action(on_delete),
-                                on_update: format_referral_action(on_update),
+                                on_delete: format_referral_action(&fk.on_delete),
+                                on_update: format_referral_action(&fk.on_update),
                                 line: None,
                                 column: None,
                             });
@@ -216,8 +315,15 @@ pub(crate) fn convert_statement(stmt: &Statement, line: i64, column: i64, end_li
                             // 这里仅作标记，不影响主流程
                             let _ = expr;
                         }
+                        ColumnOption::Generated { .. } => {
+                            // Oracle / PG `GENERATED ... AS IDENTITY` —— 语义等价于自增列。
+                            // 该 variant 此前落入 `_ => {}` 被静默忽略，导致 Oracle 身份列
+                            // 丢失 is_auto_increment 元信息；这里显式捕获。
+                            info.is_auto_increment = true;
+                        }
                         ColumnOption::DialectSpecific(tokens) => {
-                            // 检测 MySQL AUTO_INCREMENT / SQLite AUTOINCREMENT
+                            // 检测 MySQL AUTO_INCREMENT / SQLite AUTOINCREMENT，
+                            // 以及 Oracle 以 DialectSpecific 形式出现的 IDENTITY 关键字等。
                             let joined = tokens
                                 .iter()
                                 .map(|t| t.to_string().to_uppercase())
@@ -225,6 +331,7 @@ pub(crate) fn convert_statement(stmt: &Statement, line: i64, column: i64, end_li
                                 .join(" ");
                             if joined.contains("AUTO_INCREMENT")
                                 || joined.contains("AUTOINCREMENT")
+                                || joined.contains("IDENTITY")
                             {
                                 info.is_auto_increment = true;
                             }
@@ -238,69 +345,61 @@ pub(crate) fn convert_statement(stmt: &Statement, line: i64, column: i64, end_li
             // 表级约束（主键不在此处收集，由下方 pk_in_constraint 单独扫描）
             for con in constraints {
                 match con {
-                    TableConstraint::Unique { name, columns, .. } => {
+                    TableConstraint::Unique(u) => {
                         uniques.push(UniqueInfo {
-                            name: name
+                            name: u.name
                                 .as_ref()
                                 .map(|i| i.to_string())
                                 .unwrap_or_default(),
-                            columns: columns.iter().map(|i| i.to_string()).collect(),
+                            columns: u.columns.iter().map(|i| i.to_string()).collect(),
                             line: None,
                             column: None,
                         });
                     }
-                    TableConstraint::ForeignKey {
-                        name,
-                        columns,
-                        foreign_table,
-                        referred_columns,
-                        on_delete,
-                        on_update,
-                        ..
-                    } => {
+                    TableConstraint::ForeignKey(fk) => {
                         foreign_keys.push(ForeignKeyInfo {
-                            name: name
+                            name: fk.name
                                 .as_ref()
                                 .map(|i| i.to_string())
                                 .unwrap_or_default(),
-                            columns: columns.iter().map(|i| i.to_string()).collect(),
-                            foreign_table: foreign_table.to_string(),
-                            referred_columns: referred_columns
+                            columns: fk.columns.iter().map(|i| i.to_string()).collect(),
+                            foreign_table: fk.foreign_table.to_string(),
+                            referred_columns: fk.referred_columns
                                 .iter()
                                 .map(|i| i.to_string())
                                 .collect(),
-                            on_delete: format_referral_action(on_delete),
-                            on_update: format_referral_action(on_update),
+                            on_delete: format_referral_action(&fk.on_delete),
+                            on_update: format_referral_action(&fk.on_update),
                             line: None,
                             column: None,
                         });
                     }
-                    TableConstraint::Check { name, expr } => {
+                    TableConstraint::Check(c) => {
                         checks.push(CheckInfo {
-                            name: name
+                            name: c.name
                                 .as_ref()
                                 .map(|i| i.to_string())
                                 .unwrap_or_default(),
-                            expr_text: expr.to_string(),
+                            expr_text: c.expr.to_string(),
                             line: None,
                             column: None,
                         });
                     }
-                    TableConstraint::Index { name, columns, .. } => {
+                    TableConstraint::Index(idx) => {
                         indexes.push(IndexInfo {
-                            name: name
+                            name: idx.name
                                 .as_ref()
                                 .map(|i| i.to_string())
                                 .unwrap_or_default(),
-                            columns: columns.iter().map(|i| i.to_string()).collect(),
+                            columns: idx.columns.iter().map(|i| i.to_string()).collect(),
                             is_unique: false,
                             line: None,
                             column: None,
                         });
                     }
-                    TableConstraint::PrimaryKey { name, columns, .. } => {
-                        pk_columns = columns.iter().map(|i| i.to_string()).collect();
-                        pk_name = name.as_ref().map(|i| i.to_string()).unwrap_or_default();
+                    TableConstraint::PrimaryKey(pk) => {
+                        pk_columns = pk.columns.iter().map(|i| i.to_string()).collect();
+                        pk_name = pk.name.as_ref().map(|i| i.to_string()).unwrap_or_default();
                     }
                     _ => {}
                 }
@@ -393,9 +492,9 @@ pub(crate) fn convert_statement(stmt: &Statement, line: i64, column: i64, end_li
                 transaction: None,
             }
         }
-        Statement::Insert {
-            table_name, columns, ..
-        } => {
+        Statement::Insert(Insert {
+            table: table_name, columns, ..
+        }) => {
             let col_names: Vec<String> = columns.iter().map(|c| c.to_string()).collect();
             StmtInfo {
                 kind: "INSERT".to_string(),
@@ -418,9 +517,9 @@ pub(crate) fn convert_statement(stmt: &Statement, line: i64, column: i64, end_li
                 transaction: None,
             }
         }
-        Statement::Update {
+        Statement::Update(Update {
             table, selection, ..
-        } => {
+        }) => {
             let table_name = match &table.relation {
                 TableFactor::Table { name, .. } => name.to_string(),
                 _ => table.relation.to_string(),
@@ -446,9 +545,9 @@ pub(crate) fn convert_statement(stmt: &Statement, line: i64, column: i64, end_li
                 transaction: None,
             }
         }
-        Statement::Delete {
+        Statement::Delete(Delete {
             tables, from, selection, ..
-        } => {
+        }) => {
             // 优先取 `tables`（MySQL 多表 DELETE），否则从 `from` 取首个表
             let table_name = if !tables.is_empty() {
                 tables
@@ -492,9 +591,9 @@ pub(crate) fn convert_statement(stmt: &Statement, line: i64, column: i64, end_li
                 transaction: None,
             }
         }
-        Statement::AlterTable {
+        Statement::AlterTable(AlterTable {
             name, operations, ..
-        } => {
+        }) => {
             let table_name = name.to_string();
             let mut adds_primary_key = false;
             let mut drops_primary_key = false;
@@ -504,16 +603,16 @@ pub(crate) fn convert_statement(stmt: &Statement, line: i64, column: i64, end_li
             for op in operations {
                 let (op_type, col_name, tbl_name, con_name, detail, is_add_pk, is_drop_pk) =
                     match op {
-                        AlterTableOperation::AddConstraint(tc) => {
-                            let (t, detail_str, is_pk) = match tc {
-                                TableConstraint::PrimaryKey { name, columns, .. } => {
-                                    added_pk_cols = columns.iter().map(|i| i.to_string()).collect();
+                        AlterTableOperation::AddConstraint { constraint: tc, .. } => {
+                            let (t, detail_str, is_pk) = match &tc {
+                                TableConstraint::PrimaryKey(pk) => {
+                                    added_pk_cols = pk.columns.iter().map(|i| i.to_string()).collect();
                                     (
                                     "ADD_CONSTRAINT",
                                     format!(
                                         "ADD{} PRIMARY KEY ({})",
-                                        name.as_ref().map(|n| format!(" CONSTRAINT {}", n)).unwrap_or_default(),
-                                        columns
+                                        pk.name.as_ref().map(|n| format!(" CONSTRAINT {}", n)).unwrap_or_default(),
+                                        pk.columns
                                             .iter()
                                             .map(|i| i.to_string())
                                             .collect::<Vec<_>>()
@@ -522,12 +621,12 @@ pub(crate) fn convert_statement(stmt: &Statement, line: i64, column: i64, end_li
                                     true,
                                     )
                                 },
-                                TableConstraint::Unique { name, columns, .. } => (
+                                TableConstraint::Unique(u) => (
                                     "ADD_CONSTRAINT",
                                     format!(
                                         "ADD{} UNIQUE ({})",
-                                        name.as_ref().map(|n| format!(" CONSTRAINT {}", n)).unwrap_or_default(),
-                                        columns
+                                        u.name.as_ref().map(|n| format!(" CONSTRAINT {}", n)).unwrap_or_default(),
+                                        u.columns
                                             .iter()
                                             .map(|i| i.to_string())
                                             .collect::<Vec<_>>()
@@ -535,31 +634,26 @@ pub(crate) fn convert_statement(stmt: &Statement, line: i64, column: i64, end_li
                                     ),
                                     false,
                                 ),
-                                TableConstraint::ForeignKey {
-                                    name,
-                                    columns,
-                                    foreign_table,
-                                    ..
-                                } => (
+                                TableConstraint::ForeignKey(fk) => (
                                     "ADD_CONSTRAINT",
                                     format!(
                                         "ADD{} FOREIGN KEY ({}) REFERENCES {}",
-                                        name.as_ref().map(|n| format!(" CONSTRAINT {}", n)).unwrap_or_default(),
-                                        columns
+                                        fk.name.as_ref().map(|n| format!(" CONSTRAINT {}", n)).unwrap_or_default(),
+                                        fk.columns
                                             .iter()
                                             .map(|i| i.to_string())
                                             .collect::<Vec<_>>()
                                             .join(", "),
-                                        foreign_table
+                                        fk.foreign_table
                                     ),
                                     false,
                                 ),
-                                TableConstraint::Check { name, expr, .. } => (
+                                TableConstraint::Check(c) => (
                                     "ADD_CONSTRAINT",
                                     format!(
                                         "ADD{} CHECK ({})",
-                                        name.as_ref().map(|n| format!(" CONSTRAINT {}", n)).unwrap_or_default(),
-                                        expr
+                                        c.name.as_ref().map(|n| format!(" CONSTRAINT {}", n)).unwrap_or_default(),
+                                        c.expr
                                     ),
                                     false,
                                 ),
@@ -570,7 +664,7 @@ pub(crate) fn convert_statement(stmt: &Statement, line: i64, column: i64, end_li
                         }
                         AlterTableOperation::AddColumn { column_def, .. } => {
                             let has_pk = column_def.options.iter().any(|o| {
-                                matches!(o.option, ColumnOption::Unique { is_primary: true, .. })
+                                matches!(o.option, ColumnOption::PrimaryKey(_))
                             });
                             (
                                 "ADD_COLUMN".to_string(),
@@ -583,23 +677,32 @@ pub(crate) fn convert_statement(stmt: &Statement, line: i64, column: i64, end_li
                             )
                         }
                         AlterTableOperation::DropColumn {
-                            column_name,
+                            has_column_keyword: _,
+                            column_names,
                             if_exists,
-                            cascade,
-                        } => (
-                            "DROP_COLUMN".to_string(),
-                            column_name.to_string(),
-                            String::new(),
-                            String::new(),
-                            format!(
-                                "DROP COLUMN{}{}{}",
-                                if *if_exists { " IF EXISTS" } else { "" },
-                                format!(" {}", column_name),
-                                if *cascade { " CASCADE" } else { "" }
-                            ),
-                            false,
-                            false,
-                        ),
+                            drop_behavior,
+                        } => {
+                            let column_name = column_names
+                                .iter()
+                                .map(|i| i.to_string())
+                                .collect::<Vec<_>>()
+                                .join(", ");
+                            let cascade = matches!(drop_behavior, Some(DropBehavior::Cascade));
+                            (
+                                "DROP_COLUMN".to_string(),
+                                column_name.clone(),
+                                String::new(),
+                                String::new(),
+                                format!(
+                                    "DROP COLUMN{}{}{}",
+                                    if *if_exists { " IF EXISTS" } else { "" },
+                                    format!(" {}", column_name),
+                                    if cascade { " CASCADE" } else { "" }
+                                ),
+                                false,
+                                false,
+                            )
+                        }
                         AlterTableOperation::AlterColumn { column_name, op } => (
                             "ALTER_COLUMN".to_string(),
                             column_name.to_string(),
@@ -630,7 +733,7 @@ pub(crate) fn convert_statement(stmt: &Statement, line: i64, column: i64, end_li
                             false,
                             false,
                         ),
-                        AlterTableOperation::DropPrimaryKey => (
+                        AlterTableOperation::DropPrimaryKey { .. } => (
                             "DROP_PRIMARY_KEY".to_string(),
                             String::new(),
                             String::new(),
@@ -696,7 +799,7 @@ pub(crate) fn convert_statement(stmt: &Statement, line: i64, column: i64, end_li
                 transaction: None,
             }
         }
-        Statement::Truncate { table_name, table, .. } => StmtInfo {
+        Statement::Truncate(Truncate { table_names, table, .. }) => StmtInfo {
             kind: "TRUNCATE".to_string(),
             line,
             end_line,
@@ -709,20 +812,24 @@ pub(crate) fn convert_statement(stmt: &Statement, line: i64, column: i64, end_li
             delete: None,
             alter_table: None,
             truncate: Some(TruncateInfo {
-                table_name: table_name.to_string(),
+                table_name: table_names
+                    .iter()
+                    .map(|t| t.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", "),
                 has_table_keyword: *table,
             }),
             create_view: None,
             create_index: None,
             transaction: None,
         },
-        Statement::CreateView {
+        Statement::CreateView(CreateView {
             or_replace,
             materialized,
             name,
             columns,
             ..
-        } => StmtInfo {
+        }) => StmtInfo {
             kind: "CREATE_VIEW".to_string(),
             line,
             end_line,
@@ -744,21 +851,21 @@ pub(crate) fn convert_statement(stmt: &Statement, line: i64, column: i64, end_li
             create_index: None,
             transaction: None,
         },
-        Statement::CreateIndex {
+        Statement::CreateIndex(CreateIndex {
             name,
             table_name,
             using,
             columns,
             unique,
             ..
-        } => {
+        }) => {
             let idx_name = name
                 .as_ref()
                 .map(|n| n.to_string())
                 .unwrap_or_default();
             let col_names: Vec<String> = columns
                 .iter()
-                .map(|obe: &OrderByExpr| obe.expr.to_string())
+                .map(|obe| obe.to_string())
                 .collect();
             let _ = using;
             StmtInfo {
@@ -892,7 +999,7 @@ pub(crate) fn convert_statement(stmt: &Statement, line: i64, column: i64, end_li
             create_index: None,
             transaction: None,
         },
-        Statement::SetVariable { .. } => StmtInfo {
+        Statement::Set(_) => StmtInfo {
             kind: "SET_VARIABLE".to_string(),
             line,
             end_line,
@@ -909,7 +1016,7 @@ pub(crate) fn convert_statement(stmt: &Statement, line: i64, column: i64, end_li
             create_index: None,
             transaction: None,
         },
-        Statement::Use { .. } => StmtInfo {
+        Statement::Use(_) => StmtInfo {
             kind: "USE".to_string(),
             line,
             end_line,
@@ -946,16 +1053,44 @@ pub(crate) fn convert_statement(stmt: &Statement, line: i64, column: i64, end_li
     }
 }
 
+/// 2 参封装：等价于 [`parse_sql_to_ast_fb`] 且回退方言为 `None`
+/// （即「主方言 → Generic」；对 `postgresql` 主方言仍是「→ Oracle → Generic」，
+/// 因为 `default_fallback` 在此处不生效，仅 `CheckDialect` 的 `default_fallback`
+/// 在 `main.rs` 解析 CLI/配置时应用）。
+///
+/// 供单元测试与 `replay_export` 等不需要回退链的场景直接调用。
+pub(crate) fn parse_sql_to_ast(sql: &str, dialect: CheckDialect) -> SqlAst {
+    parse_sql_to_ast_fb(sql, dialect, None)
+}
+
 /// 提取 TableConstraint 的名字（用于 AlterOpInfo.constraint_name）。
 pub(crate) fn name_of_table_constraint(tc: &TableConstraint) -> String {
     match tc {
-        TableConstraint::Unique { name, .. }
-        | TableConstraint::PrimaryKey { name, .. }
-        | TableConstraint::ForeignKey { name, .. }
-        | TableConstraint::Check { name, .. }
-        | TableConstraint::Index { name, .. } => {
-            name.as_ref().map(|i| i.to_string()).unwrap_or_default()
-        }
+        TableConstraint::Unique(u) => u
+            .name
+            .as_ref()
+            .map(|i| i.to_string())
+            .unwrap_or_default(),
+        TableConstraint::PrimaryKey(pk) => pk
+            .name
+            .as_ref()
+            .map(|i| i.to_string())
+            .unwrap_or_default(),
+        TableConstraint::ForeignKey(fk) => fk
+            .name
+            .as_ref()
+            .map(|i| i.to_string())
+            .unwrap_or_default(),
+        TableConstraint::Check(c) => c
+            .name
+            .as_ref()
+            .map(|i| i.to_string())
+            .unwrap_or_default(),
+        TableConstraint::Index(idx) => idx
+            .name
+            .as_ref()
+            .map(|i| i.to_string())
+            .unwrap_or_default(),
         _ => String::new(),
     }
 }
@@ -1012,8 +1147,14 @@ mod tests {
     #[test]
     fn test_parse_error_emits_parse_error_stmt() {
         // sqlparser 无法解析的语法应作为 PARSE_ERROR 语句记录
-        let ast = parse_sql_to_ast("SELECT FROM WHERE", CheckDialect::Generic);
-        assert!(ast.statements.iter().any(|s| s.kind == "PARSE_ERROR"));
+        for input in [
+            "SELECT 1 +",
+            "CREATE TABLE",
+            "SELECT ) FROM t",
+        ] {
+            let ast = parse_sql_to_ast(input, CheckDialect::Generic);
+            assert!(ast.statements.iter().any(|s| s.kind == "PARSE_ERROR"), "expected PARSE_ERROR for {:?}", input);
+        }
     }
 
     #[test]
@@ -1135,6 +1276,148 @@ mod tests {
         assert_eq!(
             format_referral_action(&Some(sqlparser::ast::ReferentialAction::SetNull)),
             "SETNULL"
+        );
+    }
+
+    // ===== 逐语句方言回退链 =====
+
+    #[test]
+    fn test_build_chain_enums_dedup_and_generic_tail() {
+        // PG + Oracle -> [PG, Oracle, Generic]
+        let c = build_chain_enums(CheckDialect::PostgreSql, Some(CheckDialect::Oracle));
+        assert_eq!(
+            c,
+            vec![
+                CheckDialect::PostgreSql,
+                CheckDialect::Oracle,
+                CheckDialect::Generic
+            ]
+        );
+        // fallback == primary -> 去重，链尾仍兜底 Generic
+        let c2 = build_chain_enums(CheckDialect::Generic, Some(CheckDialect::Generic));
+        assert_eq!(c2, vec![CheckDialect::Generic]);
+        // 无 fallback 且非 PG -> [primary, Generic]
+        let c3 = build_chain_enums(CheckDialect::MySql, None);
+        assert_eq!(c3, vec![CheckDialect::MySql, CheckDialect::Generic]);
+    }
+
+    #[test]
+    fn test_location_to_byte_offset_basic() {
+        let sql = "SELECT 1;\nSELECT 2;";
+        // line 1 col 1 -> byte 0
+        assert_eq!(location_to_byte_offset(sql, 1, 1), 0);
+        // line 2 col 1 -> "SELECT 1;\n" = 10 字节之后
+        assert_eq!(location_to_byte_offset(sql, 2, 1), 10);
+        // line 2 col 8（'2' 的位置）-> byte 17
+        assert_eq!(location_to_byte_offset(sql, 2, 8), 17);
+    }
+
+    #[test]
+    fn test_parse_postgresql_falls_back_to_oracle() {
+        // GaussDB 混合方言：PG 内核 + Oracle 外壳。
+        // MINUS 是 Oracle 专有集合运算符，PG 解析失败，应回退到 Oracle 成功解析。
+        let ast = parse_sql_to_ast_fb(
+            "SELECT a FROM t1 MINUS SELECT a FROM t2",
+            CheckDialect::PostgreSql,
+            Some(CheckDialect::Oracle),
+        );
+        assert!(!ast.has_parse_error(), "expected successful parse via Oracle fallback; kinds={:?}", ast.statements.iter().map(|s| &s.kind).collect::<Vec<_>>());
+        let kinds: Vec<&str> = ast.statements.iter().map(|s| s.kind.as_str()).collect();
+        assert_eq!(kinds, vec!["SELECT"]);
+        // 回退解析出的 SELECT 应识别为 MINUS（在 analyzer 中映射为 except）
+        let sel = ast.statements[0].select.as_ref().unwrap();
+        assert!(sel.except, "MINUS should be detected as EXCEPT via Oracle fallback");
+    }
+
+    #[test]
+    fn test_parse_error_after_fallback_exhausted() {
+        // 即便配置了回退链，真正无法解析的语句仍应记 PARSE_ERROR。
+        let ast = parse_sql_to_ast_fb(
+            "SELECT 1 +",
+            CheckDialect::PostgreSql,
+            Some(CheckDialect::Oracle),
+        );
+        assert!(
+            ast.statements.iter().any(|s| s.kind == "PARSE_ERROR"),
+            "genuinely broken SQL must remain PARSE_ERROR even with fallback"
+        );
+    }
+
+    #[test]
+    fn test_parse_oracle_connect_by_via_fallback() {
+        // CONNECT BY 是 Oracle 层次查询语法，PG 不支持；回退到 Oracle 应成功解析为 SELECT。
+        let ast = parse_sql_to_ast_fb(
+            "SELECT empno FROM emp CONNECT BY PRIOR empno = mgr START WITH empno = 1",
+            CheckDialect::PostgreSql,
+            Some(CheckDialect::Oracle),
+        );
+        assert!(!ast.has_parse_error(), "CONNECT BY should parse via Oracle fallback; kinds={:?}", ast.statements.iter().map(|s| &s.kind).collect::<Vec<_>>());
+        assert_eq!(ast.statements[0].kind, "SELECT");
+
+        // 链结构正确性：即便回退链退化为 [PG, Generic]（无 Oracle），
+        // Generic 兜底也能解析 CONNECT BY，整条语句仍应成功（不产生 PARSE_ERROR）。
+        // 这证明"成功"来自回退链机制本身，而非 PG 把语句残缺截断后误判为成功。
+        // 真正只有 Oracle 才能救、Generic 也无能为力的构造是 MINUS
+        // （见 test_parse_postgresql_falls_back_to_oracle）。
+        let no_fb = parse_sql_to_ast_fb(
+            "SELECT empno FROM emp CONNECT BY PRIOR empno = mgr START WITH empno = 1",
+            CheckDialect::PostgreSql,
+            None,
+        );
+        assert!(
+            !no_fb.has_parse_error(),
+            "CONNECT BY must be rescued by the Generic fallback tail; kinds={:?}",
+            no_fb.statements.iter().map(|s| &s.kind).collect::<Vec<_>>()
+        );
+        assert_eq!(no_fb.statements[0].kind, "SELECT");
+    }
+
+    #[test]
+    fn test_parse_oracle_as_primary() {
+        // 直接以 Oracle 作主方言解析（不依赖回退链），验证 OracleDialect 路径本身正确。
+        // 1) MINUS 集合运算符
+        let ast = parse_sql_to_ast("SELECT a FROM t1 MINUS SELECT a FROM t2", CheckDialect::Oracle);
+        assert!(!ast.has_parse_error(), "Oracle should parse MINUS directly; kinds={:?}", ast.statements.iter().map(|s| &s.kind).collect::<Vec<_>>());
+        assert_eq!(ast.statements[0].kind, "SELECT");
+        assert!(
+            ast.statements[0].select.as_ref().unwrap().except,
+            "Oracle MINUS should map to except"
+        );
+
+        // 2) CONNECT BY 层次查询
+        let ast2 = parse_sql_to_ast(
+            "SELECT empno FROM emp CONNECT BY PRIOR empno = mgr START WITH empno = 1",
+            CheckDialect::Oracle,
+        );
+        assert!(!ast2.has_parse_error(), "Oracle should parse CONNECT BY directly; kinds={:?}", ast2.statements.iter().map(|s| &s.kind).collect::<Vec<_>>());
+        assert_eq!(ast2.statements[0].kind, "SELECT");
+
+        // 3) 标准 SELECT（含 Oracle 伪表 dual）
+        let ast3 = parse_sql_to_ast("SELECT 1 FROM dual", CheckDialect::Oracle);
+        assert!(!ast3.has_parse_error(), "Oracle should parse plain SELECT ... FROM dual; kinds={:?}", ast3.statements.iter().map(|s| &s.kind).collect::<Vec<_>>());
+        assert_eq!(ast3.statements[0].kind, "SELECT");
+    }
+
+    #[test]
+    fn test_parse_generated_column_sets_auto_increment() {
+        // `GENERATED ... AS IDENTITY` 经 ColumnOption::Generated 表达（PG / Oracle 12c+ 均如此），
+        // 应被识别为自增列（is_auto_increment = true）。此前该 variant 落入 `_ => {}`
+        // 静默丢失，修复后必须命中新加的 Generated 分支。
+        // 用 PG 方言（GENERATED AS IDENTITY 的规范生产者）验证该代码路径。
+        let ast = parse_sql_to_ast(
+            "CREATE TABLE t (id INT GENERATED ALWAYS AS IDENTITY, name VARCHAR(10))",
+            CheckDialect::PostgreSql,
+        );
+        assert!(!ast.has_parse_error(), "CREATE TABLE with GENERATED AS IDENTITY must parse; kinds={:?}", ast.statements.iter().map(|s| &s.kind).collect::<Vec<_>>());
+        let create = ast.statements[0].create_table.as_ref().unwrap();
+        let id_col = create
+            .columns
+            .iter()
+            .find(|c| c.name.eq_ignore_ascii_case("id"))
+            .expect("id column should be present");
+        assert!(
+            id_col.is_auto_increment,
+            "GENERATED AS IDENTITY column must be flagged is_auto_increment"
         );
     }
 }
