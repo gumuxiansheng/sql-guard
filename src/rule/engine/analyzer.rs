@@ -1,6 +1,6 @@
 use sqlparser::ast::{
-    Expr, GroupByExpr, JoinConstraint, JoinOperator, Query, SelectItem, SetExpr, SetOperator,
-    SetQuantifier, TableFactor, TableWithJoins, WindowType,
+    Expr, GroupByExpr, JoinConstraint, JoinOperator, LimitClause, Query, SelectItem,
+    SetExpr, SetOperator, SetQuantifier, TableFactor, TableWithJoins, WindowType,
 };
 
 use super::ast::*;
@@ -60,6 +60,8 @@ pub(crate) fn analyze_query(q: &Query) -> SelectInfo {
             }
             SetOperator::Intersect => info.intersect = true,
             SetOperator::Except => info.except = true,
+            // Oracle 兼容语法 MINUS（等价于 EXCEPT）
+            SetOperator::Minus => info.except = true,
         }
     }
 
@@ -81,9 +83,12 @@ pub(crate) fn analyze_query(q: &Query) -> SelectInfo {
     }
 
     // Query 层的 ORDER BY / LIMIT / OFFSET / FETCH（无论是否集合运算都在 q 上）
-    info.has_order_by = !q.order_by.is_empty();
-    info.has_limit = q.limit.is_some();
-    info.has_offset = q.offset.is_some();
+    info.has_order_by = q.order_by.is_some();
+    info.has_limit = q.limit_clause.is_some();
+    info.has_offset = q.limit_clause.as_ref().map_or(false, |l| match l {
+        LimitClause::LimitOffset { offset, .. } => offset.is_some(),
+        LimitClause::OffsetCommaLimit { .. } => true,
+    });
     info.has_fetch = q.fetch.is_some();
 
     // Select 层的字段（仅 SetExpr::Select 时有效）
@@ -95,8 +100,8 @@ pub(crate) fn analyze_query(q: &Query) -> SelectInfo {
         info.has_where = s.selection.is_some();
         info.where_clause = s.selection.as_ref().map(|e| e.to_string());
         info.where_expr = s.selection.as_ref().map(analyze_expr);
-        info.has_group_by = matches!(&s.group_by, GroupByExpr::Expressions(es) if !es.is_empty())
-            || matches!(&s.group_by, GroupByExpr::All);
+        info.has_group_by = matches!(&s.group_by, GroupByExpr::Expressions(es, _) if !es.is_empty())
+            || matches!(&s.group_by, GroupByExpr::All(_));
         info.has_having = s.having.is_some();
         info.having_expr = s.having.as_ref().map(analyze_expr);
         info.has_qualify = s.qualify.is_some();
@@ -249,7 +254,7 @@ pub(crate) fn analyze_join_operator(
             let (has_condition, condition_text) = analyze_join_constraint(constraint);
             (table_name, join_type, has_condition, alias, condition_text)
         }
-        JoinOperator::CrossJoin => (table_name, "CROSS".to_string(), true, alias, None),
+        JoinOperator::CrossJoin(_) => (table_name, "CROSS".to_string(), true, alias, None),
         _ => (table_name, "OTHER".to_string(), false, alias, None),
     }
 }
@@ -404,20 +409,16 @@ pub(crate) fn collect_subqueries_in_expr(e: &Expr, out: &mut Vec<SelectInfo>, de
     }
     match e {
         Expr::Subquery(q) => {
-            out.push(analyze_query(q));
-            collect_subqueries_in_query(q, out, depth + 1);
+            out.push(analyze_query(&*q));
+            collect_subqueries_in_query(&*q, out, depth + 1);
         }
         Expr::Exists { subquery, .. } => {
-            out.push(analyze_query(subquery));
-            collect_subqueries_in_query(subquery, out, depth + 1);
+            out.push(analyze_query(&*subquery));
+            collect_subqueries_in_query(&*subquery, out, depth + 1);
         }
         Expr::InSubquery { subquery, .. } => {
-            out.push(analyze_query(subquery));
-            collect_subqueries_in_query(subquery, out, depth + 1);
-        }
-        Expr::ArraySubquery(q) => {
-            out.push(analyze_query(q));
-            collect_subqueries_in_query(q, out, depth + 1);
+            out.push(analyze_query(&*subquery));
+            collect_subqueries_in_query(&*subquery, out, depth + 1);
         }
         // 递归下钻常见容器
         Expr::BinaryOp { left, right, .. } => {
@@ -444,17 +445,15 @@ pub(crate) fn collect_subqueries_in_expr(e: &Expr, out: &mut Vec<SelectInfo>, de
         Expr::Case {
             operand,
             conditions,
-            results,
             else_result,
+            ..
         } => {
             if let Some(o) = operand {
                 collect_subqueries_in_expr(o, out, depth);
             }
             for c in conditions {
-                collect_subqueries_in_expr(c, out, depth);
-            }
-            for r in results {
-                collect_subqueries_in_expr(r, out, depth);
+                collect_subqueries_in_expr(&c.condition, out, depth);
+                collect_subqueries_in_expr(&c.result, out, depth);
             }
             if let Some(e) = else_result {
                 collect_subqueries_in_expr(e, out, depth);
@@ -462,13 +461,16 @@ pub(crate) fn collect_subqueries_in_expr(e: &Expr, out: &mut Vec<SelectInfo>, de
         }
         Expr::Cast { expr, .. } => collect_subqueries_in_expr(expr, out, depth),
         Expr::Function(f) => {
-            for arg in &f.args {
-                let inner = match arg {
+            if let sqlparser::ast::FunctionArguments::List(list) = &f.args {
+                for arg in &list.args {
+                    let inner = match arg {
                     sqlparser::ast::FunctionArg::Named { arg, .. } => arg,
+                    sqlparser::ast::FunctionArg::ExprNamed { arg, .. } => arg,
                     sqlparser::ast::FunctionArg::Unnamed(arg) => arg,
-                };
-                if let sqlparser::ast::FunctionArgExpr::Expr(e) = inner {
-                    collect_subqueries_in_expr(e, out, depth);
+                    };
+                    if let sqlparser::ast::FunctionArgExpr::Expr(e) = inner {
+                        collect_subqueries_in_expr(e, out, depth);
+                    }
                 }
             }
         }
@@ -494,7 +496,7 @@ pub(crate) fn collect_window_funcs_in_expr(e: &Expr, out: &mut Vec<WindowFuncInf
                     .name
                     .0
                     .last()
-                    .map(|i| i.value.clone())
+                    .map(|i| i.to_string())
                     .unwrap_or_default();
                 out.push(WindowFuncInfo {
                     function_name: func_name,
@@ -504,13 +506,16 @@ pub(crate) fn collect_window_funcs_in_expr(e: &Expr, out: &mut Vec<WindowFuncInf
                 });
             }
             // 函数参数中可能还嵌套窗口函数，下钻
-            for arg in &f.args {
-                let inner = match arg {
+            if let sqlparser::ast::FunctionArguments::List(list) = &f.args {
+                for arg in &list.args {
+                    let inner = match arg {
                     sqlparser::ast::FunctionArg::Named { arg, .. } => arg,
+                    sqlparser::ast::FunctionArg::ExprNamed { arg, .. } => arg,
                     sqlparser::ast::FunctionArg::Unnamed(arg) => arg,
-                };
-                if let sqlparser::ast::FunctionArgExpr::Expr(inner_e) = inner {
-                    collect_window_funcs_in_expr(inner_e, out);
+                    };
+                    if let sqlparser::ast::FunctionArgExpr::Expr(inner_e) = inner {
+                        collect_window_funcs_in_expr(inner_e, out);
+                    }
                 }
             }
         }
@@ -522,17 +527,15 @@ pub(crate) fn collect_window_funcs_in_expr(e: &Expr, out: &mut Vec<WindowFuncInf
         Expr::Case {
             operand,
             conditions,
-            results,
             else_result,
+            ..
         } => {
             if let Some(o) = operand {
                 collect_window_funcs_in_expr(o, out);
             }
             for c in conditions {
-                collect_window_funcs_in_expr(c, out);
-            }
-            for r in results {
-                collect_window_funcs_in_expr(r, out);
+                collect_window_funcs_in_expr(&c.condition, out);
+                collect_window_funcs_in_expr(&c.result, out);
             }
             if let Some(e) = else_result {
                 collect_window_funcs_in_expr(e, out);
@@ -604,7 +607,7 @@ pub(crate) fn analyze_expr(e: &Expr) -> ExprInfo {
         ),
         Expr::Function(f) => (
             "FUNCTION",
-            f.name.0.last().map(|i| i.value.clone()).unwrap_or_default(),
+            f.name.0.last().map(|i| i.to_string()).unwrap_or_default(),
             false,
             false,
             false,

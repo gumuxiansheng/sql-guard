@@ -324,7 +324,7 @@ mod tests {
             file_check: crate::config::FileCheckConfig::default(),
             rollback: RollbackConfig { backup_mode: backup_mode.to_string(), ..RollbackConfig::default() },
             cache: crate::config::CacheConfig::default(),
-            dialect: crate::config::CheckDialect::default(),
+            dialect: crate::config::CheckDialect::default(), dialect_fallback: None,
         };
         let rc = cfg.rollback.clone();
         (cfg, rc)
@@ -379,7 +379,7 @@ mod tests {
             file_check: crate::config::FileCheckConfig::default(),
             rollback: RollbackConfig { lower_case_table_names: lower, ..RollbackConfig::default() },
             cache: crate::config::CacheConfig::default(),
-            dialect: crate::config::CheckDialect::default(),
+            dialect: crate::config::CheckDialect::default(), dialect_fallback: None,
         };
         let rc = cfg.rollback.clone();
         (cfg, rc)

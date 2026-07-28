@@ -117,6 +117,16 @@ line_ending_severity = "warning"
 # dialect = "generic"
 
 # ================================================================================
+# 方言回退链第二候选 dialect_fallback（GaussDB 等「PG 内核 + Oracle 外壳」混合方言）
+# ================================================================================
+# 某条语句用主 dialect 解析失败时，按「主方言 → 本字段（若存在）→ Generic」顺序
+# 用后续方言重试，首个成功即采用；全部失败才记 PARSE_ERROR。
+# - 不配置时：postgresql 主方言默认回退到 oracle，其余默认仅回退到 Generic。
+# - CLI `--dialect-fallback generic` 可显式关闭回退（链退化为「主方言 → Generic」）。
+# 详解与端到端行为见 docs/dialect-fallback.md。
+# dialect_fallback = "oracle"
+
+# ================================================================================
 # 备份回滚自动生成 [rollback]
 # ================================================================================
 # 对每条 DDL/DML 语句自动生成 backup.sql / rollback.sql / rollback-manifest.json，

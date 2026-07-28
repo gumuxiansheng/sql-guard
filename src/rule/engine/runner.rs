@@ -7,7 +7,7 @@ use crate::config::{Config, RuleConfig};
 use crate::error::{SqlGuardError, Violation};
 
 use super::ast::*;
-use super::parser::parse_sql_to_ast;
+use super::parser::parse_sql_to_ast_fb;
 
 /// 规则脚本公共辅助函数。在每条规则脚本执行前自动 prepend，
 /// 规则脚本无需 import 即可直接调用 guard_parse_error / for_each_statement / report 等。
@@ -38,7 +38,7 @@ pub fn run_rules_for_file(
 ) -> Result<Vec<Violation>, SqlGuardError> {
     let mut violations = Vec::new();
 
-    let ast = parse_sql_to_ast(sql_content, config.dialect);
+    let ast = parse_sql_to_ast_fb(sql_content, config.dialect, config.dialect_fallback);
 
     // 解析失败显式上报：避免 AST 规则全部静默跳过导致用户误以为合规
     // 两种失败模式：

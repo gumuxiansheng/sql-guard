@@ -1021,7 +1021,7 @@ mod tests {
                 file_check: crate::config::FileCheckConfig::default(),
                 rollback: RollbackConfig::default(),
                 cache: crate::config::CacheConfig::default(),
-                dialect: crate::config::CheckDialect::default(),
+                dialect: crate::config::CheckDialect::default(), dialect_fallback: None,
             }
         }
 
@@ -1151,7 +1151,7 @@ mod tests {
                 file_check: crate::config::FileCheckConfig::default(),
                 rollback: RollbackConfig::default(),
                 cache: crate::config::CacheConfig::default(),
-                dialect: crate::config::CheckDialect::default(),
+                dialect: crate::config::CheckDialect::default(), dialect_fallback: None,
             }
         }
 

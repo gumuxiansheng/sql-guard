@@ -17,8 +17,8 @@ pub enum Commands {
         path: PathBuf,
 
         /// Path to configuration file
-        #[clap(short, long, default_value = "sqlguard.toml")]
-        config: PathBuf,
+        #[clap(short, long)]
+        config: Option<PathBuf>,
 
         /// Output format(s): plain, json, html, all
         #[clap(short, long, default_value = "plain")]
@@ -44,9 +44,15 @@ pub enum Commands {
         #[clap(long)]
         exclude_groups: Option<String>,
 
-        /// Override [dialect] in config: generic / mysql / postgresql / ansi
+        /// Override [dialect] in config: generic / mysql / postgresql / ansi / oracle
         #[clap(long)]
         dialect: Option<String>,
+
+        /// Override [dialect_fallback] in config (second-choice dialect for
+        /// per-statement fallback). generic / mysql / postgresql / ansi / oracle.
+        /// Pass `generic` to disable fallback (chain collapses to "primary -> Generic").
+        #[clap(long)]
+        dialect_fallback: Option<String>,
 
         /// Force-enable file cache (overrides [cache].enabled = false).
         /// Mutually exclusive with --no-cache.
@@ -69,8 +75,8 @@ pub enum Commands {
         path: PathBuf,
 
         /// Path to configuration file.
-        #[clap(short, long, default_value = "sqlguard.toml")]
-        config: PathBuf,
+        #[clap(short, long)]
+        config: Option<PathBuf>,
 
         /// Output directory for sql-manifest.json.
         #[clap(short, long, default_value = ".")]
@@ -102,8 +108,8 @@ pub enum Commands {
         path: PathBuf,
 
         /// Path to configuration file.
-        #[clap(short, long, default_value = "sqlguard.toml")]
-        config: PathBuf,
+        #[clap(short, long)]
+        config: Option<PathBuf>,
 
         /// Output format(s): plain, json, html, sarif, all.
         #[clap(short, long, default_value = "plain")]
@@ -129,9 +135,15 @@ pub enum Commands {
         #[clap(long)]
         exclude_groups: Option<String>,
 
-        /// Override [dialect] in config: generic / mysql / postgresql / ansi
+        /// Override [dialect] in config: generic / mysql / postgresql / ansi / oracle
         #[clap(long)]
         dialect: Option<String>,
+
+        /// Override [dialect_fallback] in config (second-choice dialect for
+        /// per-statement fallback). generic / mysql / postgresql / ansi / oracle.
+        /// Pass `generic` to disable fallback (chain collapses to "primary -> Generic").
+        #[clap(long)]
+        dialect_fallback: Option<String>,
     },
     /// Generate backup/rollback scripts for DDL/DML files.
     ///
@@ -144,8 +156,8 @@ pub enum Commands {
         path: PathBuf,
 
         /// Path to configuration file.
-        #[clap(short, long, default_value = "sqlguard.toml")]
-        config: PathBuf,
+        #[clap(short, long)]
+        config: Option<PathBuf>,
 
         /// Output directory for backup.sql / rollback.sql / manifest / cleanup.
         #[clap(short, long, default_value = ".")]
