@@ -477,12 +477,17 @@ pub struct RollbackConfig {
     /// 备份模式：auto（默认）/ full / incremental
     #[serde(default = "default_backup_mode")]
     pub backup_mode: String,
+    /// ★ per-file 输出后缀：每个源 SQL 文件生成 `<stem>.<backup_file>`（如 `users.backup.sql`）。
+    /// 输出路径镜像输入目录结构（相对于 target_dir），写在 output_dir 下对应子目录。
     #[serde(default = "default_backup_file")]
     pub backup_file: String,
+    /// ★ per-file 输出后缀：每个源 SQL 文件生成 `<stem>.<rollback_file>`（如 `users.rollback.sql`）。
     #[serde(default = "default_rollback_file")]
     pub rollback_file: String,
+    /// 全局 manifest 文件名（跨文件汇总，写在 output_dir 根目录）。
     #[serde(default = "default_manifest_file")]
     pub manifest_file: String,
+    /// 全局 cleanup 文件名（跨文件汇总，写在 output_dir 根目录）。
     #[serde(default = "default_cleanup_file")]
     pub cleanup_file: String,
     /// 仅 PG 生效，MySQL 方言忽略（DDL 隐式提交无效）

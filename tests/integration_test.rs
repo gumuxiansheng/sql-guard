@@ -2183,9 +2183,16 @@ fn test_gen_rollback_end_to_end() {
         stderr
     );
 
-    // 4 个输出文件存在
-    assert!(Path::new(&format!("{}/out/backup.sql", dir)).exists(), "backup.sql 应存在");
-    assert!(Path::new(&format!("{}/out/rollback.sql", dir)).exists(), "rollback.sql 应存在");
+    // ★ per-file 输出：backup/rollback 镜像输入目录结构，cleanup/manifest 在 output_dir 根目录
+    // 输入文件: sql/dml/users.sql → 输出: out/sql/dml/users.backup.sql + users.rollback.sql
+    assert!(
+        Path::new(&format!("{}/out/sql/dml/users.backup.sql", dir)).exists(),
+        "users.backup.sql 应存在（镜像输入目录结构）"
+    );
+    assert!(
+        Path::new(&format!("{}/out/sql/dml/users.rollback.sql", dir)).exists(),
+        "users.rollback.sql 应存在（镜像输入目录结构）"
+    );
     assert!(Path::new(&format!("{}/out/cleanup.sql", dir)).exists(), "cleanup.sql 应存在");
     assert!(Path::new(&format!("{}/out/rollback-manifest.json", dir)).exists(), "manifest 应存在");
 
@@ -2200,17 +2207,17 @@ fn test_gen_rollback_end_to_end() {
         "items 应有 3 条"
     );
 
-    // backup.sql 应包含 bks_ 备份表（UPDATE/DELETE 需要全表备份）
-    let backup_sql = std::fs::read_to_string(format!("{}/out/backup.sql", dir)).unwrap();
+    // users.backup.sql 应包含 bks_ 备份表（UPDATE/DELETE 需要全表备份）
+    let backup_sql = std::fs::read_to_string(format!("{}/out/sql/dml/users.backup.sql", dir)).unwrap();
     assert!(
         backup_sql.contains("bks_users_") && backup_sql.contains("CREATE TABLE"),
-        "backup.sql 应包含 bks_ 备份表 CREATE 语句"
+        "users.backup.sql 应包含 bks_ 备份表 CREATE 语句"
     );
 
-    // rollback.sql 应包含 DELETE/UPDATE/INSERT 回滚语句
-    let rollback_sql = std::fs::read_to_string(format!("{}/out/rollback.sql", dir)).unwrap();
-    assert!(rollback_sql.contains("DELETE FROM"), "rollback.sql 应包含 DELETE 回滚");
-    assert!(rollback_sql.contains("UPDATE"), "rollback.sql 应包含 UPDATE 回滚");
+    // users.rollback.sql 应包含 DELETE/UPDATE/INSERT 回滚语句
+    let rollback_sql = std::fs::read_to_string(format!("{}/out/sql/dml/users.rollback.sql", dir)).unwrap();
+    assert!(rollback_sql.contains("DELETE FROM"), "users.rollback.sql 应包含 DELETE 回滚");
+    assert!(rollback_sql.contains("UPDATE"), "users.rollback.sql 应包含 UPDATE 回滚");
 
     let _ = std::fs::remove_dir_all(dir);
 }

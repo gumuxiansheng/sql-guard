@@ -752,11 +752,31 @@ fn run_gen_rollback(
         pairs.iter().filter(|p| !p.safety.reliable).count()
     );
 
-    // P1-2：按 lock_scope 统一回填 safety.lock_type 及衍生标志（在 render/manifest 之前）
-    crate::rollback::render::finalize_safety(&mut pairs, &config.rollback);
+    // ★ 按源文件分组（保持首次出现顺序），用于 per-file 输出
+    let mut file_groups: Vec<(String, Vec<crate::rollback::BackupRollbackPair>)> = Vec::new();
+    let mut file_index: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for pair in pairs.drain(..) {
+        let file = pair.source.file.clone();
+        if let Some(&idx) = file_index.get(&file) {
+            file_groups[idx].1.push(pair);
+        } else {
+            file_index.insert(file.clone(), file_groups.len());
+            file_groups.push((file, vec![pair]));
+        }
+    }
 
-    // R4 预检（需 pairs 已生成）：binlog_strategy=auto + 含 DDL → 报错退出
-    let prereq_errors = crate::rollback::render::validate_render_prerequisites(&pairs, &config.rollback);
+    // P1-2：per-file finalize_safety（每个文件独立判定 lock_type，DML-only 文件不被
+    // 其他文件的 DDL 拉高锁级别）
+    for (_file, group) in &mut file_groups {
+        crate::rollback::render::finalize_safety(group, &config.rollback);
+    }
+
+    // R4 预检：per-file 校验，聚合错误
+    let mut prereq_errors: Vec<String> = Vec::new();
+    for (_file, group) in &file_groups {
+        let errs = crate::rollback::render::validate_render_prerequisites(group, &config.rollback);
+        prereq_errors.extend(errs);
+    }
     if !prereq_errors.is_empty() {
         for e in &prereq_errors {
             eprintln!("Prerequisite error: {}", e);
@@ -764,28 +784,62 @@ fn run_gen_rollback(
         return Ok(2);
     }
 
-    // 渲染输出
-    let backup_sql = crate::rollback::render::render_backup(&pairs, &config.rollback, &*renderer);
-    let rollback_sql = crate::rollback::render::render_rollback(&pairs, &config.rollback, &*renderer);
-    let cleanup_sql = crate::rollback::render::render_cleanup(&pairs, &config.rollback, &*renderer);
+    // ★ per-file 渲染：在 output_dir 下按输入目录结构镜像，每个源文件生成
+    // <stem>.backup.sql / <stem>.rollback.sql（backup_file/rollback_file 作为后缀）
+    for (file_path_str, group) in &file_groups {
+        if group.is_empty() {
+            continue;
+        }
+        let file_path = std::path::Path::new(file_path_str);
+        // 计算相对于 target_dir 的相对路径，用于镜像目录结构
+        let rel_path = file_path
+            .strip_prefix(&absolute_target)
+            .unwrap_or(std::path::Path::new(
+                file_path.file_name().unwrap_or_default(),
+            ));
+        let parent_dir = rel_path.parent().unwrap_or(std::path::Path::new(""));
+        let stem = rel_path
+            .file_stem()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_else(|| "unknown".to_string());
 
-    let backup_path = absolute_output.join(&config.rollback.backup_file);
-    let rollback_path = absolute_output.join(&config.rollback.rollback_file);
+        let out_dir = absolute_output.join(parent_dir);
+        fs::create_dir_all(&out_dir).map_err(SqlGuardError::IoError)?;
+
+        let backup_sql =
+            crate::rollback::render::render_backup(group, &config.rollback, &*renderer);
+        let rollback_sql =
+            crate::rollback::render::render_rollback(group, &config.rollback, &*renderer);
+
+        let backup_out = out_dir.join(format!("{}.{}", stem, config.rollback.backup_file));
+        let rollback_out = out_dir.join(format!("{}.{}", stem, config.rollback.rollback_file));
+
+        fs::write(&backup_out, &backup_sql).map_err(SqlGuardError::IoError)?;
+        fs::write(&rollback_out, &rollback_sql).map_err(SqlGuardError::IoError)?;
+
+        eprintln!("Wrote {}", backup_out.display());
+        eprintln!("Wrote {}", rollback_out.display());
+    }
+
+    // 全局 cleanup + manifest（跨文件汇总，写在 output_dir 根目录）
+    let all_pairs: Vec<crate::rollback::BackupRollbackPair> = file_groups
+        .into_iter()
+        .flat_map(|(_, g)| g)
+        .collect();
+
+    let cleanup_sql =
+        crate::rollback::render::render_cleanup(&all_pairs, &config.rollback, &*renderer);
     let cleanup_path = absolute_output.join(&config.rollback.cleanup_file);
-    let manifest_path = absolute_output.join(&config.rollback.manifest_file);
-
-    fs::write(&backup_path, &backup_sql).map_err(SqlGuardError::IoError)?;
-    fs::write(&rollback_path, &rollback_sql).map_err(SqlGuardError::IoError)?;
     fs::write(&cleanup_path, &cleanup_sql).map_err(SqlGuardError::IoError)?;
 
     // 构建并写 manifest（★ P1-2：传入 rc 以透出 assert_on_schema_mismatch / on_partitioned_table）
-    let manifest = crate::rollback::Manifest::from_pairs(&pairs, dialect.as_str(), &config.rollback, Vec::new());
+    let manifest =
+        crate::rollback::Manifest::from_pairs(&all_pairs, dialect.as_str(), &config.rollback, Vec::new());
     let manifest_json = crate::rollback::serialize_manifest(&manifest)
         .map_err(|e| SqlGuardError::CheckError(format!("Failed to serialize manifest: {}", e)))?;
+    let manifest_path = absolute_output.join(&config.rollback.manifest_file);
     fs::write(&manifest_path, &manifest_json).map_err(SqlGuardError::IoError)?;
 
-    eprintln!("Wrote {}", backup_path.display());
-    eprintln!("Wrote {}", rollback_path.display());
     eprintln!("Wrote {}", cleanup_path.display());
     eprintln!("Wrote {}", manifest_path.display());
 
