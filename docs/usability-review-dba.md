@@ -9,7 +9,7 @@
 
 ## 0. 一句话结论
 
-**工程底子不错，但「宣传的能力」和「实际能用的能力」之间存在明显落差。** 作为静态 SQL lint 工具，它在「单文件二进制 + AST 精确规则 + MyBatis Mapper 支持 + PR 增量校验」这几点是真有差异化价值的；但最被大肆宣传的「备份回滚自动生成」在当前 CLI 里**根本没有被调用（纯死代码）**，而「动态分析」其实是一个**只支持 GaussDB/openGauss 的分离 Java 工程**，对 MySQL/PG 用户并不开箱即用。再加上文档与代码严重脱节（规则数量、孤儿规则）、缺少 DBA 常用的「行内豁免 / 自动修复 / SARIF / 方言选择」等 ergonomics，一个挑剔的 DBA 会先给一个「观望，不急着上生产」的结论。
+**工程底子不错，但「宣传的能力」和「实际能用的能力」之间存在明显落差。** 作为静态 SQL lint 工具，它在「单文件二进制 + AST 精确规则 + MyBatis Mapper 支持 + PR 增量校验」这几点是真有差异化价值的；但最被大肆宣传的「备份回滚自动生成」在当前 CLI 里**根本没有被调用（纯死代码）**，而「动态分析」其实是一个**只支持 GaussDB/openGauss 的分离 Java 工程**，对 MySQL/PG 用户并不开箱即用。再加上文档与代码严重脱节（规则数量、孤儿规则）、缺少 DBA 常用的「行内豁免 / SARIF / 方言选择」等 ergonomics，一个挑剔的 DBA 会先给一个「观望，不急着上生产」的结论。
 
 ---
 
@@ -68,7 +68,6 @@
 | 能力                                               | 是否有        | 影响                                                                                                                             |
 | ------------------------------------------------ | ---------- | ------------------------------------------------------------------------------------------------------------------------------ |
 | **行内豁免**（类似 `--noqa` / `/* sqlguard-disable */`） | ❌ 无        | 迁移脚本里偶尔「故意写 `SELECT *`」「故意不带 WHERE 的全表 UPDATE」无法逐行豁免，只能全局 `--exclude-rules` 关掉整条规则。Legacy 存量 SQL 一开 P0 就满屏红，且无粒度豁免 → 逼团队关规则或放弃 |
-| **自动修复 `--fix`**                                 | ❌ 无        | SQLFluff 能自动修格式/部分规则；SqlGuard 只报不改，数百条存量 style 违规要手工修                                                                          |
 | **SARIF 输出**                                     | ❌ 无        | 无法接入 GitHub Advanced Security / Azure DevOps / GitLab code scanning 的代码扫描面板（现代 CI 的硬需求）                                        |
 | **方言选择（针对 check）**                               | ❌ 无（见 2.3） |                                                                                                                                |
 | **缓存 / 增量扫描（非 git）**                             | ❌ 无        | 每次 `check` 重解析全部文件、重建引擎；大仓库（数百 SQL）会慢。`check-diff` 即便只查改动，也从头解析                                                                |
@@ -136,7 +135,7 @@ SqlGuard 想同时吃两块蛋糕：**(A) 静态 SQL lint（CI 红线）** 和 *
 
 - **vs SQLFluff（最直接的静态 lint 对手）**
   - SqlGuard 赢：① 单二进制零依赖、更适合 CI；② AST 精确规则（SQLFluff 也有 parser，但 SqlGuard 的 Rhai 可写任意复杂逻辑）；③ **原生 MyBatis Mapper 支持**（SQLFluff 不解析 MyBatis XML）。
-  - SqlGuard 输：① 方言覆盖（SQLFluff 20+ 方言，SqlGuard 无方言选择）；② `--fix` 自动修复；③ SARIF；④ 生态/社区/文档成熟度；⑤ 行内豁免。
+  - SqlGuard 输：① 方言覆盖（SQLFluff 20+ 方言，SqlGuard 无方言选择）；② SARIF；③ 生态/社区/文档成熟度；④ 行内豁免。
 - **vs Yearning / goInception（上线审核+回滚对手）**
   - SqlGuard 的**静态回滚生成**（不依赖 binlog、无需连库、能处理 CREATE TABLE LIKE 原子切换）理念上更优雅、更安全；但**完全未接入 CLI**，而 goInception/Yearning 是生产验证、开箱即用的。SqlGuard 还**缺审批流/工单/权限/执行**这一整个平台层——这是 DBA 真正 daily driver 的部分。
 - **vs SOAR（动态分析对手）**
