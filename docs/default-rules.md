@@ -172,22 +172,22 @@ CREATE TABLE report_snapshot AS SELECT * FROM users;
 | 严重度 | `warning` |
 | 检测方式 | AST（精确） |
 
-**校验原因**：索引命名规范化，便于识别索引类型与覆盖列：
-- 非唯一索引：`idx_<col>[_<col>]`
-- 唯一索引：`uk_<col>[_<col>]`
+**校验原因**：索引命名规范化，便于识别索引类型、所属表与覆盖列，同时避免跨表同名冲突（PostgreSQL/Oracle 等要求索引名在 schema 内唯一）：
+- 非唯一索引：`idx_<table>_<col>[_<col>]`
+- 唯一索引：`uk_<table>_<col>[_<col>]`
 - 主键：`pk_<table>`
 
 **反面案例**：
 ```sql
-CREATE TABLE t (a INT, b INT, INDEX my_idx (a, b));      -- 应为 idx_a_b
-CREATE UNIQUE INDEX my_uk ON t (b);                      -- 应为 uk_b
+CREATE TABLE t (a INT, b INT, INDEX my_idx (a, b));      -- 应为 idx_t_a_b
+CREATE UNIQUE INDEX my_uk ON t (b);                      -- 应为 uk_t_b
 CREATE TABLE t2 (id INT, PRIMARY KEY pk_t (id));         -- 应为 pk_t2
 ```
 
 **正面案例**：
 ```sql
-CREATE TABLE t (a INT, b INT, INDEX idx_a_b (a, b));
-CREATE UNIQUE INDEX uk_b ON t (b);
+CREATE TABLE t (a INT, b INT, INDEX idx_t_a_b (a, b));
+CREATE UNIQUE INDEX uk_t_b ON t (b);
 CREATE TABLE t2 (id INT, PRIMARY KEY pk_t2 (id));
 ```
 
@@ -210,17 +210,17 @@ CREATE TABLE t2 (id INT, PRIMARY KEY pk_t2 (id));
 
 **反面案例**：
 ```sql
--- idx_a 是 idx_a_b 的最左前缀，冗余
-CREATE TABLE t (id INT PRIMARY KEY, a INT, b INT, INDEX idx_a (a), INDEX idx_a_b (a, b));
--- idx_id 与主键列完全相同，冗余
-CREATE TABLE t2 (id INT PRIMARY KEY, a INT, INDEX idx_id (id));
+-- idx_t_a 是 idx_t_a_b 的最左前缀，冗余
+CREATE TABLE t (id INT PRIMARY KEY, a INT, b INT, INDEX idx_t_a (a), INDEX idx_t_a_b (a, b));
+-- idx_t2_id 与主键列完全相同，冗余
+CREATE TABLE t2 (id INT PRIMARY KEY, a INT, INDEX idx_t2_id (id));
 ```
 
 **正面案例**：
 ```sql
-CREATE TABLE t (id INT PRIMARY KEY, a INT, b INT, INDEX idx_a_b (a, b));
+CREATE TABLE t (id INT PRIMARY KEY, a INT, b INT, INDEX idx_t_a_b (a, b));
 -- 唯一索引出于约束语义，不视为冗余
-CREATE TABLE t3 (id INT PRIMARY KEY, a INT, UNIQUE KEY uk_a (a));
+CREATE TABLE t3 (id INT PRIMARY KEY, a INT, UNIQUE KEY uk_t3_a (a));
 ```
 
 ---
