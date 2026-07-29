@@ -49,16 +49,17 @@ pub struct Config {
     ///
     /// 当某条语句用主 `dialect` 解析失败时，按「主方言 → 本字段（若存在）
     /// → Generic」的顺序用后续方言重试解析，首个成功即采用。适用于
-    /// GaussDB 等「PG 内核 + Oracle 外壳」的混合方言：主方言设 `postgresql`、
-    /// 本字段设 `oracle`，即可让含 `CONNECT BY` / `MINUS` / `(+)` 外连接 /
-    /// `DUAL` / `ROWNUM` / `NVL` / `DECODE` 等 Oracle 兼容语法的语句被正确解析。
+    /// GaussDB 等「PG 内核 + Oracle 外壳」的混合方言：推荐直接用
+    /// `dialect = "gaussdb"`（自带词法级 Oracle/MySQL 兼容重写 + Oracle 兜底），
+    /// 也可以显式设 `dialect = "postgresql"` + 本字段 `"oracle"` 作为兼容旧配置。
     ///
     /// 解析优先级与行为：
     /// - 主方言成功 → 直接采用，不再尝试回退（不会用回退方言覆盖已成功的解析）。
     /// - 主方言失败 → 依次用回退链方言重试；全部失败才记 `PARSE_ERROR`。
-    /// - 不配置时：`postgresql` 主方言默认回退到 `oracle`，其余默认仅回退到 `Generic`
-    ///   （见 `CheckDialect::default_fallback`）。CLI `--dialect-fallback` 可覆盖本值，
-    ///   传 `generic` 可显式关闭回退（链退化为「主方言 → Generic」）。
+    /// - 不配置时：`gaussdb` 主方言默认回退到 `oracle`（覆盖重写层未处理的复杂构造），
+    ///   其余主方言（含 `postgresql`）默认仅回退到 `Generic`（见 `CheckDialect::default_fallback`）。
+    ///   CLI `--dialect-fallback` 可覆盖本值，传 `generic` 可显式关闭回退
+    ///   （链退化为「主方言 → Generic」）。
     #[serde(default)]
     pub dialect_fallback: Option<CheckDialect>,
 }
@@ -67,10 +68,15 @@ pub struct Config {
 ///
 /// - `Generic`：默认，兼容大多数标准 SQL（向后兼容）
 /// - `MySql`：支持 MySQL 专有语法（INSERT IGNORE / ON DUPLICATE KEY UPDATE / 反引号标识符等）
-/// - `PostgreSql`：支持 PostgreSQL 扩展语法
+/// - `PostgreSql`：支持 PostgreSQL 扩展语法（保持干净，不再默认回退 Oracle）
 /// - `Ansi`：严格 ANSI SQL
-/// - `Oracle`：支持 Oracle 兼容语法（CONNECT BY / MINUS / `(+)` 外连接 / DUAL / ROWNUM 等），
-///   适用于 GaussDB 等「PG 内核 + Oracle 外壳」的混合方言场景。
+/// - `Oracle`：支持 Oracle 兼容语法（CONNECT BY / MINUS / `(+)` 外连接 / DUAL / ROWNUM 等）
+/// - `GaussDB`：基于 PG 内核，兼容部分 Oracle/MySQL 语法。解析前先对 SQL 文本做
+///   词法级归一化重写（MINUS→EXCEPT、SYSDATE→CURRENT_TIMESTAMP、NVL→COALESCE、
+///   FROM dual→FROM (SELECT 1) AS dual、反引号→双引号），再用 PostgreSqlDialect 解析。
+///   适用于 GaussDB 等「PG 内核 + Oracle/MySQL 外壳」的混合方言场景——
+///   AST 语义 100% 来自 PG 方言，避免原「PG→Oracle 回退」对标识符大小写等语义的污染。
+///   重写后仍解析失败的语句才回退 Oracle，最终由 Generic 兜底。
 #[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum CheckDialect {
@@ -79,6 +85,7 @@ pub enum CheckDialect {
     PostgreSql,
     Ansi,
     Oracle,
+    GaussDB,
 }
 
 impl Default for CheckDialect {
@@ -96,6 +103,7 @@ impl CheckDialect {
             "postgres" | "postgresql" | "pg" => CheckDialect::PostgreSql,
             "ansi" => CheckDialect::Ansi,
             "oracle" => CheckDialect::Oracle,
+            "gaussdb" | "gauss" => CheckDialect::GaussDB,
             _ => CheckDialect::Generic,
         }
     }
@@ -107,19 +115,23 @@ impl CheckDialect {
             CheckDialect::PostgreSql => "postgresql",
             CheckDialect::Ansi => "ansi",
             CheckDialect::Oracle => "oracle",
+            CheckDialect::GaussDB => "gaussdb",
         }
     }
 
     /// 主方言未显式配置 `dialect_fallback` 时采用的默认第二候选。
     ///
-    /// - `PostgreSql` → `Oracle`：覆盖 GaussDB（PG 内核 + Oracle 外壳）的
-    ///   Oracle 兼容语法，开箱即用（只需 `dialect = "postgresql"`）。
+    /// - `GaussDB` → `Oracle`：GaussDB 重写层只覆盖词法级 Oracle/MySQL 兼容构造，
+    ///   重写后仍失败的语句（如 `CONNECT BY`、`(+)` 外连接等复杂构造）由 Oracle 方言兜底。
+    /// - `PostgreSql` → `None`：**保持 PG 方言语义干净**，不再隐式回退 Oracle。
+    ///   原 v0.1.0 行为（PG 默认回退 Oracle）会导致带 Oracle 语法的语句整条走 Oracle
+    ///   解析路径，污染标识符大小写等 PG 语义。需 Oracle 兼容请改用 `dialect = "gaussdb"`。
     /// - 其余 → `None`：仅回退到链尾的 `Generic`。
     ///
     /// CLI `--dialect-fallback` 与配置 `dialect_fallback` 均优先于本默认值。
     pub fn default_fallback(&self) -> Option<CheckDialect> {
         match self {
-            CheckDialect::PostgreSql => Some(CheckDialect::Oracle),
+            CheckDialect::GaussDB => Some(CheckDialect::Oracle),
             _ => None,
         }
     }
@@ -698,5 +710,38 @@ type = "sql"
 "#;
         let cfg: Config = toml::from_str(toml).expect("parse");
         assert_eq!(cfg.dialect, CheckDialect::Generic);
+    }
+
+    #[test]
+    fn config_dialect_gaussdb_from_toml_and_default_fallback() {
+        // GaussDB 方言应能从 toml 解析，且默认回退 Oracle（覆盖重写层未处理的复杂构造）
+        let toml = r#"
+dialect = "gaussdb"
+
+[structure]
+paths = ["x"]
+
+[classification]
+default_type = "other"
+
+[[classification.rules]]
+name = "sql-by-ext"
+pattern = "*.sql"
+type = "sql"
+"#;
+        let cfg: Config = toml::from_str(toml).expect("parse");
+        assert_eq!(cfg.dialect, CheckDialect::GaussDB);
+        assert_eq!(cfg.dialect.as_str(), "gaussdb");
+        // ★ 关键：GaussDB 默认回退 Oracle，PostgreSql 不再默认回退（污染消除）
+        assert_eq!(cfg.dialect.default_fallback(), Some(CheckDialect::Oracle));
+        assert_eq!(CheckDialect::PostgreSql.default_fallback(), None, "PG must NOT default to Oracle anymore");
+    }
+
+    #[test]
+    fn config_dialect_from_str_accepts_gaussdb_aliases() {
+        assert_eq!(CheckDialect::from_str("gaussdb"), CheckDialect::GaussDB);
+        assert_eq!(CheckDialect::from_str("GaussDB"), CheckDialect::GaussDB);
+        assert_eq!(CheckDialect::from_str("gauss"), CheckDialect::GaussDB);
+        assert_eq!(CheckDialect::from_str("GAUSS"), CheckDialect::GaussDB);
     }
 }

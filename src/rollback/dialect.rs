@@ -12,6 +12,10 @@ use std::str::FromStr;
 pub enum Dialect {
     MySql,
     PostgreSql,
+    /// GaussDB：基于 PG 内核，DDL 可事务化、LIKE INCLUDING 子句、ALTER TABLE RENAME、
+    /// DROP CONSTRAINT 等 DDL 行为与 PG 一致。渲染层直接委托 [`PostgreSqlRenderer`]，
+    /// 仅 `name()` 区分用于 manifest 记录。
+    GaussDB,
 }
 
 impl FromStr for Dialect {
@@ -20,8 +24,9 @@ impl FromStr for Dialect {
         match s.to_lowercase().as_str() {
             "mysql" | "mariadb" => Ok(Dialect::MySql),
             "postgres" | "postgresql" | "pg" => Ok(Dialect::PostgreSql),
+            "gaussdb" | "gauss" => Ok(Dialect::GaussDB),
             other => Err(format!(
-                "Unsupported dialect: {} (supported: mysql, postgresql)",
+                "Unsupported dialect: {} (supported: mysql, postgresql, gaussdb)",
                 other
             )),
         }
@@ -33,6 +38,7 @@ impl Dialect {
         match self {
             Dialect::MySql => "mysql",
             Dialect::PostgreSql => "postgresql",
+            Dialect::GaussDB => "gaussdb",
         }
     }
 }
@@ -398,11 +404,70 @@ impl DialectRenderer for PostgreSqlRenderer {
     }
 }
 
+/// GaussDB 渲染器。
+///
+/// GaussDB 基于 PG 内核，DDL 行为（可事务化、`LIKE INCLUDING`、`ALTER TABLE RENAME`、
+/// `DROP CONSTRAINT`、`pg_partitions` 等）与 PG 完全一致，因此全部方法委托
+/// [`PostgreSqlRenderer`]，仅 `name()` 返回 `"gaussdb"` 以便 manifest 记录真实方言。
+///
+/// 如未来 GaussDB 出现与 PG 不同的渲染需求（如分布键语法），可在本结构体中
+/// 覆写个别方法，而不影响 PG 路径。
+pub struct GaussDBRenderer;
+
+impl DialectRenderer for GaussDBRenderer {
+    fn quote_ident(&self, name: &str) -> String {
+        PostgreSqlRenderer.quote_ident(name)
+    }
+    fn create_table_like_clause(&self, source_table: &str) -> String {
+        PostgreSqlRenderer.create_table_like_clause(source_table)
+    }
+    fn drop_index(&self, index_name: &str, table_name: &str) -> String {
+        PostgreSqlRenderer.drop_index(index_name, table_name)
+    }
+    fn rename_table(&self, old: &str, new: &str) -> String {
+        PostgreSqlRenderer.rename_table(old, new)
+    }
+    fn drop_primary_key(&self, table: &str, constraint_name: Option<&str>) -> String {
+        PostgreSqlRenderer.drop_primary_key(table, constraint_name)
+    }
+    fn partial_like_warning(&self) -> String {
+        PostgreSqlRenderer.partial_like_warning()
+    }
+    fn name(&self) -> &'static str {
+        "gaussdb"
+    }
+    fn atomic_ddl_rollback_strategy(&self, stmt_kind: &str) -> AtomicStrategy {
+        PostgreSqlRenderer.atomic_ddl_rollback_strategy(stmt_kind)
+    }
+    fn render_atomic_rename_rollback(&self, table: &str, bks: &str, shadow: &str) -> String {
+        PostgreSqlRenderer.render_atomic_rename_rollback(table, bks, shadow)
+    }
+    fn render_transactional_rollback(&self, table: &str, bks: &str) -> String {
+        PostgreSqlRenderer.render_transactional_rollback(table, bks)
+    }
+    fn render_rebuild_from_backup_rollback(&self, table: &str, bks: &str) -> String {
+        PostgreSqlRenderer.render_rebuild_from_backup_rollback(table, bks)
+    }
+    fn render_idempotent_backup(&self, table: &str, bks: &str) -> String {
+        PostgreSqlRenderer.render_idempotent_backup(table, bks)
+    }
+    fn render_schema_check(&self, table: &str, bks: &str) -> String {
+        PostgreSqlRenderer.render_schema_check(table, bks)
+    }
+    fn render_partition_check(&self, table: &str) -> String {
+        PostgreSqlRenderer.render_partition_check(table)
+    }
+    fn strip_lock_statements(&self, backup_sql: &str) -> String {
+        PostgreSqlRenderer.strip_lock_statements(backup_sql)
+    }
+}
+
 /// 工厂函数：根据 Dialect 枚举返回对应渲染器。
 pub fn renderer_for(d: Dialect) -> Box<dyn DialectRenderer> {
     match d {
         Dialect::MySql => Box::new(MySqlRenderer),
         Dialect::PostgreSql => Box::new(PostgreSqlRenderer),
+        Dialect::GaussDB => Box::new(GaussDBRenderer),
     }
 }
 
@@ -432,6 +497,9 @@ mod tests {
         assert_eq!(Dialect::from_str("pg").unwrap(), Dialect::PostgreSql);
         assert_eq!(Dialect::from_str("postgres").unwrap(), Dialect::PostgreSql);
         assert_eq!(Dialect::from_str("postgresql").unwrap(), Dialect::PostgreSql);
+        assert_eq!(Dialect::from_str("gaussdb").unwrap(), Dialect::GaussDB);
+        assert_eq!(Dialect::from_str("GaussDB").unwrap(), Dialect::GaussDB);
+        assert_eq!(Dialect::from_str("gauss").unwrap(), Dialect::GaussDB);
         assert!(Dialect::from_str("oracle").is_err());
     }
 
@@ -490,5 +558,28 @@ mod tests {
         assert!(sql.contains("DROP TABLE IF EXISTS `_rb_0001_users`;"), "N5 guard: must DROP shadow before RENAME");
         assert!(sql.contains("CREATE TABLE `_rb_0001_users` LIKE `bks_users_20260731_0001`;"));
         assert!(sql.contains("RENAME TABLE `users` TO `users_old_0001`, `_rb_0001_users` TO `users`;"));
+    }
+
+    #[test]
+    fn gaussdb_renderer_delegates_to_pg() {
+        // GaussDB 渲染层委托 PG，quote_ident/create_table_like_clause/backup 等行为须与 PG 一致
+        let r = GaussDBRenderer;
+        assert_eq!(r.name(), "gaussdb");
+        assert_eq!(r.quote_ident("order"), "\"order\"");
+        assert!(r.create_table_like_clause("users").contains("LIKE \"users\" INCLUDING"));
+        // DDL 回滚策略与 PG 一致：DROP_TABLE → RebuildFromBackup，ALTER → Transactional
+        assert_eq!(r.atomic_ddl_rollback_strategy("DROP_TABLE"), AtomicStrategy::RebuildFromBackup);
+        assert_eq!(r.atomic_ddl_rollback_strategy("ALTER_TABLE"), AtomicStrategy::Transactional);
+        // 幂等 backup 段：与 PG 一致使用 ACCESS SHARE MODE
+        let sql = r.render_idempotent_backup("users", "bks_users_20260731_0001");
+        assert!(sql.contains("LOCK TABLE \"users\" IN ACCESS SHARE MODE;"));
+        assert!(sql.contains("CREATE TABLE \"bks_users_20260731_0001\" (LIKE \"users\""));
+    }
+
+    #[test]
+    fn renderer_for_gaussdb_returns_gaussdb_renderer() {
+        // 工厂函数：GaussDB 方言应返回 GaussDBRenderer（name == "gaussdb"）
+        let r = renderer_for(Dialect::GaussDB);
+        assert_eq!(r.name(), "gaussdb");
     }
 }

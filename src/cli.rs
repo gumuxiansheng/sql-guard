@@ -44,12 +44,12 @@ pub enum Commands {
         #[clap(long)]
         exclude_groups: Option<String>,
 
-        /// Override [dialect] in config: generic / mysql / postgresql / ansi / oracle
+        /// Override [dialect] in config: generic / mysql / postgresql / ansi / oracle / gaussdb
         #[clap(long)]
         dialect: Option<String>,
 
         /// Override [dialect_fallback] in config (second-choice dialect for
-        /// per-statement fallback). generic / mysql / postgresql / ansi / oracle.
+        /// per-statement fallback). generic / mysql / postgresql / ansi / oracle / gaussdb.
         /// Pass `generic` to disable fallback (chain collapses to "primary -> Generic").
         #[clap(long)]
         dialect_fallback: Option<String>,
@@ -135,12 +135,12 @@ pub enum Commands {
         #[clap(long)]
         exclude_groups: Option<String>,
 
-        /// Override [dialect] in config: generic / mysql / postgresql / ansi / oracle
+        /// Override [dialect] in config: generic / mysql / postgresql / ansi / oracle / gaussdb
         #[clap(long)]
         dialect: Option<String>,
 
         /// Override [dialect_fallback] in config (second-choice dialect for
-        /// per-statement fallback). generic / mysql / postgresql / ansi / oracle.
+        /// per-statement fallback). generic / mysql / postgresql / ansi / oracle / gaussdb.
         /// Pass `generic` to disable fallback (chain collapses to "primary -> Generic").
         #[clap(long)]
         dialect_fallback: Option<String>,
@@ -163,7 +163,7 @@ pub enum Commands {
         #[clap(short, long, default_value = ".")]
         output_dir: PathBuf,
 
-        /// Override [rollback].dialect: mysql / postgresql.
+        /// Override [rollback].dialect: mysql / postgresql / gaussdb.
         #[clap(long)]
         dialect: Option<String>,
 

@@ -110,18 +110,26 @@ line_ending_severity = "warning"
 # check 流程使用的 SQL 方言，影响 sqlparser 解析。
 # - generic（默认）：兼容大多数标准 SQL
 # - mysql：支持 MySQL 专有语法（INSERT IGNORE / ON DUPLICATE KEY UPDATE / 反引号标识符等）
-# - postgresql：支持 PostgreSQL 扩展语法
+# - postgresql：支持 PostgreSQL 扩展语法（保持干净，不再默认回退 Oracle）
 # - ansi：严格 ANSI SQL
+# - oracle：支持 Oracle 兼容语法（CONNECT BY / MINUS / (+) 外连接 / DUAL / ROWNUM 等）
+# - gaussdb：基于 PG 内核，兼容部分 Oracle/MySQL 语法（推荐用于 GaussDB / openGauss 等
+#   「PG 内核 + Oracle/MySQL 外壳」的国产库）。解析前自动做词法级归一化重写
+#   （MINUS→EXCEPT、SYSDATE→CURRENT_TIMESTAMP、NVL→COALESCE、FROM dual→子查询、
+#   反引号→双引号），再用 PostgreSqlDialect 解析，AST 语义 100% 来自 PG，
+#   避免原「PG→Oracle 回退」对标识符大小写等 PG 语义的污染。
+#   重写后仍解析失败的语句（如 CONNECT BY、(+) 外连接）自动回退 Oracle 兜底。
 #
-# 可用 CLI `--dialect mysql` 临时覆盖配置。
+# 可用 CLI `--dialect gaussdb` 临时覆盖配置。
 # dialect = "generic"
 
 # ================================================================================
-# 方言回退链第二候选 dialect_fallback（GaussDB 等「PG 内核 + Oracle 外壳」混合方言）
+# 方言回退链第二候选 dialect_fallback（混合方言场景）
 # ================================================================================
 # 某条语句用主 dialect 解析失败时，按「主方言 → 本字段（若存在）→ Generic」顺序
 # 用后续方言重试，首个成功即采用；全部失败才记 PARSE_ERROR。
-# - 不配置时：postgresql 主方言默认回退到 oracle，其余默认仅回退到 Generic。
+# - 不配置时：gaussdb 主方言默认回退到 oracle（覆盖重写层未处理的复杂构造），
+#   其余主方言（含 postgresql）默认仅回退到 Generic。
 # - CLI `--dialect-fallback generic` 可显式关闭回退（链退化为「主方言 → Generic」）。
 # 详解与端到端行为见 docs/dialect-fallback.md。
 # dialect_fallback = "oracle"
@@ -137,7 +145,7 @@ line_ending_severity = "warning"
 #
 # [rollback]
 # enabled = false
-# dialect = "mysql"                  # mysql / postgresql（影响标识符引用、LIKE 语法、RENAME 等）
+# dialect = "mysql"                  # mysql / postgresql / gaussdb（影响标识符引用、LIKE 语法、RENAME 等）
 # backup_mode = "auto"               # auto（DML 增量 + ALTER 按上下文）/ full / incremental
 # backup_file = "backup.sql"         # ★ backup 子目录名（output_dir/backup/ 镜像输入目录结构）
 # rollback_file = "rollback.sql"     # ★ rollback 子目录名（output_dir/rollback/ 镜像输入目录结构）

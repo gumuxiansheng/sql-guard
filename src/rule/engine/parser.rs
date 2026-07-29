@@ -11,6 +11,7 @@ use sqlparser::tokenizer::Token;
 
 use super::analyzer::analyze_query;
 use super::ast::*;
+use super::gaussdb_rewrite;
 use super::scanner::{collect_comments, detect_comma_join_in_sql};
 use crate::config::CheckDialect;
 
@@ -26,17 +27,35 @@ use crate::config::CheckDialect;
 ///   重试，首个成功即采用。
 /// - 全部失败 → 记 `PARSE_ERROR` 语句。
 ///
+/// **GaussDB 主方言特殊处理**：
+/// - 入口处先调用 `gaussdb_rewrite::rewrite_for_pg_parse` 对 SQL 文本做词法级归一化
+///   （MINUS→EXCEPT、SYSDATE→CURRENT_TIMESTAMP、NVL→COALESCE、FROM dual→子查询、
+///   反引号→双引号），重写后的文本用纯 `PostgreSqlDialect` 解析，AST 语义 100% 来自 PG，
+///   避免 Oracle 回退对标识符大小写等 PG 语义的污染。
+/// - 重写后仍解析失败的语句才走 Oracle → Generic 回退链（覆盖 CONNECT BY、(+) 等复杂构造）。
+/// - 行号保真：重写不引入/删除换行符，violation 行号与原文件一致。
+///
 /// 见 [`parse_sql_to_ast`]（2 参封装，回退为 `None`）。
 pub(crate) fn parse_sql_to_ast_fb(
     sql: &str,
     dialect: CheckDialect,
     fallback: Option<CheckDialect>,
 ) -> SqlAst {
-    let chain_enums = build_chain_enums(dialect, fallback);
+    // ★ GaussDB 主方言：先词法重写为 PG 语法，再切到 PostgreSqlDialect 解析。
+    // 回退链保持用户传入的 fallback（GaussDB 默认回退 Oracle），用于兜底重写层未覆盖的构造。
+    let (effective_sql, effective_dialect): (std::borrow::Cow<'_, str>, CheckDialect) =
+        if dialect == CheckDialect::GaussDB {
+            let rewritten = gaussdb_rewrite::rewrite_for_pg_parse(sql);
+            (std::borrow::Cow::Owned(rewritten.sql), CheckDialect::PostgreSql)
+        } else {
+            (std::borrow::Cow::Borrowed(sql), dialect)
+        };
+
+    let chain_enums = build_chain_enums(effective_dialect, fallback);
     let primary = *chain_enums.first().expect("dialect chain must be non-empty");
     let parser_dialect: Box<dyn sqlparser::dialect::Dialect> = box_dialect(primary);
 
-    let mut parser = match Parser::new(&*parser_dialect).try_with_sql(sql) {
+    let mut parser = match Parser::new(&*parser_dialect).try_with_sql(&effective_sql) {
         Ok(p) => p,
         Err(e) => {
             return SqlAst {
@@ -48,7 +67,7 @@ pub(crate) fn parse_sql_to_ast_fb(
         }
     };
 
-    let total_lines = sql.lines().count() as i64;
+    let total_lines = effective_sql.lines().count() as i64;
     let mut statements = Vec::new();
 
     loop {
@@ -64,7 +83,7 @@ pub(crate) fn parse_sql_to_ast_fb(
         let line = peek.span.start.line as i64;
         let column = peek.span.start.column as i64;
         // 主方言尝试前记录本语句起始字节偏移（用于失败回退时切片文本）
-        let start_offset = location_to_byte_offset(sql, peek.span.start.line, peek.span.start.column);
+        let start_offset = location_to_byte_offset(&effective_sql, peek.span.start.line, peek.span.start.column);
 
         // 先尝试主方言
         let mut recovered: Option<Statement> = None;
@@ -91,11 +110,11 @@ pub(crate) fn parse_sql_to_ast_fb(
 
         // ===== 回退链：切片整条语句，依次用后续方言重试 =====
         // 1) 推进主 parser 到下一个 `;`/EOF（重新同步），并记录 `;` 的字节偏移
-        let mut end_offset = sql.len();
+        let mut end_offset = effective_sql.len();
         loop {
             let t = parser.peek_token();
             if t.token == Token::SemiColon {
-                end_offset = location_to_byte_offset(sql, t.span.start.line, t.span.start.column);
+                end_offset = location_to_byte_offset(&effective_sql, t.span.start.line, t.span.start.column);
                 parser.next_token();
                 break;
             } else if t.token == Token::EOF {
@@ -104,9 +123,9 @@ pub(crate) fn parse_sql_to_ast_fb(
             parser.next_token();
         }
         let stmt_text: &str = if end_offset > start_offset {
-            &sql[start_offset..end_offset]
+            &effective_sql[start_offset..end_offset]
         } else {
-            sql
+            &effective_sql
         };
         // 2) 用回退链方言（跳过主方言）解析；首个成功即采用
         for &fb in &chain_enums[1..] {
@@ -145,6 +164,7 @@ pub(crate) fn parse_sql_to_ast_fb(
     SqlAst {
         statements,
         parse_error: None,
+        // 逗号 JOIN 检测与注释收集基于原始 SQL 文本（与重写无关，保持原文件特征）
         has_comma_join_anywhere: detect_comma_join_in_sql(sql),
         comments: collect_comments(sql),
     }
@@ -165,11 +185,15 @@ fn build_chain_enums(primary: CheckDialect, fallback: Option<CheckDialect>) -> V
 }
 
 /// 把 `CheckDialect` 枚举构造为 sqlparser 的 `Box<dyn Dialect>`。
+///
+/// 注意：`GaussDB` 在 `parse_sql_to_ast_fb` 入口处已被重写层归一化并切到
+/// `PostgreSql`，本函数正常流程不会收到 `GaussDB`。此处返回 `PostgreSqlDialect`
+/// 作为防御性兜底（与入口处理一致），避免 match 不穷尽。
 fn box_dialect(d: CheckDialect) -> Box<dyn sqlparser::dialect::Dialect> {
     match d {
         CheckDialect::Generic => Box::new(GenericDialect {}),
         CheckDialect::MySql => Box::new(MySqlDialect {}),
-        CheckDialect::PostgreSql => Box::new(PostgreSqlDialect {}),
+        CheckDialect::PostgreSql | CheckDialect::GaussDB => Box::new(PostgreSqlDialect {}),
         CheckDialect::Ansi => Box::new(AnsiDialect {}),
         CheckDialect::Oracle => Box::new(OracleDialect {}),
     }
@@ -1054,9 +1078,12 @@ pub(crate) fn convert_statement(stmt: &Statement, line: i64, column: i64, end_li
 }
 
 /// 2 参封装：等价于 [`parse_sql_to_ast_fb`] 且回退方言为 `None`
-/// （即「主方言 → Generic」；对 `postgresql` 主方言仍是「→ Oracle → Generic」，
-/// 因为 `default_fallback` 在此处不生效，仅 `CheckDialect` 的 `default_fallback`
-/// 在 `main.rs` 解析 CLI/配置时应用）。
+/// （即「主方言 → Generic」；`default_fallback` 在此处不生效，仅 `CheckDialect`
+/// 的 `default_fallback` 在 `main.rs` 解析 CLI/配置时应用）。
+///
+/// 注意：对 `gaussdb` 主方言，本函数仍会触发词法重写层（重写为 PG 语法后
+/// 用 `PostgreSqlDialect` 解析），但回退链退化为「PG → Generic」——
+/// 生产环境建议用 [`parse_sql_to_ast_fb`] 并传入 `Some(Oracle)` 以获得 Oracle 兜底。
 ///
 /// 供单元测试与 `replay_export` 等不需要回退链的场景直接调用。
 pub(crate) fn parse_sql_to_ast(sql: &str, dialect: CheckDialect) -> SqlAst {
@@ -1419,5 +1446,199 @@ mod tests {
             id_col.is_auto_increment,
             "GENERATED AS IDENTITY column must be flagged is_auto_increment"
         );
+    }
+
+    // ===== GaussDB 方言：重写层 + PG 语义 =====
+
+    #[test]
+    fn test_gaussdb_dialect_parses_minus_with_pg_semantics() {
+        // GaussDB 主方言：MINUS 被重写为 EXCEPT，用纯 PG 方言解析成功。
+        // 与旧「PG→Oracle 回退」路径的关键区别：AST 语义 100% 来自 PG，无 Oracle 污染。
+        let ast = parse_sql_to_ast_fb(
+            "SELECT a FROM t1 MINUS SELECT a FROM t2",
+            CheckDialect::GaussDB,
+            Some(CheckDialect::Oracle),
+        );
+        assert!(!ast.has_parse_error(), "GaussDB should parse MINUS via rewrite; kinds={:?}", ast.statements.iter().map(|s| &s.kind).collect::<Vec<_>>());
+        assert_eq!(ast.statements[0].kind, "SELECT");
+        let sel = ast.statements[0].select.as_ref().unwrap();
+        assert!(sel.except, "MINUS (rewritten to EXCEPT) should be detected as except");
+    }
+
+    #[test]
+    fn test_gaussdb_dialect_preserves_pg_semantics() {
+        // ★ 反污染验证：GaussDB 方言下，重写层覆盖的构造（NVL/SYSDATE）走纯 PG 路径解析，
+        // 不触发 Oracle 回退（因为重写后 PG 能直接解析成功）。
+        //
+        // 反污染的核心价值：重写层把 Oracle/MySQL 构造归一化为 PG 等价语法，
+        // 使 AST 语义 100% 来自 PG 方言，避免原「PG→Oracle 回退」对整条语句
+        // 语义的接管（标识符大小写折叠、伪表归属等）。
+        //
+        // 用 NVL + SYSDATE（重写为 COALESCE + CURRENT_TIMESTAMP），PG 方言直接解析成功，
+        // 表名保留 PG 语义（不折叠为大写 USERS）。
+        let sql = "SELECT NVL(name, 'x') FROM Users WHERE created > SYSDATE";
+        let gaussdb_ast = parse_sql_to_ast_fb(sql, CheckDialect::GaussDB, Some(CheckDialect::Oracle));
+        assert!(!gaussdb_ast.has_parse_error());
+        assert_eq!(gaussdb_ast.statements.len(), 1);
+        assert_eq!(gaussdb_ast.statements[0].kind, "SELECT");
+        let sel = gaussdb_ast.statements[0].select.as_ref().unwrap();
+        // PG 语义：未加引号标识符不折叠为大写。`Users` 不应变成 `USERS`（Oracle 污染标志）。
+        assert!(
+            sel.from_table.iter().all(|t| t != "USERS"),
+            "GaussDB (PG semantics) should NOT fold 'Users' to uppercase 'USERS'; got from_table={:?}",
+            sel.from_table
+        );
+    }
+
+    #[test]
+    fn test_gaussdb_dialect_parses_sysdate_and_nvl() {
+        // SYSDATE → CURRENT_TIMESTAMP、NVL( → COALESCE( 重写后 PG 方言应成功解析
+        let ast = parse_sql_to_ast_fb(
+            "SELECT NVL(name, 'unknown') FROM t WHERE created > SYSDATE",
+            CheckDialect::GaussDB,
+            Some(CheckDialect::Oracle),
+        );
+        assert!(!ast.has_parse_error(), "GaussDB should parse NVL/SYSDATE via rewrite; kinds={:?}", ast.statements.iter().map(|s| &s.kind).collect::<Vec<_>>());
+        assert_eq!(ast.statements[0].kind, "SELECT");
+    }
+
+    #[test]
+    fn test_gaussdb_dialect_parses_from_dual() {
+        // FROM dual → FROM (SELECT 1) AS dual 重写后 PG 方言应成功解析
+        let ast = parse_sql_to_ast_fb(
+            "SELECT 1 FROM dual",
+            CheckDialect::GaussDB,
+            Some(CheckDialect::Oracle),
+        );
+        assert!(!ast.has_parse_error(), "GaussDB should parse FROM dual via rewrite; kinds={:?}", ast.statements.iter().map(|s| &s.kind).collect::<Vec<_>>());
+        assert_eq!(ast.statements[0].kind, "SELECT");
+    }
+
+    #[test]
+    fn test_gaussdb_dialect_parses_backtick_identifier() {
+        // 反引号 → 双引号重写后 PG 方言应成功解析。
+        // 用 `SELECT * FROM \`order\`` 让 order 作为表名，验证 from_table 提取正确。
+        let ast = parse_sql_to_ast_fb(
+            "SELECT * FROM `order`",
+            CheckDialect::GaussDB,
+            Some(CheckDialect::Oracle),
+        );
+        assert!(!ast.has_parse_error(), "GaussDB should parse backtick identifier via rewrite; kinds={:?}", ast.statements.iter().map(|s| &s.kind).collect::<Vec<_>>());
+        assert_eq!(ast.statements[0].kind, "SELECT");
+        // PG 语义：双引号标识符保留大小写。analyzer 提取的表名可能带引号（如 "\"order\""），
+        // 关键是包含 "order" 且不为大写 "ORDER"（Oracle 会折叠为大写）。
+        let sel = ast.statements[0].select.as_ref().unwrap();
+        assert!(
+            sel.from_table.iter().any(|t| t.contains("order") && !t.contains("ORDER")),
+            "GaussDB should preserve backtick-rewritten identifier case (not folded to uppercase); got from_table={:?}",
+            sel.from_table
+        );
+    }
+
+    #[test]
+    fn test_gaussdb_dialect_mixed_oracle_mysql_constructs() {
+        // 混合 Oracle + MySQL 语法：全部经重写层归一化后 PG 方言解析成功
+        let ast = parse_sql_to_ast_fb(
+            "SELECT `order`, NVL(name, 'x') FROM t WHERE created > SYSDATE MINUS SELECT a FROM dual",
+            CheckDialect::GaussDB,
+            Some(CheckDialect::Oracle),
+        );
+        assert!(!ast.has_parse_error(), "GaussDB should parse mixed Oracle/MySQL constructs; kinds={:?}", ast.statements.iter().map(|s| &s.kind).collect::<Vec<_>>());
+        assert_eq!(ast.statements.len(), 1);
+        assert_eq!(ast.statements[0].kind, "SELECT");
+        let sel = ast.statements[0].select.as_ref().unwrap();
+        assert!(sel.except, "MINUS should be detected as except after rewrite");
+    }
+
+    #[test]
+    fn test_gaussdb_dialect_falls_back_to_oracle_for_connect_by() {
+        // CONNECT BY 是重写层未覆盖的复杂 Oracle 构造，应通过 Oracle 回退兜底解析。
+        // 这验证了 GaussDB 方言的回退链：重写后 PG 失败 → Oracle 兜底成功。
+        let ast = parse_sql_to_ast_fb(
+            "SELECT empno FROM emp CONNECT BY PRIOR empno = mgr START WITH empno = 1",
+            CheckDialect::GaussDB,
+            Some(CheckDialect::Oracle),
+        );
+        assert!(!ast.has_parse_error(), "GaussDB should parse CONNECT BY via Oracle fallback; kinds={:?}", ast.statements.iter().map(|s| &s.kind).collect::<Vec<_>>());
+        assert_eq!(ast.statements[0].kind, "SELECT");
+    }
+
+    #[test]
+    fn test_postgresql_no_longer_falls_back_to_oracle_by_default() {
+        // ★ 破坏性变更验证：PG 主方言不再默认回退 Oracle（default_fallback 改为 None）。
+        //
+        // 用 `(+)` 老式外连接语法——这是只有 OracleDialect 能解析、Generic 也无法兜底的构造
+        // （见 docs/dialect-fallback.md §五：Oracle 回退真正独力救回来的是 `(+)`）。
+        //
+        // 旧链 `[PG, Oracle, Generic]`：PG 失败 → Oracle 成功 → SELECT
+        // 新链 `[PG, Generic]`（default_fallback=None）：PG 失败 → Generic 失败 → PARSE_ERROR
+        let ast = parse_sql_to_ast_fb(
+            "SELECT * FROM dept d, emp e WHERE d.id = e.dept_id(+)",
+            CheckDialect::PostgreSql,
+            None, // 模拟 default_fallback 的新行为
+        );
+        assert!(
+            ast.statements.iter().any(|s| s.kind == "PARSE_ERROR"),
+            "PG with no fallback should NOT parse (+) outer join (Oracle no longer default fallback); got kinds={:?}",
+            ast.statements.iter().map(|s| &s.kind).collect::<Vec<_>>()
+        );
+
+        // 对照组：显式配 dialect_fallback=oracle 时，(+) 应被 Oracle 成功解析
+        let ast2 = parse_sql_to_ast_fb(
+            "SELECT * FROM dept d, emp e WHERE d.id = e.dept_id(+)",
+            CheckDialect::PostgreSql,
+            Some(CheckDialect::Oracle),
+        );
+        assert!(
+            !ast2.has_parse_error() && ast2.statements.iter().any(|s| s.kind == "SELECT"),
+            "PG with explicit Oracle fallback should parse (+); got kinds={:?}",
+            ast2.statements.iter().map(|s| &s.kind).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_gaussdb_dialect_pure_pg_sql_unchanged() {
+        // 纯 PG 语法 SQL 用 GaussDB 方言解析：重写层不改写，PG 方言直接成功
+        let ast = parse_sql_to_ast_fb(
+            "SELECT id, name FROM users WHERE id = $1",
+            CheckDialect::GaussDB,
+            Some(CheckDialect::Oracle),
+        );
+        assert!(!ast.has_parse_error());
+        assert_eq!(ast.statements.len(), 1);
+        assert_eq!(ast.statements[0].kind, "SELECT");
+    }
+
+    #[test]
+    fn test_gaussdb_dialect_parses_alter_add_parens() {
+        // Oracle 风格 ALTER TABLE t ADD (c1 INT, c2 VARCHAR(10))
+        // 重写为 ALTER TABLE t ADD COLUMN c1 INT, ADD COLUMN c2 VARCHAR(10) 后 PG 解析成功
+        let ast = parse_sql_to_ast_fb(
+            "ALTER TABLE t ADD (c1 INT, c2 VARCHAR(10))",
+            CheckDialect::GaussDB,
+            Some(CheckDialect::Oracle),
+        );
+        assert!(!ast.has_parse_error(), "GaussDB should parse ALTER TABLE ADD (...) via rewrite; kinds={:?}", ast.statements.iter().map(|s| &s.kind).collect::<Vec<_>>());
+        assert_eq!(ast.statements.len(), 1);
+        assert_eq!(ast.statements[0].kind, "ALTER_TABLE");
+        let alter = ast.statements[0].alter_table.as_ref().unwrap();
+        // 应有两个 ADD COLUMN 操作
+        let add_count = alter
+            .operations
+            .iter()
+            .filter(|op| op.operation_type == "ADD_COLUMN")
+            .count();
+        assert_eq!(add_count, 2, "should have 2 ADD_COLUMN operations; ops={:?}", alter.operations);
+    }
+
+    #[test]
+    fn test_gaussdb_dialect_parses_alter_add_single_column() {
+        let ast = parse_sql_to_ast_fb(
+            "ALTER TABLE t ADD (c1 INT NOT NULL DEFAULT 0)",
+            CheckDialect::GaussDB,
+            Some(CheckDialect::Oracle),
+        );
+        assert!(!ast.has_parse_error());
+        assert_eq!(ast.statements[0].kind, "ALTER_TABLE");
     }
 }

@@ -9,7 +9,10 @@
 //! ## 缓存失效（整体清空）
 //! `run_signature` 不匹配时，缓存文件整体丢弃重建。签名聚合：
 //! - SqlGuard 版本（`CARGO_PKG_VERSION`）
-//! - SQL 方言（`[dialect]` 或 CLI `--dialect`）
+//! - SQL 方言（`[dialect]` 或 CLI `--dialect`）——含 GaussDB 重写规则集
+//!   （当前阶段 1 规则集固定全开，`dialect=gaussdb` 唯一确定重写行为；
+//!   未来引入配置开关时需把规则集 ID 纳入签名）
+//! - 方言回退链第二候选（`dialect_fallback`）
 //! - 规则筛选器（CLI `--rules/--groups/--exclude-*`）
 //! - 主配置文件 `(mtime, size)`
 //! - 规则配置文件 `(mtime, size)`（如有 `rules_file`）
