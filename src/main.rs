@@ -871,8 +871,8 @@ fn run_gen_rollback(
         return Ok(2);
     }
 
-    // ★ per-file 渲染：在 output_dir 下按输入目录结构镜像，每个源文件生成
-    // <stem>.backup.sql / <stem>.rollback.sql（backup_file/rollback_file 作为后缀）
+    // ★ per-file 渲染：backup/ 和 rollback/ 分开子目录，各自镜像输入目录结构
+    // 输出结构: output_dir/backup/<rel_dir>/<stem>.sql + output_dir/rollback/<rel_dir>/<stem>.sql
     for (file_path_str, group) in &file_groups {
         if group.is_empty() {
             continue;
@@ -885,21 +885,26 @@ fn run_gen_rollback(
                 file_path.file_name().unwrap_or_default(),
             ));
         let parent_dir = rel_path.parent().unwrap_or(std::path::Path::new(""));
-        let stem = rel_path
-            .file_stem()
+        let file_name = rel_path
+            .file_name()
             .map(|s| s.to_string_lossy().to_string())
-            .unwrap_or_else(|| "unknown".to_string());
+            .unwrap_or_else(|| "unknown.sql".to_string());
 
-        let out_dir = absolute_output.join(parent_dir);
-        fs::create_dir_all(&out_dir).map_err(SqlGuardError::IoError)?;
+        // ★ backup/rollback 分子目录：目录名取 backup_file/rollback_file 去扩展名（如 "backup.sql" → "backup"）
+        let backup_subdir = config.rollback.backup_file.trim_end_matches(".sql");
+        let rollback_subdir = config.rollback.rollback_file.trim_end_matches(".sql");
+        let backup_dir = absolute_output.join(backup_subdir).join(parent_dir);
+        let rollback_dir = absolute_output.join(rollback_subdir).join(parent_dir);
+        fs::create_dir_all(&backup_dir).map_err(SqlGuardError::IoError)?;
+        fs::create_dir_all(&rollback_dir).map_err(SqlGuardError::IoError)?;
 
         let backup_sql =
             crate::rollback::render::render_backup(group, &config.rollback, &*renderer);
         let rollback_sql =
             crate::rollback::render::render_rollback(group, &config.rollback, &*renderer);
 
-        let backup_out = out_dir.join(format!("{}.{}", stem, config.rollback.backup_file));
-        let rollback_out = out_dir.join(format!("{}.{}", stem, config.rollback.rollback_file));
+        let backup_out = backup_dir.join(&file_name);
+        let rollback_out = rollback_dir.join(&file_name);
 
         fs::write(&backup_out, &backup_sql).map_err(SqlGuardError::IoError)?;
         fs::write(&rollback_out, &rollback_sql).map_err(SqlGuardError::IoError)?;

@@ -11,7 +11,7 @@
 
 use crate::rule::engine::ast::StmtInfo;
 use super::dialect::DialectRenderer;
-use super::{BackupRollbackPair, SourceRef, SafetyClass, BackupStrategy};
+use super::{BackupRollbackPair, SourceRef, SafetyClass, BackupStrategy, strip_ident_quotes};
 
 /// CREATE TABLE → rollback: `DROP TABLE IF EXISTS <name>`
 pub fn gen_create_table(
@@ -22,7 +22,8 @@ pub fn gen_create_table(
     r: &dyn DialectRenderer,
 ) -> BackupRollbackPair {
     let table = stmt.create_table.as_ref().map(|c| c.table_name.as_str()).unwrap_or("");
-    let rollback = format!("DROP TABLE IF EXISTS {};", r.quote_ident(table));
+    let table = strip_ident_quotes(table);
+    let rollback = format!("DROP TABLE IF EXISTS {};", r.quote_ident(&table));
     BackupRollbackPair {
         seq,
         stmt_kind: String::new(),
@@ -48,7 +49,9 @@ pub fn gen_create_index(
     let (idx, tbl) = stmt.create_index.as_ref()
         .map(|c| (c.name.as_str(), c.table_name.as_str()))
         .unwrap_or(("", ""));
-    let rollback = format!("{};", r.drop_index(idx, tbl));
+    let idx = strip_ident_quotes(idx);
+    let tbl = strip_ident_quotes(tbl);
+    let rollback = format!("{};", r.drop_index(&idx, &tbl));
     BackupRollbackPair {
         seq,
         stmt_kind: String::new(),
@@ -72,7 +75,8 @@ pub fn gen_create_view(
     r: &dyn DialectRenderer,
 ) -> BackupRollbackPair {
     let name = stmt.create_view.as_ref().map(|v| v.name.as_str()).unwrap_or("");
-    let rollback = format!("DROP VIEW IF EXISTS {};", r.quote_ident(name));
+    let name = strip_ident_quotes(name);
+    let rollback = format!("DROP VIEW IF EXISTS {};", r.quote_ident(&name));
     BackupRollbackPair {
         seq,
         stmt_kind: String::new(),
@@ -109,40 +113,43 @@ pub fn gen_alter_metadata(
     let mut warnings: Vec<String> = vec![];
     let mut reliable = true;
     if let Some(alter) = &stmt.alter_table {
-        let tbl = &alter.table_name;
+        let tbl = strip_ident_quotes(&alter.table_name);
         for op in &alter.operations {
             match op.operation_type.as_str() {
                 "ADD_COLUMN" => {
                     // 反向：DROP COLUMN（仅当无约束时走此路径，见 is_metadata_only_alter）
                     if !op.column_name.is_empty() {
+                        let col = strip_ident_quotes(&op.column_name);
                         rollback_parts.push(format!(
                             "ALTER TABLE {} DROP COLUMN {};",
-                            r.quote_ident(tbl),
-                            r.quote_ident(&op.column_name)
+                            r.quote_ident(&tbl),
+                            r.quote_ident(&col)
                         ));
                     }
                 }
                 "ADD_INDEX" => {
                     // ALTER TABLE ADD INDEX <name> → DROP INDEX <name>
                     if !op.constraint_name.is_empty() {
+                        let con = strip_ident_quotes(&op.constraint_name);
                         rollback_parts.push(format!(
                             "ALTER TABLE {} DROP INDEX {};",
-                            r.quote_ident(tbl),
-                            r.quote_ident(&op.constraint_name)
+                            r.quote_ident(&tbl),
+                            r.quote_ident(&con)
                         ));
                     }
                 }
                 "ADD_CONSTRAINT" => {
                     // 根据 detail 区分约束类型，生成对应 DROP
                     let detail_upper = op.detail.to_uppercase();
+                    let con = strip_ident_quotes(&op.constraint_name);
                     if detail_upper.contains("PRIMARY KEY") {
-                        rollback_parts.push(format!("{};", r.drop_primary_key(tbl, Some(&op.constraint_name))));
+                        rollback_parts.push(format!("{};", r.drop_primary_key(&tbl, Some(&con))));
                     } else if detail_upper.contains("UNIQUE") {
                         // UNIQUE 约束反向：MySQL 用 DROP INDEX，PG 用 DROP CONSTRAINT
                         rollback_parts.push(format!(
                             "ALTER TABLE {} DROP INDEX {};",
-                            r.quote_ident(tbl),
-                            r.quote_ident(&op.constraint_name)
+                            r.quote_ident(&tbl),
+                            r.quote_ident(&con)
                         ));
                     } else if detail_upper.contains("FOREIGN KEY") {
                         // ★ MySQL: ALTER TABLE t DROP FOREIGN KEY <name>
@@ -150,26 +157,26 @@ pub fn gen_alter_metadata(
                         // M3 暂以通用 DROP CONSTRAINT，MySQL 方言下加 warning 提示 DBA 核对
                         rollback_parts.push(format!(
                             "ALTER TABLE {} DROP CONSTRAINT {};",
-                            r.quote_ident(tbl),
-                            r.quote_ident(&op.constraint_name)
+                            r.quote_ident(&tbl),
+                            r.quote_ident(&con)
                         ));
                         warnings.push(format!(
                             "ADD_CONSTRAINT (FOREIGN KEY) rollback uses DROP CONSTRAINT; MySQL dialect may need DROP FOREIGN KEY `{}`",
-                            op.constraint_name
+                            con
                         ));
                     } else if detail_upper.contains("CHECK") {
                         rollback_parts.push(format!(
                             "ALTER TABLE {} DROP CONSTRAINT {};",
-                            r.quote_ident(tbl),
-                            r.quote_ident(&op.constraint_name)
+                            r.quote_ident(&tbl),
+                            r.quote_ident(&con)
                         ));
                     } else {
                         // 兜底：未知约束类型，DROP INDEX 兜底 + warning
                         if !op.constraint_name.is_empty() {
                             rollback_parts.push(format!(
                                 "ALTER TABLE {} DROP INDEX {};",
-                                r.quote_ident(tbl),
-                                r.quote_ident(&op.constraint_name)
+                                r.quote_ident(&tbl),
+                                r.quote_ident(&con)
                             ));
                         }
                         warnings.push(format!("Unknown ADD_CONSTRAINT subtype, fallback DROP INDEX: {}", op.detail));
@@ -177,20 +184,20 @@ pub fn gen_alter_metadata(
                 }
                 "ADD_PRIMARY_KEY" => {
                     // parser 当前未单独产出此 operation_type（PK 走 ADD_CONSTRAINT），保留兜底
-                    rollback_parts.push(format!("{};", r.drop_primary_key(tbl, None)));
+                    rollback_parts.push(format!("{};", r.drop_primary_key(&tbl, None)));
                 }
                 "RENAME_COLUMN" => {
                     // op.column_name = old_column_name（parser 已提取）
                     // op.detail = "RENAME COLUMN <old> TO <new>"
-                    let old_name = &op.column_name;
+                    let old_name = strip_ident_quotes(&op.column_name);
                     match extract_renamed_to(&op.detail) {
                         Some(new_name) => {
                             // 反向：RENAME COLUMN <new> TO <old>
                             rollback_parts.push(format!(
                                 "ALTER TABLE {} RENAME COLUMN {} TO {};",
-                                r.quote_ident(tbl),
+                                r.quote_ident(&tbl),
                                 r.quote_ident(&new_name),
-                                r.quote_ident(old_name)
+                                r.quote_ident(&old_name)
                             ));
                         }
                         None => {
@@ -204,15 +211,15 @@ pub fn gen_alter_metadata(
                 }
                 "RENAME_TABLE" => {
                     // alter.table_name = 原表名（old），op.table_name = 新表名（new）
-                    let old_table = tbl;
-                    let new_table = &op.table_name;
+                    let old_table = &tbl;
+                    let new_table = strip_ident_quotes(&op.table_name);
                     if new_table.is_empty() {
                         warnings.push("RENAME TABLE rollback skipped: new table name empty".to_string());
                         reliable = false;
                     } else {
                         rollback_parts.push(format!(
                             "{};",
-                            r.rename_table(new_table, old_table)
+                            r.rename_table(&new_table, old_table)
                         ));
                     }
                 }

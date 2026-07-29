@@ -208,6 +208,7 @@ mod tests {
         }
     }
 
+    #[allow(dead_code)]
     fn make_truncate_stmt() -> StmtInfo {
         StmtInfo {
             kind: "TRUNCATE".to_string(),
