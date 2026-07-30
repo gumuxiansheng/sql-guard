@@ -977,6 +977,7 @@ fn run_init(target_dir: &Path) -> Result<(), SqlGuardError> {
         ("backup_table_naming", "ddl", include_str!("../config/rules/ddl/backup_table_naming.rhai")),
         ("index_naming_convention", "ddl", include_str!("../config/rules/ddl/index_naming_convention.rhai")),
         ("no_redundant_index", "ddl", include_str!("../config/rules/ddl/no_redundant_index.rhai")),
+        ("table_name_naming", "ddl", include_str!("../config/rules/ddl/table_name_naming.rhai")),
         ("no_select_all", "dml", include_str!("../config/rules/dml/no_select_all.rhai")),
         ("no_delete_update_without_where", "dml", include_str!("../config/rules/dml/no_delete_update_without_where.rhai")),
         ("insert_columns_required", "dml", include_str!("../config/rules/dml/insert_columns_required.rhai")),
@@ -1002,7 +1003,7 @@ fn run_init(target_dir: &Path) -> Result<(), SqlGuardError> {
     println!("Initialized SqlGuard configuration in {}", target_dir.display());
     println!("  - sqlguard.toml          # 主配置（结构/分类/输出/扫描/文件检查）");
     println!("  - sqlguard.rules.toml    # 规则配置（[[rules]] 单独拆分，避免文件过长）");
-    println!("  - config/rules/ddl/ (6 rule files)");
+    println!("  - config/rules/ddl/ (7 rule files)");
     println!("  - config/rules/dml/ (15 rule files)");
     println!();
     println!("Run: sqlguard check <project_path>");
@@ -1096,6 +1097,16 @@ fn generate_default_config() -> Config {
                 description: Some("Avoid redundant indexes (duplicate PK indexes and leftmost-prefix duplicates)".to_string()),
                 enabled: true,
                 script_path: "config/rules/ddl/no_redundant_index.rhai".into(),
+                applies_to: vec!["ddl".to_string()],
+                severity: "warning".to_string(),
+            },
+            crate::config::RuleConfig {
+                id: "DDL007".to_string(),
+                name: "table_name_naming".to_string(),
+                group: Some("ddl-convention".to_string()),
+                description: Some("Table names must contain only lowercase letters, digits, and underscores, and must not start with a digit".to_string()),
+                enabled: true,
+                script_path: "config/rules/ddl/table_name_naming.rhai".into(),
                 applies_to: vec!["ddl".to_string()],
                 severity: "warning".to_string(),
             },
@@ -1436,6 +1447,16 @@ group = "ddl-performance"
 description = "Avoid redundant indexes (duplicate PK indexes and leftmost-prefix duplicates)"
 enabled = true
 script_path = "config/rules/ddl/no_redundant_index.rhai"
+applies_to = ["ddl"]
+severity = "warning"
+
+[[rules]]
+id = "DDL007"
+name = "table_name_naming"
+group = "ddl-convention"
+description = "Table names must contain only lowercase letters, digits, and underscores, and must not start with a digit"
+enabled = true
+script_path = "config/rules/ddl/table_name_naming.rhai"
 applies_to = ["ddl"]
 severity = "warning"
 

@@ -1,6 +1,6 @@
 # SqlGuard 默认规则手册
 
-SqlGuard 内置 21 条默认规则，分为 **P0（13 条，默认启用）** 和 **P1（8 条，默认禁用）** 两档（6 DDL + 15 DML）。
+SqlGuard 内置 22 条默认规则，分为 **P0（14 条，默认启用）** 和 **P1（8 条，默认禁用）** 两档（7 DDL + 15 DML）。
 
 ## 规则总览
 
@@ -12,6 +12,7 @@ SqlGuard 内置 21 条默认规则，分为 **P0（13 条，默认启用）** �
 | DDL004 | `backup_table_naming` | ddl-convention | warning | P0 | — |
 | DDL005 | `index_naming_convention` | ddl-convention | warning | P0 | — |
 | DDL006 | `no_redundant_index` | ddl-performance | warning | P0 | — |
+| DDL007 | `table_name_naming` | ddl-convention | warning | P0 | — |
 | DML001 | `no_select_all` | dml-safety | error | P0 | SQLFluff / GoSQLX |
 | DML002 | `no_delete_update_without_where` | dml-safety | error | P0 | GoSQLX |
 | DML003 | `insert_columns_required` | dml-safety | error | P0 | SQLFluff AM07 |
@@ -221,6 +222,34 @@ CREATE TABLE t2 (id INT PRIMARY KEY, a INT, INDEX idx_t2_id (id));
 CREATE TABLE t (id INT PRIMARY KEY, a INT, b INT, INDEX idx_t_a_b (a, b));
 -- 唯一索引出于约束语义，不视为冗余
 CREATE TABLE t3 (id INT PRIMARY KEY, a INT, UNIQUE KEY uk_t3_a (a));
+```
+
+---
+
+### DDL007 — `table_name_naming`
+
+| 字段 | 值 |
+|------|-----|
+| 文件 | `config/rules/ddl/table_name_naming.rhai` |
+| 分组 | `ddl-convention` |
+| 严重度 | `warning` |
+| 检测方式 | AST（精确） |
+
+**校验原因**：表名统一使用小写字母 + 数字 + 下划线，且不能以数字开头，保证跨数据库可移植性（PostgreSQL/Oracle 对大小写敏感且需引号转义）并避免与数据库内部命名冲突。覆盖 `CREATE TABLE` 和 `ALTER TABLE ... RENAME TO` 两种定义/重命名表名的场景。
+
+**反面案例**：
+```sql
+CREATE TABLE Users (id INT PRIMARY KEY);          -- 含大写
+CREATE TABLE 2fa_codes (id INT PRIMARY KEY);      -- 以数字开头
+CREATE TABLE order-items (id INT PRIMARY KEY);    -- 含连字符
+ALTER TABLE old_t RENAME TO NewTable;             -- 含大写
+```
+
+**正面案例**：
+```sql
+CREATE TABLE user_orders (id INT PRIMARY KEY);
+CREATE TABLE t1 (id INT PRIMARY KEY);
+ALTER TABLE old_t RENAME TO new_table;
 ```
 
 ---

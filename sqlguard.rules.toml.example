@@ -73,6 +73,16 @@ applies_to = ["ddl"]
 severity = "warning"
 
 [[rules]]
+id = "DDL007"
+name = "table_name_naming"
+group = "ddl-convention"
+description = "Table names must contain only lowercase letters, digits, and underscores, and must not start with a digit"
+enabled = true
+script_path = "config/rules/ddl/table_name_naming.rhai"
+applies_to = ["ddl"]
+severity = "warning"
+
+[[rules]]
 id = "DML001"
 name = "no_select_all"
 group = "dml-safety"
