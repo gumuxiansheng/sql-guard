@@ -232,17 +232,20 @@ pub(crate) fn analyze_join_operator(
     let (table_name, alias) = table_factor_name_and_alias(relation);
     match op {
         JoinOperator::Inner(constraint)
+        | JoinOperator::Join(constraint)
         | JoinOperator::LeftOuter(constraint)
+        | JoinOperator::Left(constraint)
         | JoinOperator::RightOuter(constraint)
+        | JoinOperator::Right(constraint)
         | JoinOperator::FullOuter(constraint)
         | JoinOperator::LeftSemi(constraint)
         | JoinOperator::RightSemi(constraint)
         | JoinOperator::LeftAnti(constraint)
         | JoinOperator::RightAnti(constraint) => {
             let join_type = match op {
-                JoinOperator::Inner(_) => "INNER",
-                JoinOperator::LeftOuter(_) => "LEFT",
-                JoinOperator::RightOuter(_) => "RIGHT",
+                JoinOperator::Inner(_) | JoinOperator::Join(_) => "INNER",
+                JoinOperator::LeftOuter(_) | JoinOperator::Left(_) => "LEFT",
+                JoinOperator::RightOuter(_) | JoinOperator::Right(_) => "RIGHT",
                 JoinOperator::FullOuter(_) => "FULL",
                 JoinOperator::LeftSemi(_) => "LEFT_SEMI",
                 JoinOperator::RightSemi(_) => "RIGHT_SEMI",

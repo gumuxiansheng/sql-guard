@@ -1,27 +1,18 @@
-mod config;
-mod cli;
-mod error;
-mod checker;
-mod rule;
-mod reporter;
-mod mapper;
-mod git_diff;
-mod replay_export;
-mod rollback;
-mod cache;
-
 use std::path::{Path, PathBuf};
 use std::fs;
 
 use clap::Parser;
 
-use crate::cli::{Cli, Commands};
-use crate::error::{SqlGuardError, Violation};
-use crate::config::Config;
-use crate::checker::directory;
-use crate::checker::classification;
-use crate::checker::encoding;
-use crate::rule::engine;
+// 原 binary 以 crate-root `mod` 形式直接引用各模块；提升为 lib 后，
+// 用 glob 导入把顶层模块重新带入本 bin 的作用域（等价旧行为）。
+use sqlguard::*;
+use sqlguard::cli::{Cli, Commands};
+use sqlguard::error::{SqlGuardError, Violation};
+use sqlguard::config::Config;
+use sqlguard::checker::directory;
+use sqlguard::checker::classification;
+use sqlguard::checker::encoding;
+use sqlguard::rule::engine;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
@@ -297,12 +288,12 @@ fn run_check(
     }
     let (mut config, config_dir) = load_config(config_path, explicit_config)?;
     if let Some(d) = dialect_override {
-        config.dialect = crate::config::CheckDialect::from_str(d);
+        config.dialect = sqlguard::config::CheckDialect::from_str(d);
         eprintln!("Dialect override: {} → {}", config.dialect.as_str(), d);
     }
     // 解析方言回退链：CLI --dialect-fallback > 配置 dialect_fallback > 主方言默认回退。
     let fallback = if let Some(fb) = dialect_fallback_override {
-        Some(crate::config::CheckDialect::from_str(fb))
+        Some(sqlguard::config::CheckDialect::from_str(fb))
     } else if let Some(cfg_fb) = config.dialect_fallback {
         Some(cfg_fb)
     } else {
@@ -466,12 +457,12 @@ fn run_check_diff(
 ) -> Result<(), SqlGuardError> {
     let (mut config, config_dir) = load_config(config_path, explicit_config)?;
     if let Some(d) = dialect_override {
-        config.dialect = crate::config::CheckDialect::from_str(d);
+        config.dialect = sqlguard::config::CheckDialect::from_str(d);
         eprintln!("Dialect override: {} → {}", config.dialect.as_str(), d);
     }
     // 解析方言回退链：CLI --dialect-fallback > 配置 dialect_fallback > 主方言默认回退。
     let fallback = if let Some(fb) = dialect_fallback_override {
-        Some(crate::config::CheckDialect::from_str(fb))
+        Some(sqlguard::config::CheckDialect::from_str(fb))
     } else if let Some(cfg_fb) = config.dialect_fallback {
         Some(cfg_fb)
     } else {
@@ -683,7 +674,7 @@ fn run_gen_rollback(
     let (mut config, _config_dir) = load_config(config_path, explicit_config)?;
 
     // 应用 CLI 覆盖到 rollback 配置
-    let rc: &mut crate::config::RollbackConfig = &mut config.rollback;
+    let rc: &mut sqlguard::config::RollbackConfig = &mut config.rollback;
 
     // ★ P2-3：旧配置兼容映射——lock_tables_during_backup=false 且未显式覆盖 lock_scope 时，
     // 视为用户意图"不加锁"，将 lock_scope 从默认 auto 改为 none。
@@ -710,16 +701,16 @@ fn run_gen_rollback(
     }
 
     // 解析方言
-    let dialect: crate::rollback::Dialect = rc
+    let dialect: sqlguard::rollback::Dialect = rc
         .dialect
         .parse()
         .map_err(|e: String| {
             SqlGuardError::ConfigError(format!("Invalid rollback.dialect '{}': {}", rc.dialect, e))
         })?;
-    let renderer = crate::rollback::renderer_for(dialect);
+    let renderer = sqlguard::rollback::renderer_for(dialect);
 
     // R2 预检：lock_scope=table 必须显式确认
-    let prereq_errors = crate::rollback::render::validate_render_prerequisites(&[], &config.rollback);
+    let prereq_errors = sqlguard::rollback::render::validate_render_prerequisites(&[], &config.rollback);
     if !prereq_errors.is_empty() {
         for e in &prereq_errors {
             eprintln!("Prerequisite error: {}", e);
@@ -752,8 +743,8 @@ fn run_gen_rollback(
         dialect.as_str()
     );
 
-    let mut generator = crate::rollback::RollbackGenerator::new(&config, &config.rollback, &*renderer);
-    let mut pairs: Vec<crate::rollback::BackupRollbackPair> = Vec::new();
+    let mut generator = sqlguard::rollback::RollbackGenerator::new(&config, &config.rollback, &*renderer);
+    let mut pairs: Vec<sqlguard::rollback::BackupRollbackPair> = Vec::new();
 
     // 脚本模式：解析每个 SQL 文件为 SqlAst，遍历 StmtInfo
     for file_path in &sql_files {
@@ -781,7 +772,7 @@ fn run_gen_rollback(
             }
             // 提取原始 SQL 文本片段（按行号）
             let original = extract_sql_lines(&content, stmt.line as usize, stmt.end_line as usize);
-            let source = crate::rollback::SourceRef {
+            let source = sqlguard::rollback::SourceRef {
                 file: file_path.to_string_lossy().to_string(),
                 line: stmt.line,
                 end_line: stmt.end_line,
@@ -817,7 +808,7 @@ fn run_gen_rollback(
                         continue;
                     }
                     let original = extract_sql_lines(&sql.processed_sql, stmt.line as usize, stmt.end_line as usize);
-                    let source = crate::rollback::SourceRef {
+                    let source = sqlguard::rollback::SourceRef {
                         file: file_path.to_string_lossy().to_string(),
                         line: sql.raw_xml_line as i64 + stmt.line - 1,
                         end_line: sql.raw_xml_line as i64 + stmt.end_line - 1,
@@ -840,7 +831,7 @@ fn run_gen_rollback(
     );
 
     // ★ 按源文件分组（保持首次出现顺序），用于 per-file 输出
-    let mut file_groups: Vec<(String, Vec<crate::rollback::BackupRollbackPair>)> = Vec::new();
+    let mut file_groups: Vec<(String, Vec<sqlguard::rollback::BackupRollbackPair>)> = Vec::new();
     let mut file_index: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     for pair in pairs.drain(..) {
         let file = pair.source.file.clone();
@@ -855,13 +846,13 @@ fn run_gen_rollback(
     // P1-2：per-file finalize_safety（每个文件独立判定 lock_type，DML-only 文件不被
     // 其他文件的 DDL 拉高锁级别）
     for (_file, group) in &mut file_groups {
-        crate::rollback::render::finalize_safety(group, &config.rollback);
+        sqlguard::rollback::render::finalize_safety(group, &config.rollback);
     }
 
     // R4 预检：per-file 校验，聚合错误
     let mut prereq_errors: Vec<String> = Vec::new();
     for (_file, group) in &file_groups {
-        let errs = crate::rollback::render::validate_render_prerequisites(group, &config.rollback);
+        let errs = sqlguard::rollback::render::validate_render_prerequisites(group, &config.rollback);
         prereq_errors.extend(errs);
     }
     if !prereq_errors.is_empty() {
@@ -894,9 +885,9 @@ fn run_gen_rollback(
         fs::create_dir_all(&out_dir).map_err(SqlGuardError::IoError)?;
 
         let backup_sql =
-            crate::rollback::render::render_backup(group, &config.rollback, &*renderer);
+            sqlguard::rollback::render::render_backup(group, &config.rollback, &*renderer);
         let rollback_sql =
-            crate::rollback::render::render_rollback(group, &config.rollback, &*renderer);
+            sqlguard::rollback::render::render_rollback(group, &config.rollback, &*renderer);
 
         let backup_out = out_dir.join(format!("{}.{}", stem, config.rollback.backup_file));
         let rollback_out = out_dir.join(format!("{}.{}", stem, config.rollback.rollback_file));
@@ -909,20 +900,20 @@ fn run_gen_rollback(
     }
 
     // 全局 cleanup + manifest（跨文件汇总，写在 output_dir 根目录）
-    let all_pairs: Vec<crate::rollback::BackupRollbackPair> = file_groups
+    let all_pairs: Vec<sqlguard::rollback::BackupRollbackPair> = file_groups
         .into_iter()
         .flat_map(|(_, g)| g)
         .collect();
 
     let cleanup_sql =
-        crate::rollback::render::render_cleanup(&all_pairs, &config.rollback, &*renderer);
+        sqlguard::rollback::render::render_cleanup(&all_pairs, &config.rollback, &*renderer);
     let cleanup_path = absolute_output.join(&config.rollback.cleanup_file);
     fs::write(&cleanup_path, &cleanup_sql).map_err(SqlGuardError::IoError)?;
 
     // 构建并写 manifest（★ P1-2：传入 rc 以透出 assert_on_schema_mismatch / on_partitioned_table）
     let manifest =
-        crate::rollback::Manifest::from_pairs(&all_pairs, dialect.as_str(), &config.rollback, Vec::new());
-    let manifest_json = crate::rollback::serialize_manifest(&manifest)
+        sqlguard::rollback::Manifest::from_pairs(&all_pairs, dialect.as_str(), &config.rollback, Vec::new());
+    let manifest_json = sqlguard::rollback::serialize_manifest(&manifest)
         .map_err(|e| SqlGuardError::CheckError(format!("Failed to serialize manifest: {}", e)))?;
     let manifest_path = absolute_output.join(&config.rollback.manifest_file);
     fs::write(&manifest_path, &manifest_json).map_err(SqlGuardError::IoError)?;
@@ -1006,7 +997,7 @@ fn run_init(target_dir: &Path) -> Result<(), SqlGuardError> {
 
 fn generate_default_config() -> Config {
     Config {
-        structure: crate::config::StructureConfig {
+        structure: sqlguard::config::StructureConfig {
             paths: vec![
                 "sql/ddl".to_string(),
                 "sql/dml".to_string(),
@@ -1015,15 +1006,15 @@ fn generate_default_config() -> Config {
             strict: true,
             allow_extra: vec![".gitkeep".to_string(), "config/".to_string()],
         },
-        classification: crate::config::ClassificationConfig {
+        classification: sqlguard::config::ClassificationConfig {
             rules: vec![
-                crate::config::ClassificationRule {
+                sqlguard::config::ClassificationRule {
                     name: "ddl-by-dir".to_string(),
                     pattern: "**/ddl/**".to_string(),
                     script_type: "ddl".to_string(),
                     priority: 10,
                 },
-                crate::config::ClassificationRule {
+                sqlguard::config::ClassificationRule {
                     name: "dml-by-dir".to_string(),
                     pattern: "**/dml/**".to_string(),
                     script_type: "dml".to_string(),
@@ -1034,7 +1025,7 @@ fn generate_default_config() -> Config {
         },
         rules: vec![
             // ===== P0 规则：默认启用 =====
-            crate::config::RuleConfig {
+            sqlguard::config::RuleConfig {
                 id: "DDL001".to_string(),
                 name: "no_drop_table".to_string(),
                 group: Some("ddl-safety".to_string()),
@@ -1044,7 +1035,7 @@ fn generate_default_config() -> Config {
                 applies_to: vec!["ddl".to_string()],
                 severity: "error".to_string(),
             },
-            crate::config::RuleConfig {
+            sqlguard::config::RuleConfig {
                 id: "DDL002".to_string(),
                 name: "primary_key_required".to_string(),
                 group: Some("ddl-safety".to_string()),
@@ -1054,7 +1045,7 @@ fn generate_default_config() -> Config {
                 applies_to: vec!["ddl".to_string()],
                 severity: "warning".to_string(),
             },
-            crate::config::RuleConfig {
+            sqlguard::config::RuleConfig {
                 id: "DDL003".to_string(),
                 name: "no_reserved_keyword_naming".to_string(),
                 group: Some("ddl-safety".to_string()),
@@ -1064,7 +1055,7 @@ fn generate_default_config() -> Config {
                 applies_to: vec!["ddl".to_string()],
                 severity: "error".to_string(),
             },
-            crate::config::RuleConfig {
+            sqlguard::config::RuleConfig {
                 id: "DDL004".to_string(),
                 name: "backup_table_naming".to_string(),
                 group: Some("ddl-convention".to_string()),
@@ -1074,7 +1065,7 @@ fn generate_default_config() -> Config {
                 applies_to: vec!["ddl".to_string()],
                 severity: "warning".to_string(),
             },
-            crate::config::RuleConfig {
+            sqlguard::config::RuleConfig {
                 id: "DDL005".to_string(),
                 name: "index_naming_convention".to_string(),
                 group: Some("ddl-convention".to_string()),
@@ -1084,7 +1075,7 @@ fn generate_default_config() -> Config {
                 applies_to: vec!["ddl".to_string()],
                 severity: "warning".to_string(),
             },
-            crate::config::RuleConfig {
+            sqlguard::config::RuleConfig {
                 id: "DDL006".to_string(),
                 name: "no_redundant_index".to_string(),
                 group: Some("ddl-performance".to_string()),
@@ -1094,7 +1085,7 @@ fn generate_default_config() -> Config {
                 applies_to: vec!["ddl".to_string()],
                 severity: "warning".to_string(),
             },
-            crate::config::RuleConfig {
+            sqlguard::config::RuleConfig {
                 id: "DML001".to_string(),
                 name: "no_select_all".to_string(),
                 group: Some("dml-safety".to_string()),
@@ -1104,7 +1095,7 @@ fn generate_default_config() -> Config {
                 applies_to: vec!["dml".to_string()],
                 severity: "error".to_string(),
             },
-            crate::config::RuleConfig {
+            sqlguard::config::RuleConfig {
                 id: "DML002".to_string(),
                 name: "no_delete_update_without_where".to_string(),
                 group: Some("dml-safety".to_string()),
@@ -1114,7 +1105,7 @@ fn generate_default_config() -> Config {
                 applies_to: vec!["dml".to_string()],
                 severity: "error".to_string(),
             },
-            crate::config::RuleConfig {
+            sqlguard::config::RuleConfig {
                 id: "DML003".to_string(),
                 name: "insert_columns_required".to_string(),
                 group: Some("dml-safety".to_string()),
@@ -1124,7 +1115,7 @@ fn generate_default_config() -> Config {
                 applies_to: vec!["dml".to_string()],
                 severity: "error".to_string(),
             },
-            crate::config::RuleConfig {
+            sqlguard::config::RuleConfig {
                 id: "DML004".to_string(),
                 name: "subquery_alias_required".to_string(),
                 group: Some("dml-style".to_string()),
@@ -1134,7 +1125,7 @@ fn generate_default_config() -> Config {
                 applies_to: vec!["dml".to_string()],
                 severity: "error".to_string(),
             },
-            crate::config::RuleConfig {
+            sqlguard::config::RuleConfig {
                 id: "DML005".to_string(),
                 name: "column_references_qualified".to_string(),
                 group: Some("dml-style".to_string()),
@@ -1144,7 +1135,7 @@ fn generate_default_config() -> Config {
                 applies_to: vec!["dml".to_string()],
                 severity: "warning".to_string(),
             },
-            crate::config::RuleConfig {
+            sqlguard::config::RuleConfig {
                 id: "DML006".to_string(),
                 name: "no_join_without_condition".to_string(),
                 group: Some("dml-safety".to_string()),
@@ -1154,7 +1145,7 @@ fn generate_default_config() -> Config {
                 applies_to: vec!["dml".to_string()],
                 severity: "error".to_string(),
             },
-            crate::config::RuleConfig {
+            sqlguard::config::RuleConfig {
                 id: "DML007".to_string(),
                 name: "order_by_required_for_pagination".to_string(),
                 group: Some("dml-safety".to_string()),
@@ -1165,7 +1156,7 @@ fn generate_default_config() -> Config {
                 severity: "error".to_string(),
             },
             // ===== P1 规则：默认禁用，建议评估后启用 =====
-            crate::config::RuleConfig {
+            sqlguard::config::RuleConfig {
                 id: "DML101".to_string(),
                 name: "no_unused_join".to_string(),
                 group: Some("dml-performance".to_string()),
@@ -1175,7 +1166,7 @@ fn generate_default_config() -> Config {
                 applies_to: vec!["dml".to_string()],
                 severity: "warning".to_string(),
             },
-            crate::config::RuleConfig {
+            sqlguard::config::RuleConfig {
                 id: "DML102".to_string(),
                 name: "no_unused_cte".to_string(),
                 group: Some("dml-performance".to_string()),
@@ -1185,7 +1176,7 @@ fn generate_default_config() -> Config {
                 applies_to: vec!["dml".to_string()],
                 severity: "warning".to_string(),
             },
-            crate::config::RuleConfig {
+            sqlguard::config::RuleConfig {
                 id: "DML103".to_string(),
                 name: "use_is_null".to_string(),
                 group: Some("dml-convention".to_string()),
@@ -1195,7 +1186,7 @@ fn generate_default_config() -> Config {
                 applies_to: vec!["dml".to_string()],
                 severity: "error".to_string(),
             },
-            crate::config::RuleConfig {
+            sqlguard::config::RuleConfig {
                 id: "DML104".to_string(),
                 name: "use_coalesce".to_string(),
                 group: Some("dml-convention".to_string()),
@@ -1205,7 +1196,7 @@ fn generate_default_config() -> Config {
                 applies_to: vec!["dml".to_string()],
                 severity: "warning".to_string(),
             },
-            crate::config::RuleConfig {
+            sqlguard::config::RuleConfig {
                 id: "DML105".to_string(),
                 name: "no_order_by_in_subquery".to_string(),
                 group: Some("dml-performance".to_string()),
@@ -1215,7 +1206,7 @@ fn generate_default_config() -> Config {
                 applies_to: vec!["dml".to_string()],
                 severity: "warning".to_string(),
             },
-            crate::config::RuleConfig {
+            sqlguard::config::RuleConfig {
                 id: "DML106".to_string(),
                 name: "union_all_preferred".to_string(),
                 group: Some("dml-performance".to_string()),
@@ -1225,7 +1216,7 @@ fn generate_default_config() -> Config {
                 applies_to: vec!["dml".to_string()],
                 severity: "warning".to_string(),
             },
-            crate::config::RuleConfig {
+            sqlguard::config::RuleConfig {
                 id: "DML107".to_string(),
                 name: "no_nested_case".to_string(),
                 group: Some("dml-convention".to_string()),
@@ -1235,7 +1226,7 @@ fn generate_default_config() -> Config {
                 applies_to: vec!["dml".to_string()],
                 severity: "warning".to_string(),
             },
-            crate::config::RuleConfig {
+            sqlguard::config::RuleConfig {
                 id: "DML108".to_string(),
                 name: "no_constant_where".to_string(),
                 group: Some("dml-convention".to_string()),
@@ -1248,16 +1239,16 @@ fn generate_default_config() -> Config {
         ],
         rules_file: None,
         rules_dir: PathBuf::new(),
-        output: crate::config::OutputConfig {
+        output: sqlguard::config::OutputConfig {
             formats: vec!["plain".to_string()],
             output_dir: None,
         },
-        mapper: crate::config::MapperConfig::default(),
-        scan: crate::config::ScanConfig::default(),
-        file_check: crate::config::FileCheckConfig::default(),
-        rollback: crate::config::RollbackConfig::default(),
-        cache: crate::config::CacheConfig::default(),
-        dialect: crate::config::CheckDialect::default(),
+        mapper: sqlguard::config::MapperConfig::default(),
+        scan: sqlguard::config::ScanConfig::default(),
+        file_check: sqlguard::config::FileCheckConfig::default(),
+        rollback: sqlguard::config::RollbackConfig::default(),
+        cache: sqlguard::config::CacheConfig::default(),
+        dialect: sqlguard::config::CheckDialect::default(),
         dialect_fallback: None,
     }
 }

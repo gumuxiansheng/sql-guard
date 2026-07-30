@@ -27,7 +27,7 @@ use crate::config::CheckDialect;
 /// - 全部失败 → 记 `PARSE_ERROR` 语句。
 ///
 /// 见 [`parse_sql_to_ast`]（2 参封装，回退为 `None`）。
-pub(crate) fn parse_sql_to_ast_fb(
+pub fn parse_sql_to_ast_fb(
     sql: &str,
     dialect: CheckDialect,
     fallback: Option<CheckDialect>,
