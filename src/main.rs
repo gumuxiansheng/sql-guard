@@ -1,27 +1,20 @@
-mod config;
-mod cli;
-mod error;
-mod checker;
-mod rule;
-mod reporter;
-mod mapper;
-mod git_diff;
-mod replay_export;
-mod rollback;
-mod cache;
-
-use std::path::{Path, PathBuf};
 use std::fs;
+use std::path::{Path, PathBuf};
 
 use clap::Parser;
 
-use crate::cli::{Cli, Commands};
-use crate::error::{SqlGuardError, Violation};
-use crate::config::Config;
-use crate::checker::directory;
-use crate::checker::classification;
-use crate::checker::encoding;
-use crate::rule::engine;
+use sqlguard::cache;
+use sqlguard::checker::classification;
+use sqlguard::checker::directory;
+use sqlguard::checker::encoding;
+use sqlguard::cli::{Cli, Commands};
+use sqlguard::config::Config;
+use sqlguard::error::{SqlGuardError, Violation};
+use sqlguard::git_diff;
+use sqlguard::mapper;
+use sqlguard::replay_export;
+use sqlguard::reporter;
+use sqlguard::rule::engine;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
@@ -41,7 +34,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             cache,
             no_cache,
         } => {
-            let config_path = config.clone().unwrap_or_else(|| PathBuf::from("sqlguard.toml"));
+            let config_path = config
+                .clone()
+                .unwrap_or_else(|| PathBuf::from("sqlguard.toml"));
             let explicit_config = config.is_some();
             run_check(
                 &path,
@@ -75,7 +70,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             dialect,
             dialect_fallback,
         } => {
-            let config_path = config.clone().unwrap_or_else(|| PathBuf::from("sqlguard.toml"));
+            let config_path = config
+                .clone()
+                .unwrap_or_else(|| PathBuf::from("sqlguard.toml"));
             let explicit_config = config.is_some();
             run_check_diff(
                 &base,
@@ -98,7 +95,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             output_dir,
             types,
         } => {
-            let config_path = config.clone().unwrap_or_else(|| PathBuf::from("sqlguard.toml"));
+            let config_path = config
+                .clone()
+                .unwrap_or_else(|| PathBuf::from("sqlguard.toml"));
             let explicit_config = config.is_some();
             run_replay_export(&path, &config_path, explicit_config, &output_dir, &types)?;
         }
@@ -113,7 +112,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             fail_on_warning,
             allow_partial,
         } => {
-            let config_path = config.clone().unwrap_or_else(|| PathBuf::from("sqlguard.toml"));
+            let config_path = config
+                .clone()
+                .unwrap_or_else(|| PathBuf::from("sqlguard.toml"));
             let explicit_config = config.is_some();
             let code = run_gen_rollback(
                 &path,
@@ -150,7 +151,12 @@ fn load_config(config_path: &Path, explicit: bool) -> Result<(Config, PathBuf), 
         .parent()
         .unwrap_or_else(|| Path::new("."))
         .canonicalize()
-        .unwrap_or_else(|_| config_path.parent().unwrap_or_else(|| Path::new(".")).to_path_buf());
+        .unwrap_or_else(|_| {
+            config_path
+                .parent()
+                .unwrap_or_else(|| Path::new("."))
+                .to_path_buf()
+        });
     let config = if config_path.exists() {
         Config::load(config_path)?
     } else if explicit {
@@ -219,9 +225,15 @@ fn check_files(
 
     // 脚本模式
     for file_path in sql_files {
-        let classification_result = classification::classify_file(file_path, &config.classification)?;
+        let classification_result =
+            classification::classify_file(file_path, &config.classification)?;
         // 编码 / 换行符检查属于轻量的文件属性检查，不进缓存（每次都跑）
-        all_violations.extend(encoding::check_file(file_path, &classification_result.script_type, &config.file_check, filter));
+        all_violations.extend(encoding::check_file(
+            file_path,
+            &classification_result.script_type,
+            &config.file_check,
+            filter,
+        ));
 
         // 查缓存：命中则跳过读文件 + 解析 + 规则执行
         if let Some(cached) = cache.get(file_path) {
@@ -229,9 +241,19 @@ fn check_files(
             continue;
         }
 
-        let sql_content = fs::read_to_string(file_path)
-            .map_err(|e| SqlGuardError::CheckError(format!("Failed to read '{}': {}", file_path.display(), e)))?;
-        let violations = engine::run_rules_for_file(engine_instance, file_path, &sql_content, &classification_result.script_type, config, config_dir, filter, 0)?;
+        let sql_content = fs::read_to_string(file_path).map_err(|e| {
+            SqlGuardError::CheckError(format!("Failed to read '{}': {}", file_path.display(), e))
+        })?;
+        let violations = engine::run_rules_for_file(
+            engine_instance,
+            file_path,
+            &sql_content,
+            &classification_result.script_type,
+            config,
+            config_dir,
+            filter,
+            0,
+        )?;
         // 写入缓存（clone 一份，原始 violations 用于本次输出）
         cache.insert(file_path, violations.clone());
         all_violations.extend(violations);
@@ -240,10 +262,16 @@ fn check_files(
     // Mapper 模式
     if config.mapper.enabled {
         for file_path in mapper_files {
-            let mapper_script_type = classification::classify_file(file_path, &config.classification)
-                .map(|r| r.script_type)
-                .unwrap_or_else(|_| "mapper".to_string());
-            all_violations.extend(encoding::check_file(file_path, &mapper_script_type, &config.file_check, filter));
+            let mapper_script_type =
+                classification::classify_file(file_path, &config.classification)
+                    .map(|r| r.script_type)
+                    .unwrap_or_else(|_| "mapper".to_string());
+            all_violations.extend(encoding::check_file(
+                file_path,
+                &mapper_script_type,
+                &config.file_check,
+                filter,
+            ));
 
             // 查缓存：命中则跳过 XML 解析 + 逐条规则执行
             if let Some(cached) = cache.get(file_path) {
@@ -254,15 +282,31 @@ fn check_files(
             let extracted = match mapper::extract_sql_from_xml(file_path) {
                 Ok(v) => v,
                 Err(e) => {
-                    eprintln!("Warning: failed to parse mapper XML '{}': {}", file_path.display(), e);
+                    eprintln!(
+                        "Warning: failed to parse mapper XML '{}': {}",
+                        file_path.display(),
+                        e
+                    );
                     continue;
                 }
             };
             let mut file_violations = Vec::new();
             for sql in extracted {
-                let script_type = mapper::map_statement_type(&sql.statement_type, &config.mapper.statement_type_mapping);
+                let script_type = mapper::map_statement_type(
+                    &sql.statement_type,
+                    &config.mapper.statement_type_mapping,
+                );
                 let line_offset = sql.raw_xml_line.saturating_sub(1);
-                let violations = engine::run_rules_for_file(engine_instance, file_path, &sql.processed_sql, script_type, config, config_dir, filter, line_offset)?;
+                let violations = engine::run_rules_for_file(
+                    engine_instance,
+                    file_path,
+                    &sql.processed_sql,
+                    script_type,
+                    config,
+                    config_dir,
+                    filter,
+                    line_offset,
+                )?;
                 file_violations.extend(violations);
             }
             cache.insert(file_path, file_violations.clone());
@@ -297,12 +341,12 @@ fn run_check(
     }
     let (mut config, config_dir) = load_config(config_path, explicit_config)?;
     if let Some(d) = dialect_override {
-        config.dialect = crate::config::CheckDialect::from_str(d);
+        config.dialect = sqlguard::config::CheckDialect::from_str(d);
         eprintln!("Dialect override: {} → {}", config.dialect.as_str(), d);
     }
     // 解析方言回退链：CLI --dialect-fallback > 配置 dialect_fallback > 主方言默认回退。
     let fallback = if let Some(fb) = dialect_fallback_override {
-        Some(crate::config::CheckDialect::from_str(fb))
+        Some(sqlguard::config::CheckDialect::from_str(fb))
     } else if let Some(cfg_fb) = config.dialect_fallback {
         Some(cfg_fb)
     } else {
@@ -342,7 +386,8 @@ fn run_check(
     let (missing, unexpected) =
         directory::check_directory_structure(&absolute_target, &config.structure, exclude_dirs);
 
-    let sql_files = classification::collect_sql_files(&absolute_target, &effective_scan_paths, exclude_dirs);
+    let sql_files =
+        classification::collect_sql_files(&absolute_target, &effective_scan_paths, exclude_dirs);
     let mapper_files = mapper::collect_mapper_files(&absolute_target, &config.mapper, exclude_dirs);
 
     // 缓存开关优先级：CLI --no-cache > CLI --cache > [cache].enabled
@@ -376,15 +421,30 @@ fn run_check(
     };
 
     let engine_instance = engine::build_engine();
-    let (all_violations, files_checked) = check_files(&config, &config_dir, &filter, &engine_instance, &sql_files, &mapper_files, &mut file_cache)?;
+    let (all_violations, files_checked) = check_files(
+        &config,
+        &config_dir,
+        &filter,
+        &engine_instance,
+        &sql_files,
+        &mapper_files,
+        &mut file_cache,
+    )?;
 
     // 写回缓存（仅在启用且有变更时实际落盘）
     file_cache.flush();
 
     let formats = parse_formats(format);
     let output_dir_path = resolve_output_dir(output_dir, &absolute_target);
-    reporter::output_reports(&all_violations, &missing, &unexpected, files_checked, &formats, &output_dir_path)
-        .map_err(SqlGuardError::CheckError)?;
+    reporter::output_reports(
+        &all_violations,
+        &missing,
+        &unexpected,
+        files_checked,
+        &formats,
+        &output_dir_path,
+    )
+    .map_err(SqlGuardError::CheckError)?;
 
     let has_errors = all_violations.iter().any(|v| v.severity == "error");
     let has_missing = !missing.is_empty();
@@ -416,17 +476,14 @@ fn run_replay_export(
     };
     let exclude_dirs: &[String] = &config.scan.exclude_dirs;
 
-    let sql_files = classification::collect_sql_files(&absolute_target, &effective_scan_paths, exclude_dirs);
+    let sql_files =
+        classification::collect_sql_files(&absolute_target, &effective_scan_paths, exclude_dirs);
     let mapper_files = mapper::collect_mapper_files(&absolute_target, &config.mapper, exclude_dirs);
 
     let type_filter = replay_export::parse_type_filter(types);
 
-    let manifest = replay_export::build_manifest(
-        &absolute_target,
-        &sql_files,
-        &mapper_files,
-        &type_filter,
-    )?;
+    let manifest =
+        replay_export::build_manifest(&absolute_target, &sql_files, &mapper_files, &type_filter)?;
 
     let json = replay_export::manifest_to_json(&manifest)?;
 
@@ -466,12 +523,12 @@ fn run_check_diff(
 ) -> Result<(), SqlGuardError> {
     let (mut config, config_dir) = load_config(config_path, explicit_config)?;
     if let Some(d) = dialect_override {
-        config.dialect = crate::config::CheckDialect::from_str(d);
+        config.dialect = sqlguard::config::CheckDialect::from_str(d);
         eprintln!("Dialect override: {} → {}", config.dialect.as_str(), d);
     }
     // 解析方言回退链：CLI --dialect-fallback > 配置 dialect_fallback > 主方言默认回退。
     let fallback = if let Some(fb) = dialect_fallback_override {
-        Some(crate::config::CheckDialect::from_str(fb))
+        Some(sqlguard::config::CheckDialect::from_str(fb))
     } else if let Some(cfg_fb) = config.dialect_fallback {
         Some(cfg_fb)
     } else {
@@ -516,7 +573,8 @@ fn run_check_diff(
     if diffs.is_empty() {
         eprintln!("No SQL changes detected since {}", base);
         let formats = parse_formats(format);
-        let output_dir_path = resolve_output_dir(output_dir, &std::env::current_dir().unwrap_or_default());
+        let output_dir_path =
+            resolve_output_dir(output_dir, &std::env::current_dir().unwrap_or_default());
         reporter::output_reports(&[], &[], &[], 0, &formats, &output_dir_path)
             .map_err(SqlGuardError::CheckError)?;
         return Ok(());
@@ -574,7 +632,10 @@ fn run_check_diff(
                 }
             };
             for sql in extracted {
-                let script_type = mapper::map_statement_type(&sql.statement_type, &config.mapper.statement_type_mapping);
+                let script_type = mapper::map_statement_type(
+                    &sql.statement_type,
+                    &config.mapper.statement_type_mapping,
+                );
                 let line_offset = sql.raw_xml_line.saturating_sub(1);
                 let violations = engine::run_rules_for_file(
                     &engine_instance,
@@ -618,12 +679,21 @@ fn run_check_diff(
     // 3. 输出报告
     let formats = parse_formats(format);
     let output_dir_path = resolve_output_dir(output_dir, &absolute_target);
-    reporter::output_reports(&all_violations, &[], &[], files_checked, &formats, &output_dir_path)
-        .map_err(SqlGuardError::CheckError)?;
+    reporter::output_reports(
+        &all_violations,
+        &[],
+        &[],
+        files_checked,
+        &formats,
+        &output_dir_path,
+    )
+    .map_err(SqlGuardError::CheckError)?;
 
     let has_errors = all_violations.iter().any(|v| v.severity == "error");
     if has_errors {
-        Err(SqlGuardError::CheckError("Incremental checks failed".to_string()))
+        Err(SqlGuardError::CheckError(
+            "Incremental checks failed".to_string(),
+        ))
     } else {
         Ok(())
     }
@@ -683,7 +753,7 @@ fn run_gen_rollback(
     let (mut config, _config_dir) = load_config(config_path, explicit_config)?;
 
     // 应用 CLI 覆盖到 rollback 配置
-    let rc: &mut crate::config::RollbackConfig = &mut config.rollback;
+    let rc: &mut sqlguard::config::RollbackConfig = &mut config.rollback;
 
     // ★ P2-3：旧配置兼容映射——lock_tables_during_backup=false 且未显式覆盖 lock_scope 时，
     // 视为用户意图"不加锁"，将 lock_scope 从默认 auto 改为 none。
@@ -710,16 +780,14 @@ fn run_gen_rollback(
     }
 
     // 解析方言
-    let dialect: crate::rollback::Dialect = rc
-        .dialect
-        .parse()
-        .map_err(|e: String| {
-            SqlGuardError::ConfigError(format!("Invalid rollback.dialect '{}': {}", rc.dialect, e))
-        })?;
-    let renderer = crate::rollback::renderer_for(dialect);
+    let dialect: sqlguard::rollback::Dialect = rc.dialect.parse().map_err(|e: String| {
+        SqlGuardError::ConfigError(format!("Invalid rollback.dialect '{}': {}", rc.dialect, e))
+    })?;
+    let renderer = sqlguard::rollback::renderer_for(dialect);
 
     // R2 预检：lock_scope=table 必须显式确认
-    let prereq_errors = crate::rollback::render::validate_render_prerequisites(&[], &config.rollback);
+    let prereq_errors =
+        sqlguard::rollback::render::validate_render_prerequisites(&[], &config.rollback);
     if !prereq_errors.is_empty() {
         for e in &prereq_errors {
             eprintln!("Prerequisite error: {}", e);
@@ -738,7 +806,8 @@ fn run_gen_rollback(
     };
     let exclude_dirs: &[String] = &config.scan.exclude_dirs;
 
-    let sql_files = classification::collect_sql_files(&absolute_target, &effective_scan_paths, exclude_dirs);
+    let sql_files =
+        classification::collect_sql_files(&absolute_target, &effective_scan_paths, exclude_dirs);
     let mapper_files = if config.mapper.enabled {
         mapper::collect_mapper_files(&absolute_target, &config.mapper, exclude_dirs)
     } else {
@@ -752,15 +821,17 @@ fn run_gen_rollback(
         dialect.as_str()
     );
 
-    let mut generator = crate::rollback::RollbackGenerator::new(&config, &config.rollback, &*renderer);
-    let mut pairs: Vec<crate::rollback::BackupRollbackPair> = Vec::new();
+    let mut generator =
+        sqlguard::rollback::RollbackGenerator::new(&config, &config.rollback, &*renderer);
+    let mut pairs: Vec<sqlguard::rollback::BackupRollbackPair> = Vec::new();
 
     // 脚本模式：解析每个 SQL 文件为 SqlAst，遍历 StmtInfo
     for file_path in &sql_files {
         let content = fs::read_to_string(file_path).map_err(|e| {
             SqlGuardError::CheckError(format!("Failed to read '{}': {}", file_path.display(), e))
         })?;
-        let ast = engine::parser::parse_sql_to_ast_fb(&content, config.dialect, config.dialect_fallback);
+        let ast =
+            engine::parser::parse_sql_to_ast_fb(&content, config.dialect, config.dialect_fallback);
 
         if let Some(err) = &ast.parse_error {
             eprintln!(
@@ -781,7 +852,7 @@ fn run_gen_rollback(
             }
             // 提取原始 SQL 文本片段（按行号）
             let original = extract_sql_lines(&content, stmt.line as usize, stmt.end_line as usize);
-            let source = crate::rollback::SourceRef {
+            let source = sqlguard::rollback::SourceRef {
                 file: file_path.to_string_lossy().to_string(),
                 line: stmt.line,
                 end_line: stmt.end_line,
@@ -808,16 +879,26 @@ fn run_gen_rollback(
                 }
             };
             for sql in extracted {
-                if !config.rollback.include_select && sql.statement_type.eq_ignore_ascii_case("select") {
+                if !config.rollback.include_select
+                    && sql.statement_type.eq_ignore_ascii_case("select")
+                {
                     continue;
                 }
-                let ast = engine::parser::parse_sql_to_ast_fb(&sql.processed_sql, config.dialect, config.dialect_fallback);
+                let ast = engine::parser::parse_sql_to_ast_fb(
+                    &sql.processed_sql,
+                    config.dialect,
+                    config.dialect_fallback,
+                );
                 for stmt in &ast.statements {
                     if stmt.kind == "PARSE_ERROR" {
                         continue;
                     }
-                    let original = extract_sql_lines(&sql.processed_sql, stmt.line as usize, stmt.end_line as usize);
-                    let source = crate::rollback::SourceRef {
+                    let original = extract_sql_lines(
+                        &sql.processed_sql,
+                        stmt.line as usize,
+                        stmt.end_line as usize,
+                    );
+                    let source = sqlguard::rollback::SourceRef {
                         file: file_path.to_string_lossy().to_string(),
                         line: sql.raw_xml_line as i64 + stmt.line - 1,
                         end_line: sql.raw_xml_line as i64 + stmt.end_line - 1,
@@ -840,7 +921,7 @@ fn run_gen_rollback(
     );
 
     // ★ 按源文件分组（保持首次出现顺序），用于 per-file 输出
-    let mut file_groups: Vec<(String, Vec<crate::rollback::BackupRollbackPair>)> = Vec::new();
+    let mut file_groups: Vec<(String, Vec<sqlguard::rollback::BackupRollbackPair>)> = Vec::new();
     let mut file_index: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     for pair in pairs.drain(..) {
         let file = pair.source.file.clone();
@@ -855,13 +936,14 @@ fn run_gen_rollback(
     // P1-2：per-file finalize_safety（每个文件独立判定 lock_type，DML-only 文件不被
     // 其他文件的 DDL 拉高锁级别）
     for (_file, group) in &mut file_groups {
-        crate::rollback::render::finalize_safety(group, &config.rollback);
+        sqlguard::rollback::render::finalize_safety(group, &config.rollback);
     }
 
     // R4 预检：per-file 校验，聚合错误
     let mut prereq_errors: Vec<String> = Vec::new();
     for (_file, group) in &file_groups {
-        let errs = crate::rollback::render::validate_render_prerequisites(group, &config.rollback);
+        let errs =
+            sqlguard::rollback::render::validate_render_prerequisites(group, &config.rollback);
         prereq_errors.extend(errs);
     }
     if !prereq_errors.is_empty() {
@@ -899,9 +981,9 @@ fn run_gen_rollback(
         fs::create_dir_all(&rollback_dir).map_err(SqlGuardError::IoError)?;
 
         let backup_sql =
-            crate::rollback::render::render_backup(group, &config.rollback, &*renderer);
+            sqlguard::rollback::render::render_backup(group, &config.rollback, &*renderer);
         let rollback_sql =
-            crate::rollback::render::render_rollback(group, &config.rollback, &*renderer);
+            sqlguard::rollback::render::render_rollback(group, &config.rollback, &*renderer);
 
         let backup_out = backup_dir.join(&file_name);
         let rollback_out = rollback_dir.join(&file_name);
@@ -914,20 +996,22 @@ fn run_gen_rollback(
     }
 
     // 全局 cleanup + manifest（跨文件汇总，写在 output_dir 根目录）
-    let all_pairs: Vec<crate::rollback::BackupRollbackPair> = file_groups
-        .into_iter()
-        .flat_map(|(_, g)| g)
-        .collect();
+    let all_pairs: Vec<sqlguard::rollback::BackupRollbackPair> =
+        file_groups.into_iter().flat_map(|(_, g)| g).collect();
 
     let cleanup_sql =
-        crate::rollback::render::render_cleanup(&all_pairs, &config.rollback, &*renderer);
+        sqlguard::rollback::render::render_cleanup(&all_pairs, &config.rollback, &*renderer);
     let cleanup_path = absolute_output.join(&config.rollback.cleanup_file);
     fs::write(&cleanup_path, &cleanup_sql).map_err(SqlGuardError::IoError)?;
 
     // 构建并写 manifest（★ P1-2：传入 rc 以透出 assert_on_schema_mismatch / on_partitioned_table）
-    let manifest =
-        crate::rollback::Manifest::from_pairs(&all_pairs, dialect.as_str(), &config.rollback, Vec::new());
-    let manifest_json = crate::rollback::serialize_manifest(&manifest)
+    let manifest = sqlguard::rollback::Manifest::from_pairs(
+        &all_pairs,
+        dialect.as_str(),
+        &config.rollback,
+        Vec::new(),
+    );
+    let manifest_json = sqlguard::rollback::serialize_manifest(&manifest)
         .map_err(|e| SqlGuardError::CheckError(format!("Failed to serialize manifest: {}", e)))?;
     let manifest_path = absolute_output.join(&config.rollback.manifest_file);
     fs::write(&manifest_path, &manifest_json).map_err(SqlGuardError::IoError)?;
@@ -962,8 +1046,7 @@ fn run_init(target_dir: &Path) -> Result<(), SqlGuardError> {
     }
 
     let config_content = get_default_config_content();
-    fs::write(target_dir.join("sqlguard.toml"), config_content)
-        .map_err(SqlGuardError::IoError)?;
+    fs::write(target_dir.join("sqlguard.toml"), config_content).map_err(SqlGuardError::IoError)?;
 
     let rules_content = get_default_rules_content();
     fs::write(target_dir.join("sqlguard.rules.toml"), rules_content)
@@ -971,36 +1054,131 @@ fn run_init(target_dir: &Path) -> Result<(), SqlGuardError> {
 
     // (name, subdir, content) — content 通过 include_str! 编译时嵌入
     let rules: &[(&str, &str, &str)] = &[
-        ("no_drop_table", "ddl", include_str!("../config/rules/ddl/no_drop_table.rhai")),
-        ("primary_key_required", "ddl", include_str!("../config/rules/ddl/primary_key_required.rhai")),
-        ("no_reserved_keyword_naming", "ddl", include_str!("../config/rules/ddl/no_reserved_keyword_naming.rhai")),
-        ("backup_table_naming", "ddl", include_str!("../config/rules/ddl/backup_table_naming.rhai")),
-        ("index_naming_convention", "ddl", include_str!("../config/rules/ddl/index_naming_convention.rhai")),
-        ("no_redundant_index", "ddl", include_str!("../config/rules/ddl/no_redundant_index.rhai")),
-        ("table_name_naming", "ddl", include_str!("../config/rules/ddl/table_name_naming.rhai")),
-        ("no_select_all", "dml", include_str!("../config/rules/dml/no_select_all.rhai")),
-        ("no_delete_update_without_where", "dml", include_str!("../config/rules/dml/no_delete_update_without_where.rhai")),
-        ("insert_columns_required", "dml", include_str!("../config/rules/dml/insert_columns_required.rhai")),
-        ("subquery_alias_required", "dml", include_str!("../config/rules/dml/subquery_alias_required.rhai")),
-        ("column_references_qualified", "dml", include_str!("../config/rules/dml/column_references_qualified.rhai")),
-        ("no_join_without_condition", "dml", include_str!("../config/rules/dml/no_join_without_condition.rhai")),
-        ("no_unused_join", "dml", include_str!("../config/rules/dml/no_unused_join.rhai")),
-        ("no_unused_cte", "dml", include_str!("../config/rules/dml/no_unused_cte.rhai")),
-        ("use_is_null", "dml", include_str!("../config/rules/dml/use_is_null.rhai")),
-        ("use_coalesce", "dml", include_str!("../config/rules/dml/use_coalesce.rhai")),
-        ("no_order_by_in_subquery", "dml", include_str!("../config/rules/dml/no_order_by_in_subquery.rhai")),
-        ("union_all_preferred", "dml", include_str!("../config/rules/dml/union_all_preferred.rhai")),
-        ("no_nested_case", "dml", include_str!("../config/rules/dml/no_nested_case.rhai")),
-        ("no_constant_where", "dml", include_str!("../config/rules/dml/no_constant_where.rhai")),
-        ("order_by_required_for_pagination", "dml", include_str!("../config/rules/dml/order_by_required_for_pagination.rhai")),
+        (
+            "no_drop_table",
+            "ddl",
+            include_str!("../config/rules/ddl/no_drop_table.rhai"),
+        ),
+        (
+            "primary_key_required",
+            "ddl",
+            include_str!("../config/rules/ddl/primary_key_required.rhai"),
+        ),
+        (
+            "no_reserved_keyword_naming",
+            "ddl",
+            include_str!("../config/rules/ddl/no_reserved_keyword_naming.rhai"),
+        ),
+        (
+            "backup_table_naming",
+            "ddl",
+            include_str!("../config/rules/ddl/backup_table_naming.rhai"),
+        ),
+        (
+            "index_naming_convention",
+            "ddl",
+            include_str!("../config/rules/ddl/index_naming_convention.rhai"),
+        ),
+        (
+            "no_redundant_index",
+            "ddl",
+            include_str!("../config/rules/ddl/no_redundant_index.rhai"),
+        ),
+        (
+            "table_name_naming",
+            "ddl",
+            include_str!("../config/rules/ddl/table_name_naming.rhai"),
+        ),
+        (
+            "no_select_all",
+            "dml",
+            include_str!("../config/rules/dml/no_select_all.rhai"),
+        ),
+        (
+            "no_delete_update_without_where",
+            "dml",
+            include_str!("../config/rules/dml/no_delete_update_without_where.rhai"),
+        ),
+        (
+            "insert_columns_required",
+            "dml",
+            include_str!("../config/rules/dml/insert_columns_required.rhai"),
+        ),
+        (
+            "subquery_alias_required",
+            "dml",
+            include_str!("../config/rules/dml/subquery_alias_required.rhai"),
+        ),
+        (
+            "column_references_qualified",
+            "dml",
+            include_str!("../config/rules/dml/column_references_qualified.rhai"),
+        ),
+        (
+            "no_join_without_condition",
+            "dml",
+            include_str!("../config/rules/dml/no_join_without_condition.rhai"),
+        ),
+        (
+            "no_unused_join",
+            "dml",
+            include_str!("../config/rules/dml/no_unused_join.rhai"),
+        ),
+        (
+            "no_unused_cte",
+            "dml",
+            include_str!("../config/rules/dml/no_unused_cte.rhai"),
+        ),
+        (
+            "use_is_null",
+            "dml",
+            include_str!("../config/rules/dml/use_is_null.rhai"),
+        ),
+        (
+            "use_coalesce",
+            "dml",
+            include_str!("../config/rules/dml/use_coalesce.rhai"),
+        ),
+        (
+            "no_order_by_in_subquery",
+            "dml",
+            include_str!("../config/rules/dml/no_order_by_in_subquery.rhai"),
+        ),
+        (
+            "union_all_preferred",
+            "dml",
+            include_str!("../config/rules/dml/union_all_preferred.rhai"),
+        ),
+        (
+            "no_nested_case",
+            "dml",
+            include_str!("../config/rules/dml/no_nested_case.rhai"),
+        ),
+        (
+            "no_constant_where",
+            "dml",
+            include_str!("../config/rules/dml/no_constant_where.rhai"),
+        ),
+        (
+            "order_by_required_for_pagination",
+            "dml",
+            include_str!("../config/rules/dml/order_by_required_for_pagination.rhai"),
+        ),
     ];
 
     for (name, rule_type, content) in rules {
-        let path = target_dir.join("config").join("rules").join(rule_type).join(format!("{}.rhai", name));
+        let path = target_dir
+            .join("config")
+            .join("rules")
+            .join(rule_type)
+            .join(format!("{}.rhai", name));
         fs::write(&path, content).map_err(SqlGuardError::IoError)?;
     }
 
-    println!("Initialized SqlGuard configuration in {}", target_dir.display());
+    println!(
+        "Initialized SqlGuard configuration in {}",
+        target_dir.display()
+    );
     println!("  - sqlguard.toml          # 主配置（结构/分类/输出/扫描/文件检查）");
     println!("  - sqlguard.rules.toml    # 规则配置（[[rules]] 单独拆分，避免文件过长）");
     println!("  - config/rules/ddl/ (7 rule files)");
@@ -1012,7 +1190,7 @@ fn run_init(target_dir: &Path) -> Result<(), SqlGuardError> {
 
 fn generate_default_config() -> Config {
     Config {
-        structure: crate::config::StructureConfig {
+        structure: sqlguard::config::StructureConfig {
             paths: vec![
                 "sql/ddl".to_string(),
                 "sql/dml".to_string(),
@@ -1021,15 +1199,15 @@ fn generate_default_config() -> Config {
             strict: true,
             allow_extra: vec![".gitkeep".to_string(), "config/".to_string()],
         },
-        classification: crate::config::ClassificationConfig {
+        classification: sqlguard::config::ClassificationConfig {
             rules: vec![
-                crate::config::ClassificationRule {
+                sqlguard::config::ClassificationRule {
                     name: "ddl-by-dir".to_string(),
                     pattern: "**/ddl/**".to_string(),
                     script_type: "ddl".to_string(),
                     priority: 10,
                 },
-                crate::config::ClassificationRule {
+                sqlguard::config::ClassificationRule {
                     name: "dml-by-dir".to_string(),
                     pattern: "**/dml/**".to_string(),
                     script_type: "dml".to_string(),
@@ -1040,7 +1218,7 @@ fn generate_default_config() -> Config {
         },
         rules: vec![
             // ===== P0 规则：默认启用 =====
-            crate::config::RuleConfig {
+            sqlguard::config::RuleConfig {
                 id: "DDL001".to_string(),
                 name: "no_drop_table".to_string(),
                 group: Some("ddl-safety".to_string()),
@@ -1050,7 +1228,7 @@ fn generate_default_config() -> Config {
                 applies_to: vec!["ddl".to_string()],
                 severity: "error".to_string(),
             },
-            crate::config::RuleConfig {
+            sqlguard::config::RuleConfig {
                 id: "DDL002".to_string(),
                 name: "primary_key_required".to_string(),
                 group: Some("ddl-safety".to_string()),
@@ -1060,7 +1238,7 @@ fn generate_default_config() -> Config {
                 applies_to: vec!["ddl".to_string()],
                 severity: "warning".to_string(),
             },
-            crate::config::RuleConfig {
+            sqlguard::config::RuleConfig {
                 id: "DDL003".to_string(),
                 name: "no_reserved_keyword_naming".to_string(),
                 group: Some("ddl-safety".to_string()),
@@ -1070,7 +1248,7 @@ fn generate_default_config() -> Config {
                 applies_to: vec!["ddl".to_string()],
                 severity: "error".to_string(),
             },
-            crate::config::RuleConfig {
+            sqlguard::config::RuleConfig {
                 id: "DDL004".to_string(),
                 name: "backup_table_naming".to_string(),
                 group: Some("ddl-convention".to_string()),
@@ -1080,7 +1258,7 @@ fn generate_default_config() -> Config {
                 applies_to: vec!["ddl".to_string()],
                 severity: "warning".to_string(),
             },
-            crate::config::RuleConfig {
+            sqlguard::config::RuleConfig {
                 id: "DDL005".to_string(),
                 name: "index_naming_convention".to_string(),
                 group: Some("ddl-convention".to_string()),
@@ -1090,7 +1268,7 @@ fn generate_default_config() -> Config {
                 applies_to: vec!["ddl".to_string()],
                 severity: "warning".to_string(),
             },
-            crate::config::RuleConfig {
+            sqlguard::config::RuleConfig {
                 id: "DDL006".to_string(),
                 name: "no_redundant_index".to_string(),
                 group: Some("ddl-performance".to_string()),
@@ -1100,7 +1278,7 @@ fn generate_default_config() -> Config {
                 applies_to: vec!["ddl".to_string()],
                 severity: "warning".to_string(),
             },
-            crate::config::RuleConfig {
+            sqlguard::config::RuleConfig {
                 id: "DDL007".to_string(),
                 name: "table_name_naming".to_string(),
                 group: Some("ddl-convention".to_string()),
@@ -1110,7 +1288,7 @@ fn generate_default_config() -> Config {
                 applies_to: vec!["ddl".to_string()],
                 severity: "warning".to_string(),
             },
-            crate::config::RuleConfig {
+            sqlguard::config::RuleConfig {
                 id: "DML001".to_string(),
                 name: "no_select_all".to_string(),
                 group: Some("dml-safety".to_string()),
@@ -1120,7 +1298,7 @@ fn generate_default_config() -> Config {
                 applies_to: vec!["dml".to_string()],
                 severity: "error".to_string(),
             },
-            crate::config::RuleConfig {
+            sqlguard::config::RuleConfig {
                 id: "DML002".to_string(),
                 name: "no_delete_update_without_where".to_string(),
                 group: Some("dml-safety".to_string()),
@@ -1130,7 +1308,7 @@ fn generate_default_config() -> Config {
                 applies_to: vec!["dml".to_string()],
                 severity: "error".to_string(),
             },
-            crate::config::RuleConfig {
+            sqlguard::config::RuleConfig {
                 id: "DML003".to_string(),
                 name: "insert_columns_required".to_string(),
                 group: Some("dml-safety".to_string()),
@@ -1140,7 +1318,7 @@ fn generate_default_config() -> Config {
                 applies_to: vec!["dml".to_string()],
                 severity: "error".to_string(),
             },
-            crate::config::RuleConfig {
+            sqlguard::config::RuleConfig {
                 id: "DML004".to_string(),
                 name: "subquery_alias_required".to_string(),
                 group: Some("dml-style".to_string()),
@@ -1150,7 +1328,7 @@ fn generate_default_config() -> Config {
                 applies_to: vec!["dml".to_string()],
                 severity: "error".to_string(),
             },
-            crate::config::RuleConfig {
+            sqlguard::config::RuleConfig {
                 id: "DML005".to_string(),
                 name: "column_references_qualified".to_string(),
                 group: Some("dml-style".to_string()),
@@ -1160,7 +1338,7 @@ fn generate_default_config() -> Config {
                 applies_to: vec!["dml".to_string()],
                 severity: "warning".to_string(),
             },
-            crate::config::RuleConfig {
+            sqlguard::config::RuleConfig {
                 id: "DML006".to_string(),
                 name: "no_join_without_condition".to_string(),
                 group: Some("dml-safety".to_string()),
@@ -1170,7 +1348,7 @@ fn generate_default_config() -> Config {
                 applies_to: vec!["dml".to_string()],
                 severity: "error".to_string(),
             },
-            crate::config::RuleConfig {
+            sqlguard::config::RuleConfig {
                 id: "DML007".to_string(),
                 name: "order_by_required_for_pagination".to_string(),
                 group: Some("dml-safety".to_string()),
@@ -1181,7 +1359,7 @@ fn generate_default_config() -> Config {
                 severity: "error".to_string(),
             },
             // ===== P1 规则：默认禁用，建议评估后启用 =====
-            crate::config::RuleConfig {
+            sqlguard::config::RuleConfig {
                 id: "DML101".to_string(),
                 name: "no_unused_join".to_string(),
                 group: Some("dml-performance".to_string()),
@@ -1191,7 +1369,7 @@ fn generate_default_config() -> Config {
                 applies_to: vec!["dml".to_string()],
                 severity: "warning".to_string(),
             },
-            crate::config::RuleConfig {
+            sqlguard::config::RuleConfig {
                 id: "DML102".to_string(),
                 name: "no_unused_cte".to_string(),
                 group: Some("dml-performance".to_string()),
@@ -1201,7 +1379,7 @@ fn generate_default_config() -> Config {
                 applies_to: vec!["dml".to_string()],
                 severity: "warning".to_string(),
             },
-            crate::config::RuleConfig {
+            sqlguard::config::RuleConfig {
                 id: "DML103".to_string(),
                 name: "use_is_null".to_string(),
                 group: Some("dml-convention".to_string()),
@@ -1211,7 +1389,7 @@ fn generate_default_config() -> Config {
                 applies_to: vec!["dml".to_string()],
                 severity: "error".to_string(),
             },
-            crate::config::RuleConfig {
+            sqlguard::config::RuleConfig {
                 id: "DML104".to_string(),
                 name: "use_coalesce".to_string(),
                 group: Some("dml-convention".to_string()),
@@ -1221,7 +1399,7 @@ fn generate_default_config() -> Config {
                 applies_to: vec!["dml".to_string()],
                 severity: "warning".to_string(),
             },
-            crate::config::RuleConfig {
+            sqlguard::config::RuleConfig {
                 id: "DML105".to_string(),
                 name: "no_order_by_in_subquery".to_string(),
                 group: Some("dml-performance".to_string()),
@@ -1231,7 +1409,7 @@ fn generate_default_config() -> Config {
                 applies_to: vec!["dml".to_string()],
                 severity: "warning".to_string(),
             },
-            crate::config::RuleConfig {
+            sqlguard::config::RuleConfig {
                 id: "DML106".to_string(),
                 name: "union_all_preferred".to_string(),
                 group: Some("dml-performance".to_string()),
@@ -1241,7 +1419,7 @@ fn generate_default_config() -> Config {
                 applies_to: vec!["dml".to_string()],
                 severity: "warning".to_string(),
             },
-            crate::config::RuleConfig {
+            sqlguard::config::RuleConfig {
                 id: "DML107".to_string(),
                 name: "no_nested_case".to_string(),
                 group: Some("dml-convention".to_string()),
@@ -1251,7 +1429,7 @@ fn generate_default_config() -> Config {
                 applies_to: vec!["dml".to_string()],
                 severity: "warning".to_string(),
             },
-            crate::config::RuleConfig {
+            sqlguard::config::RuleConfig {
                 id: "DML108".to_string(),
                 name: "no_constant_where".to_string(),
                 group: Some("dml-convention".to_string()),
@@ -1264,16 +1442,16 @@ fn generate_default_config() -> Config {
         ],
         rules_file: None,
         rules_dir: PathBuf::new(),
-        output: crate::config::OutputConfig {
+        output: sqlguard::config::OutputConfig {
             formats: vec!["plain".to_string()],
             output_dir: None,
         },
-        mapper: crate::config::MapperConfig::default(),
-        scan: crate::config::ScanConfig::default(),
-        file_check: crate::config::FileCheckConfig::default(),
-        rollback: crate::config::RollbackConfig::default(),
-        cache: crate::config::CacheConfig::default(),
-        dialect: crate::config::CheckDialect::default(),
+        mapper: sqlguard::config::MapperConfig::default(),
+        scan: sqlguard::config::ScanConfig::default(),
+        file_check: sqlguard::config::FileCheckConfig::default(),
+        rollback: sqlguard::config::RollbackConfig::default(),
+        cache: sqlguard::config::CacheConfig::default(),
+        dialect: sqlguard::config::CheckDialect::default(),
         dialect_fallback: None,
     }
 }
@@ -1615,4 +1793,179 @@ script_path = "config/rules/dml/no_constant_where.rhai"
 applies_to = ["dml"]
 severity = "warning"
 "#
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sqlguard::git_diff::FileDiff;
+
+    fn make_violation(rule_id: &str, line: Option<usize>) -> Violation {
+        Violation {
+            rule_id: rule_id.to_string(),
+            rule_name: "test".to_string(),
+            rule_group: None,
+            severity: "error".to_string(),
+            message: "test".to_string(),
+            file_path: PathBuf::from("test.sql"),
+            script_type: "dml".to_string(),
+            line,
+            end_line: line,
+            column: None,
+        }
+    }
+
+    // === resolve_absolute_path ===
+
+    #[test]
+    fn resolve_absolute_path_keeps_absolute() {
+        let abs = Path::new("/tmp/test");
+        let result = resolve_absolute_path(abs);
+        assert!(result.is_absolute());
+        assert_eq!(result, PathBuf::from("/tmp/test"));
+    }
+
+    #[test]
+    fn resolve_absolute_path_joins_cwd_for_relative() {
+        let rel = Path::new("foo/bar.sql");
+        let result = resolve_absolute_path(rel);
+        let cwd = std::env::current_dir().unwrap();
+        assert_eq!(result, cwd.join("foo/bar.sql"));
+    }
+
+    // === resolve_output_dir ===
+
+    #[test]
+    fn resolve_output_dir_none_falls_back_to_target() {
+        let target = Path::new("/tmp/target");
+        let result = resolve_output_dir(None, target);
+        assert_eq!(result, PathBuf::from("/tmp/target"));
+    }
+
+    #[test]
+    fn resolve_output_dir_absolute_kept() {
+        let result = resolve_output_dir(Some(Path::new("/tmp/out")), Path::new("/tmp/target"));
+        assert_eq!(result, PathBuf::from("/tmp/out"));
+    }
+
+    #[test]
+    fn resolve_output_dir_relative_joined_cwd() {
+        let cwd = std::env::current_dir().unwrap();
+        let result = resolve_output_dir(Some(Path::new("out")), Path::new("/tmp/target"));
+        assert_eq!(result, cwd.join("out"));
+    }
+
+    // === parse_formats ===
+
+    #[test]
+    fn parse_formats_all() {
+        let result = parse_formats("all");
+        assert_eq!(result, vec!["plain", "json", "html", "sarif"]);
+    }
+
+    #[test]
+    fn parse_formats_single() {
+        let result = parse_formats("json");
+        assert_eq!(result, vec!["json"]);
+    }
+
+    #[test]
+    fn parse_formats_csv() {
+        let result = parse_formats("json, html, sarif");
+        assert_eq!(result, vec!["json", "html", "sarif"]);
+    }
+
+    // === filter_violations_by_diff ===
+
+    #[test]
+    fn filter_violations_new_file_keeps_all() {
+        let violations = vec![make_violation("R1", Some(1)), make_violation("R2", Some(5))];
+        let diff = FileDiff {
+            path: PathBuf::from("test.sql"),
+            hunks: vec![],
+            is_new: true,
+        };
+        let result = filter_violations_by_diff(violations, &diff);
+        assert_eq!(result.len(), 2);
+    }
+
+    #[test]
+    fn filter_violations_in_hunk_kept() {
+        let violations = vec![make_violation("R1", Some(10))];
+        let diff = FileDiff {
+            path: PathBuf::from("test.sql"),
+            hunks: vec![(8, 15)],
+            is_new: false,
+        };
+        let result = filter_violations_by_diff(violations, &diff);
+        assert_eq!(result.len(), 1);
+    }
+
+    #[test]
+    fn filter_violations_outside_hunk_filtered() {
+        let violations = vec![make_violation("R1", Some(100))];
+        let diff = FileDiff {
+            path: PathBuf::from("test.sql"),
+            hunks: vec![(8, 15)],
+            is_new: false,
+        };
+        let result = filter_violations_by_diff(violations, &diff);
+        assert_eq!(result.len(), 0);
+    }
+
+    #[test]
+    fn filter_violations_no_line_kept() {
+        let violations = vec![make_violation("R1", None)];
+        let diff = FileDiff {
+            path: PathBuf::from("test.sql"),
+            hunks: vec![(8, 15)],
+            is_new: false,
+        };
+        let result = filter_violations_by_diff(violations, &diff);
+        assert_eq!(result.len(), 1);
+    }
+
+    #[test]
+    fn filter_violations_range_overlaps_hunk() {
+        // violation spans lines 10-20, hunk is 15-25 → overlap
+        let mut v = make_violation("R1", Some(10));
+        v.end_line = Some(20);
+        let diff = FileDiff {
+            path: PathBuf::from("test.sql"),
+            hunks: vec![(15, 25)],
+            is_new: false,
+        };
+        let result = filter_violations_by_diff(vec![v], &diff);
+        assert_eq!(result.len(), 1);
+    }
+
+    // === extract_sql_lines ===
+
+    #[test]
+    fn extract_sql_lines_basic() {
+        let content = "line1\nline2\nline3\nline4";
+        let result = extract_sql_lines(content, 2, 3);
+        assert_eq!(result, "line2\nline3");
+    }
+
+    #[test]
+    fn extract_sql_lines_single() {
+        let content = "a\nb\nc";
+        let result = extract_sql_lines(content, 1, 1);
+        assert_eq!(result, "a");
+    }
+
+    #[test]
+    fn extract_sql_lines_full() {
+        let content = "a\nb\nc";
+        let result = extract_sql_lines(content, 1, 3);
+        assert_eq!(result, "a\nb\nc");
+    }
+
+    #[test]
+    fn extract_sql_lines_out_of_range() {
+        let content = "a\nb";
+        let result = extract_sql_lines(content, 5, 10);
+        assert_eq!(result, "");
+    }
 }

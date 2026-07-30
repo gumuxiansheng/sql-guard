@@ -19,6 +19,16 @@ colored = "2"
 sqlparser = "0.60"
 quick-xml = "0.31"
 
+[dev-dependencies]
+proptest = "1.5"
+criterion = { version = "0.5", features = ["html_reports"] }
+tempfile = "3"
+
+# 基准测试：cargo bench --bench rule_engine
+[[bench]]
+name = "rule_engine"
+harness = false
+
 # Release 构建优化：显著减小二进制体积
 # - lto = "fat": 跨 crate 全链接优化，去除跨 crate 死代码（慢但小）
 # - codegen-units = 1: 单代码生成单元，让 LLVM 全局优化

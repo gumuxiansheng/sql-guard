@@ -9,7 +9,10 @@ pub enum SqlGuardError {
     /// ★ D2：规则执行错误变体。当前规则引擎错误统一走 CheckError，此变体保留用于
     /// 未来细粒度错误分类（按 rule_name 区分），是公开 API 契约的一部分。
     #[allow(dead_code)]
-    RuleError { rule_name: String, message: String },
+    RuleError {
+        rule_name: String,
+        message: String,
+    },
     ScriptError(String),
     CheckError(String),
     MapperError(String),

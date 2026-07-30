@@ -25,7 +25,10 @@ pub fn current_iso8601_utc() -> String {
     let minute = (sec_of_day % 3600) / 60;
     let second = sec_of_day % 60;
     let (y, m, d) = ymd_from_days_since_epoch(days);
-    format!("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z", y, m, d, hour, minute, second)
+    format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
+        y, m, d, hour, minute, second
+    )
 }
 
 /// 将"自 1970-01-01 起的天数"转换为 `(year, month, day)`。
@@ -40,7 +43,20 @@ pub fn ymd_from_days_since_epoch(mut days: i64) -> (i64, i64, i64) {
         days -= days_in_year;
         year += 1;
     }
-    let month_lengths: [i64; 12] = [31, if is_leap(year) { 29 } else { 28 }, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    let month_lengths: [i64; 12] = [
+        31,
+        if is_leap(year) { 29 } else { 28 },
+        31,
+        30,
+        31,
+        30,
+        31,
+        31,
+        30,
+        31,
+        30,
+        31,
+    ];
     let mut month = 1i64;
     for &ml in &month_lengths {
         if days < ml {

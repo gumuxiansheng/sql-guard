@@ -6,13 +6,13 @@
 //! 2. StmtInfo.create_table 中的列级 / 表级 PRIMARY KEY
 //! 3. 无主键 → 返回空 Vec，调用方按 `reliable=false` 处理
 
-use std::collections::HashMap;
+use super::strip_ident_quotes;
 /// ★ D3：`PrimaryKeyDecl` 仅在 cfg(test) 测试模块中使用（构造测试配置），
 /// 编译器 dead_code 分析不看测试模块故报 unused，此处显式允许。
 #[allow(unused_imports)]
-use crate::config::{RollbackConfig, PrimaryKeyDecl};
+use crate::config::{PrimaryKeyDecl, RollbackConfig};
 use crate::rule::engine::ast::StmtInfo;
-use super::strip_ident_quotes;
+use std::collections::HashMap;
 
 /// 主键解析器。
 pub struct PrimaryKeyResolver {
@@ -24,7 +24,10 @@ impl PrimaryKeyResolver {
     pub fn new(rc: &RollbackConfig) -> Self {
         let mut declared = HashMap::new();
         for pk in &rc.primary_keys {
-            declared.insert(strip_ident_quotes(&pk.table).to_lowercase(), pk.columns.clone());
+            declared.insert(
+                strip_ident_quotes(&pk.table).to_lowercase(),
+                pk.columns.clone(),
+            );
         }
         PrimaryKeyResolver { declared }
     }
@@ -43,7 +46,9 @@ impl PrimaryKeyResolver {
                     return ci.primary_key_columns.clone();
                 }
                 // 列级 PRIMARY KEY
-                let pk_cols: Vec<String> = ci.columns.iter()
+                let pk_cols: Vec<String> = ci
+                    .columns
+                    .iter()
                     .filter(|c| c.is_primary_key)
                     .map(|c| c.name.clone())
                     .collect();
@@ -68,7 +73,7 @@ impl PrimaryKeyResolver {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::rule::engine::ast::{StmtInfo, CreateInfo, ColumnInfo};
+    use crate::rule::engine::ast::{ColumnInfo, CreateInfo, StmtInfo};
 
     fn rc_with_pk(table: &str, cols: &[&str]) -> RollbackConfig {
         let mut rc = RollbackConfig::default();
@@ -94,18 +99,30 @@ mod tests {
         let resolver = PrimaryKeyResolver::new(&rc);
         let mut stmt = StmtInfo {
             kind: "INSERT".to_string(),
-            line: 1, end_line: 1, column: 0,
+            line: 1,
+            end_line: 1,
+            column: 0,
             create_table: Some(CreateInfo {
                 table_name: "users".to_string(),
                 primary_key_columns: vec!["id".to_string()],
                 ..Default::default()
             }),
-            drop_object: None, select: None, insert: None, update: None, delete: None,
-            alter_table: None, truncate: None, create_view: None, create_index: None,
+            drop_object: None,
+            select: None,
+            insert: None,
+            update: None,
+            delete: None,
+            alter_table: None,
+            truncate: None,
+            create_view: None,
+            create_index: None,
             transaction: None,
         };
         let _ = &mut stmt;
-        assert_eq!(resolver.resolve("users", Some(&stmt)), vec!["id".to_string()]);
+        assert_eq!(
+            resolver.resolve("users", Some(&stmt)),
+            vec!["id".to_string()]
+        );
     }
 
     #[test]
@@ -114,21 +131,40 @@ mod tests {
         let resolver = PrimaryKeyResolver::new(&rc);
         let mut stmt = StmtInfo {
             kind: "INSERT".to_string(),
-            line: 1, end_line: 1, column: 0,
+            line: 1,
+            end_line: 1,
+            column: 0,
             create_table: Some(CreateInfo {
                 table_name: "users".to_string(),
                 columns: vec![
-                    ColumnInfo { name: "id".to_string(), is_primary_key: true, ..Default::default() },
-                    ColumnInfo { name: "name".to_string(), ..Default::default() },
+                    ColumnInfo {
+                        name: "id".to_string(),
+                        is_primary_key: true,
+                        ..Default::default()
+                    },
+                    ColumnInfo {
+                        name: "name".to_string(),
+                        ..Default::default()
+                    },
                 ],
                 ..Default::default()
             }),
-            drop_object: None, select: None, insert: None, update: None, delete: None,
-            alter_table: None, truncate: None, create_view: None, create_index: None,
+            drop_object: None,
+            select: None,
+            insert: None,
+            update: None,
+            delete: None,
+            alter_table: None,
+            truncate: None,
+            create_view: None,
+            create_index: None,
             transaction: None,
         };
         let _ = &mut stmt;
-        assert_eq!(resolver.resolve("users", Some(&stmt)), vec!["id".to_string()]);
+        assert_eq!(
+            resolver.resolve("users", Some(&stmt)),
+            vec!["id".to_string()]
+        );
     }
 
     #[test]
@@ -144,6 +180,9 @@ mod tests {
         let mut resolver = PrimaryKeyResolver::new(&rc);
         assert!(resolver.resolve("orders", None).is_empty());
         resolver.register("orders", vec!["order_id".to_string()]);
-        assert_eq!(resolver.resolve("orders", None), vec!["order_id".to_string()]);
+        assert_eq!(
+            resolver.resolve("orders", None),
+            vec!["order_id".to_string()]
+        );
     }
 }

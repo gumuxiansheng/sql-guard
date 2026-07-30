@@ -9,9 +9,9 @@
 //!
 //! M1 阶段为骨架实现，M3 阶段补全 ALTER metadata-only 反向操作。
 
-use crate::rule::engine::ast::StmtInfo;
 use super::dialect::DialectRenderer;
-use super::{BackupRollbackPair, SourceRef, SafetyClass, BackupStrategy, strip_ident_quotes};
+use super::{strip_ident_quotes, BackupRollbackPair, BackupStrategy, SafetyClass, SourceRef};
+use crate::rule::engine::ast::StmtInfo;
 
 /// CREATE TABLE → rollback: `DROP TABLE IF EXISTS <name>`
 pub fn gen_create_table(
@@ -21,7 +21,11 @@ pub fn gen_create_table(
     original: &str,
     r: &dyn DialectRenderer,
 ) -> BackupRollbackPair {
-    let table = stmt.create_table.as_ref().map(|c| c.table_name.as_str()).unwrap_or("");
+    let table = stmt
+        .create_table
+        .as_ref()
+        .map(|c| c.table_name.as_str())
+        .unwrap_or("");
     let table = strip_ident_quotes(table);
     let rollback = format!("DROP TABLE IF EXISTS {};", r.quote_ident(&table));
     BackupRollbackPair {
@@ -46,7 +50,9 @@ pub fn gen_create_index(
     original: &str,
     r: &dyn DialectRenderer,
 ) -> BackupRollbackPair {
-    let (idx, tbl) = stmt.create_index.as_ref()
+    let (idx, tbl) = stmt
+        .create_index
+        .as_ref()
         .map(|c| (c.name.as_str(), c.table_name.as_str()))
         .unwrap_or(("", ""));
     let idx = strip_ident_quotes(idx);
@@ -74,7 +80,11 @@ pub fn gen_create_view(
     original: &str,
     r: &dyn DialectRenderer,
 ) -> BackupRollbackPair {
-    let name = stmt.create_view.as_ref().map(|v| v.name.as_str()).unwrap_or("");
+    let name = stmt
+        .create_view
+        .as_ref()
+        .map(|v| v.name.as_str())
+        .unwrap_or("");
     let name = strip_ident_quotes(name);
     let rollback = format!("DROP VIEW IF EXISTS {};", r.quote_ident(&name));
     BackupRollbackPair {
@@ -179,7 +189,10 @@ pub fn gen_alter_metadata(
                                 r.quote_ident(&con)
                             ));
                         }
-                        warnings.push(format!("Unknown ADD_CONSTRAINT subtype, fallback DROP INDEX: {}", op.detail));
+                        warnings.push(format!(
+                            "Unknown ADD_CONSTRAINT subtype, fallback DROP INDEX: {}",
+                            op.detail
+                        ));
                     }
                 }
                 "ADD_PRIMARY_KEY" => {
@@ -214,13 +227,12 @@ pub fn gen_alter_metadata(
                     let old_table = &tbl;
                     let new_table = strip_ident_quotes(&op.table_name);
                     if new_table.is_empty() {
-                        warnings.push("RENAME TABLE rollback skipped: new table name empty".to_string());
+                        warnings.push(
+                            "RENAME TABLE rollback skipped: new table name empty".to_string(),
+                        );
                         reliable = false;
                     } else {
-                        rollback_parts.push(format!(
-                            "{};",
-                            r.rename_table(&new_table, old_table)
-                        ));
+                        rollback_parts.push(format!("{};", r.rename_table(&new_table, old_table)));
                     }
                 }
                 _ => {
@@ -269,16 +281,27 @@ fn extract_renamed_to(detail: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::rule::engine::ast::{StmtInfo, CreateInfo, CreateIndexInfo, ViewInfo, AlterTableInfo, AlterOpInfo};
     use crate::rollback::dialect::{MySqlRenderer, PostgreSqlRenderer};
+    use crate::rule::engine::ast::{
+        AlterOpInfo, AlterTableInfo, CreateIndexInfo, CreateInfo, StmtInfo, ViewInfo,
+    };
 
     fn make_alter_stmt(table: &str, ops: Vec<AlterOpInfo>) -> StmtInfo {
         StmtInfo {
             kind: "ALTER_TABLE".to_string(),
-            line: 1, end_line: 1, column: 0,
-            create_table: None, drop_object: None, select: None, insert: None,
-            update: None, delete: None, truncate: None, create_view: None,
-            create_index: None, transaction: None,
+            line: 1,
+            end_line: 1,
+            column: 0,
+            create_table: None,
+            drop_object: None,
+            select: None,
+            insert: None,
+            update: None,
+            delete: None,
+            truncate: None,
+            create_view: None,
+            create_index: None,
+            transaction: None,
             alter_table: Some(AlterTableInfo {
                 table_name: table.to_string(),
                 operations: ops,
@@ -303,22 +326,54 @@ mod tests {
     fn create_table_rollback_drops() {
         let stmt = StmtInfo {
             kind: "CREATE_TABLE".to_string(),
-            line: 1, end_line: 1, column: 0,
-            create_table: Some(CreateInfo { table_name: "users".to_string(), ..Default::default() }),
-            drop_object: None, select: None, insert: None, update: None, delete: None,
-            alter_table: None, truncate: None, create_view: None, create_index: None, transaction: None,
+            line: 1,
+            end_line: 1,
+            column: 0,
+            create_table: Some(CreateInfo {
+                table_name: "users".to_string(),
+                ..Default::default()
+            }),
+            drop_object: None,
+            select: None,
+            insert: None,
+            update: None,
+            delete: None,
+            alter_table: None,
+            truncate: None,
+            create_view: None,
+            create_index: None,
+            transaction: None,
         };
-        let pair = gen_create_table(&stmt, 1, SourceRef::placeholder(), "CREATE TABLE users (...)", &MySqlRenderer);
-        assert_eq!(pair.rollback.as_deref(), Some("DROP TABLE IF EXISTS `users`;"));
+        let pair = gen_create_table(
+            &stmt,
+            1,
+            SourceRef::placeholder(),
+            "CREATE TABLE users (...)",
+            &MySqlRenderer,
+        );
+        assert_eq!(
+            pair.rollback.as_deref(),
+            Some("DROP TABLE IF EXISTS `users`;")
+        );
     }
 
     #[test]
     fn create_index_rollback_drops() {
         let stmt = StmtInfo {
             kind: "CREATE_INDEX".to_string(),
-            line: 1, end_line: 1, column: 0,
-            create_table: None, drop_object: None, select: None, insert: None, update: None,
-            delete: None, alter_table: None, truncate: None, create_view: None, transaction: None,
+            line: 1,
+            end_line: 1,
+            column: 0,
+            create_table: None,
+            drop_object: None,
+            select: None,
+            insert: None,
+            update: None,
+            delete: None,
+            alter_table: None,
+            truncate: None,
+            create_view: None,
+            transaction: None,
             create_index: Some(CreateIndexInfo {
                 name: "idx_users_email".to_string(),
                 table_name: "users".to_string(),
@@ -326,21 +381,54 @@ mod tests {
                 is_unique: false,
             }),
         };
-        let pair = gen_create_index(&stmt, 1, SourceRef::placeholder(), "CREATE INDEX ...", &MySqlRenderer);
-        assert_eq!(pair.rollback.as_deref(), Some("DROP INDEX IF EXISTS `idx_users_email` ON `users`;"));
+        let pair = gen_create_index(
+            &stmt,
+            1,
+            SourceRef::placeholder(),
+            "CREATE INDEX ...",
+            &MySqlRenderer,
+        );
+        assert_eq!(
+            pair.rollback.as_deref(),
+            Some("DROP INDEX IF EXISTS `idx_users_email` ON `users`;")
+        );
     }
 
     #[test]
     fn create_view_rollback_drops() {
         let stmt = StmtInfo {
             kind: "CREATE_VIEW".to_string(),
-            line: 1, end_line: 1, column: 0,
-            create_table: None, drop_object: None, select: None, insert: None, update: None,
-            delete: None, alter_table: None, truncate: None, create_index: None, transaction: None,
-            create_view: Some(ViewInfo { name: "v_orders".to_string(), materialized: false, is_replace: false, column_count: 0 }),
+            line: 1,
+            end_line: 1,
+            column: 0,
+            create_table: None,
+            drop_object: None,
+            select: None,
+            insert: None,
+            update: None,
+            delete: None,
+            alter_table: None,
+            truncate: None,
+            create_index: None,
+            transaction: None,
+            create_view: Some(ViewInfo {
+                name: "v_orders".to_string(),
+                materialized: false,
+                is_replace: false,
+                column_count: 0,
+            }),
         };
-        let pair = gen_create_view(&stmt, 1, SourceRef::placeholder(), "CREATE VIEW ...", &MySqlRenderer);
-        assert_eq!(pair.rollback.as_deref(), Some("DROP VIEW IF EXISTS `v_orders`;"));
+        let pair = gen_create_view(
+            &stmt,
+            1,
+            SourceRef::placeholder(),
+            "CREATE VIEW ...",
+            &MySqlRenderer,
+        );
+        assert_eq!(
+            pair.rollback.as_deref(),
+            Some("DROP VIEW IF EXISTS `v_orders`;")
+        );
     }
 
     // ===== M3 ALTER metadata-only 反向操作测试 =====
@@ -348,153 +436,354 @@ mod tests {
     #[test]
     fn rename_column_generates_reverse_rename() {
         // op.column_name = old (parser 已提取), detail = "RENAME COLUMN old TO new"
-        let stmt = make_alter_stmt("users", vec![alter_op(
-            "RENAME_COLUMN", "name", "", "",
-            "RENAME COLUMN name TO full_name",
-        )]);
-        let pair = gen_alter_metadata(&stmt, 1, SourceRef::placeholder(), "ALTER TABLE users RENAME COLUMN name TO full_name", &MySqlRenderer);
-        assert_eq!(pair.rollback.as_deref(), Some("ALTER TABLE `users` RENAME COLUMN `full_name` TO `name`;"));
+        let stmt = make_alter_stmt(
+            "users",
+            vec![alter_op(
+                "RENAME_COLUMN",
+                "name",
+                "",
+                "",
+                "RENAME COLUMN name TO full_name",
+            )],
+        );
+        let pair = gen_alter_metadata(
+            &stmt,
+            1,
+            SourceRef::placeholder(),
+            "ALTER TABLE users RENAME COLUMN name TO full_name",
+            &MySqlRenderer,
+        );
+        assert_eq!(
+            pair.rollback.as_deref(),
+            Some("ALTER TABLE `users` RENAME COLUMN `full_name` TO `name`;")
+        );
         assert!(pair.safety.reliable);
     }
 
     #[test]
     fn rename_column_pg_uses_double_quotes() {
-        let stmt = make_alter_stmt("users", vec![alter_op(
-            "RENAME_COLUMN", "name", "", "",
-            "RENAME COLUMN name TO full_name",
-        )]);
-        let pair = gen_alter_metadata(&stmt, 1, SourceRef::placeholder(), "ALTER TABLE users RENAME COLUMN name TO full_name", &PostgreSqlRenderer);
-        assert_eq!(pair.rollback.as_deref(), Some("ALTER TABLE \"users\" RENAME COLUMN \"full_name\" TO \"name\";"));
+        let stmt = make_alter_stmt(
+            "users",
+            vec![alter_op(
+                "RENAME_COLUMN",
+                "name",
+                "",
+                "",
+                "RENAME COLUMN name TO full_name",
+            )],
+        );
+        let pair = gen_alter_metadata(
+            &stmt,
+            1,
+            SourceRef::placeholder(),
+            "ALTER TABLE users RENAME COLUMN name TO full_name",
+            &PostgreSqlRenderer,
+        );
+        assert_eq!(
+            pair.rollback.as_deref(),
+            Some("ALTER TABLE \"users\" RENAME COLUMN \"full_name\" TO \"name\";")
+        );
     }
 
     #[test]
     fn rename_column_strips_quoted_new_name() {
         // detail 中新名带反引号，提取后应剥离
-        let stmt = make_alter_stmt("users", vec![alter_op(
-            "RENAME_COLUMN", "name", "", "",
-            "RENAME COLUMN name TO `full_name`",
-        )]);
-        let pair = gen_alter_metadata(&stmt, 1, SourceRef::placeholder(), "ALTER TABLE users RENAME COLUMN name TO `full_name`", &MySqlRenderer);
-        assert_eq!(pair.rollback.as_deref(), Some("ALTER TABLE `users` RENAME COLUMN `full_name` TO `name`;"));
+        let stmt = make_alter_stmt(
+            "users",
+            vec![alter_op(
+                "RENAME_COLUMN",
+                "name",
+                "",
+                "",
+                "RENAME COLUMN name TO `full_name`",
+            )],
+        );
+        let pair = gen_alter_metadata(
+            &stmt,
+            1,
+            SourceRef::placeholder(),
+            "ALTER TABLE users RENAME COLUMN name TO `full_name`",
+            &MySqlRenderer,
+        );
+        assert_eq!(
+            pair.rollback.as_deref(),
+            Some("ALTER TABLE `users` RENAME COLUMN `full_name` TO `name`;")
+        );
     }
 
     #[test]
     fn rename_column_missing_new_name_marks_unreliable() {
         // detail 中无 " TO "，提取失败 → 标 unreliable + warning
-        let stmt = make_alter_stmt("users", vec![alter_op(
-            "RENAME_COLUMN", "name", "", "",
-            "RENAME COLUMN name",
-        )]);
-        let pair = gen_alter_metadata(&stmt, 1, SourceRef::placeholder(), "ALTER TABLE users RENAME COLUMN name", &MySqlRenderer);
+        let stmt = make_alter_stmt(
+            "users",
+            vec![alter_op(
+                "RENAME_COLUMN",
+                "name",
+                "",
+                "",
+                "RENAME COLUMN name",
+            )],
+        );
+        let pair = gen_alter_metadata(
+            &stmt,
+            1,
+            SourceRef::placeholder(),
+            "ALTER TABLE users RENAME COLUMN name",
+            &MySqlRenderer,
+        );
         assert!(pair.rollback.is_none());
         assert!(!pair.safety.reliable);
-        assert!(pair.warnings.iter().any(|w| w.contains("cannot extract new name")));
+        assert!(pair
+            .warnings
+            .iter()
+            .any(|w| w.contains("cannot extract new name")));
     }
 
     #[test]
     fn rename_table_mysql_generates_rename_back() {
         // alter.table_name = users (old), op.table_name = users_new (new)
-        let stmt = make_alter_stmt("users", vec![alter_op(
-            "RENAME_TABLE", "", "users_new", "",
-            "RENAME TO users_new",
-        )]);
-        let pair = gen_alter_metadata(&stmt, 1, SourceRef::placeholder(), "ALTER TABLE users RENAME TO users_new", &MySqlRenderer);
-        assert_eq!(pair.rollback.as_deref(), Some("RENAME TABLE `users_new` TO `users`;"));
+        let stmt = make_alter_stmt(
+            "users",
+            vec![alter_op(
+                "RENAME_TABLE",
+                "",
+                "users_new",
+                "",
+                "RENAME TO users_new",
+            )],
+        );
+        let pair = gen_alter_metadata(
+            &stmt,
+            1,
+            SourceRef::placeholder(),
+            "ALTER TABLE users RENAME TO users_new",
+            &MySqlRenderer,
+        );
+        assert_eq!(
+            pair.rollback.as_deref(),
+            Some("RENAME TABLE `users_new` TO `users`;")
+        );
         assert!(pair.safety.reliable);
     }
 
     #[test]
     fn rename_table_pg_generates_alter_rename_back() {
-        let stmt = make_alter_stmt("users", vec![alter_op(
-            "RENAME_TABLE", "", "users_new", "",
-            "RENAME TO users_new",
-        )]);
-        let pair = gen_alter_metadata(&stmt, 1, SourceRef::placeholder(), "ALTER TABLE users RENAME TO users_new", &PostgreSqlRenderer);
-        assert_eq!(pair.rollback.as_deref(), Some("ALTER TABLE \"users_new\" RENAME TO \"users\";"));
+        let stmt = make_alter_stmt(
+            "users",
+            vec![alter_op(
+                "RENAME_TABLE",
+                "",
+                "users_new",
+                "",
+                "RENAME TO users_new",
+            )],
+        );
+        let pair = gen_alter_metadata(
+            &stmt,
+            1,
+            SourceRef::placeholder(),
+            "ALTER TABLE users RENAME TO users_new",
+            &PostgreSqlRenderer,
+        );
+        assert_eq!(
+            pair.rollback.as_deref(),
+            Some("ALTER TABLE \"users_new\" RENAME TO \"users\";")
+        );
     }
 
     #[test]
     fn rename_table_empty_new_name_marks_unreliable() {
-        let stmt = make_alter_stmt("users", vec![alter_op(
-            "RENAME_TABLE", "", "", "",
-            "RENAME TO",
-        )]);
-        let pair = gen_alter_metadata(&stmt, 1, SourceRef::placeholder(), "ALTER TABLE users RENAME TO", &MySqlRenderer);
+        let stmt = make_alter_stmt(
+            "users",
+            vec![alter_op("RENAME_TABLE", "", "", "", "RENAME TO")],
+        );
+        let pair = gen_alter_metadata(
+            &stmt,
+            1,
+            SourceRef::placeholder(),
+            "ALTER TABLE users RENAME TO",
+            &MySqlRenderer,
+        );
         assert!(pair.rollback.is_none());
         assert!(!pair.safety.reliable);
-        assert!(pair.warnings.iter().any(|w| w.contains("new table name empty")));
+        assert!(pair
+            .warnings
+            .iter()
+            .any(|w| w.contains("new table name empty")));
     }
 
     #[test]
     fn add_constraint_pk_generates_drop_primary_key() {
-        let stmt = make_alter_stmt("users", vec![alter_op(
-            "ADD_CONSTRAINT", "", "", "pk_users",
-            "ADD CONSTRAINT pk_users PRIMARY KEY (id)",
-        )]);
-        let pair = gen_alter_metadata(&stmt, 1, SourceRef::placeholder(), "ALTER TABLE users ADD CONSTRAINT pk_users PRIMARY KEY (id)", &MySqlRenderer);
-        assert_eq!(pair.rollback.as_deref(), Some("ALTER TABLE `users` DROP PRIMARY KEY;"));
+        let stmt = make_alter_stmt(
+            "users",
+            vec![alter_op(
+                "ADD_CONSTRAINT",
+                "",
+                "",
+                "pk_users",
+                "ADD CONSTRAINT pk_users PRIMARY KEY (id)",
+            )],
+        );
+        let pair = gen_alter_metadata(
+            &stmt,
+            1,
+            SourceRef::placeholder(),
+            "ALTER TABLE users ADD CONSTRAINT pk_users PRIMARY KEY (id)",
+            &MySqlRenderer,
+        );
+        assert_eq!(
+            pair.rollback.as_deref(),
+            Some("ALTER TABLE `users` DROP PRIMARY KEY;")
+        );
     }
 
     #[test]
     fn add_constraint_unique_generates_drop_index() {
-        let stmt = make_alter_stmt("users", vec![alter_op(
-            "ADD_CONSTRAINT", "", "", "uk_email",
-            "ADD CONSTRAINT uk_email UNIQUE (email)",
-        )]);
-        let pair = gen_alter_metadata(&stmt, 1, SourceRef::placeholder(), "ALTER TABLE users ADD CONSTRAINT uk_email UNIQUE (email)", &MySqlRenderer);
-        assert_eq!(pair.rollback.as_deref(), Some("ALTER TABLE `users` DROP INDEX `uk_email`;"));
+        let stmt = make_alter_stmt(
+            "users",
+            vec![alter_op(
+                "ADD_CONSTRAINT",
+                "",
+                "",
+                "uk_email",
+                "ADD CONSTRAINT uk_email UNIQUE (email)",
+            )],
+        );
+        let pair = gen_alter_metadata(
+            &stmt,
+            1,
+            SourceRef::placeholder(),
+            "ALTER TABLE users ADD CONSTRAINT uk_email UNIQUE (email)",
+            &MySqlRenderer,
+        );
+        assert_eq!(
+            pair.rollback.as_deref(),
+            Some("ALTER TABLE `users` DROP INDEX `uk_email`;")
+        );
     }
 
     #[test]
     fn add_constraint_fk_generates_drop_constraint_with_warning() {
-        let stmt = make_alter_stmt("orders", vec![alter_op(
-            "ADD_CONSTRAINT", "", "", "fk_user",
-            "ADD CONSTRAINT fk_user FOREIGN KEY (user_id) REFERENCES users(id)",
-        )]);
-        let pair = gen_alter_metadata(&stmt, 1, SourceRef::placeholder(), "ALTER TABLE orders ADD CONSTRAINT fk_user FOREIGN KEY (user_id) REFERENCES users(id)", &MySqlRenderer);
-        assert_eq!(pair.rollback.as_deref(), Some("ALTER TABLE `orders` DROP CONSTRAINT `fk_user`;"));
+        let stmt = make_alter_stmt(
+            "orders",
+            vec![alter_op(
+                "ADD_CONSTRAINT",
+                "",
+                "",
+                "fk_user",
+                "ADD CONSTRAINT fk_user FOREIGN KEY (user_id) REFERENCES users(id)",
+            )],
+        );
+        let pair = gen_alter_metadata(
+            &stmt,
+            1,
+            SourceRef::placeholder(),
+            "ALTER TABLE orders ADD CONSTRAINT fk_user FOREIGN KEY (user_id) REFERENCES users(id)",
+            &MySqlRenderer,
+        );
+        assert_eq!(
+            pair.rollback.as_deref(),
+            Some("ALTER TABLE `orders` DROP CONSTRAINT `fk_user`;")
+        );
         // MySQL 方言下 FK 应为 DROP FOREIGN KEY，加 warning 提示
-        assert!(pair.warnings.iter().any(|w| w.contains("FOREIGN KEY") && w.contains("DROP FOREIGN KEY")));
+        assert!(pair
+            .warnings
+            .iter()
+            .any(|w| w.contains("FOREIGN KEY") && w.contains("DROP FOREIGN KEY")));
     }
 
     #[test]
     fn add_constraint_check_generates_drop_constraint() {
-        let stmt = make_alter_stmt("users", vec![alter_op(
-            "ADD_CONSTRAINT", "", "", "ck_age",
-            "ADD CONSTRAINT ck_age CHECK (age >= 0)",
-        )]);
-        let pair = gen_alter_metadata(&stmt, 1, SourceRef::placeholder(), "ALTER TABLE users ADD CONSTRAINT ck_age CHECK (age >= 0)", &MySqlRenderer);
-        assert_eq!(pair.rollback.as_deref(), Some("ALTER TABLE `users` DROP CONSTRAINT `ck_age`;"));
+        let stmt = make_alter_stmt(
+            "users",
+            vec![alter_op(
+                "ADD_CONSTRAINT",
+                "",
+                "",
+                "ck_age",
+                "ADD CONSTRAINT ck_age CHECK (age >= 0)",
+            )],
+        );
+        let pair = gen_alter_metadata(
+            &stmt,
+            1,
+            SourceRef::placeholder(),
+            "ALTER TABLE users ADD CONSTRAINT ck_age CHECK (age >= 0)",
+            &MySqlRenderer,
+        );
+        assert_eq!(
+            pair.rollback.as_deref(),
+            Some("ALTER TABLE `users` DROP CONSTRAINT `ck_age`;")
+        );
     }
 
     #[test]
     fn add_column_no_constraint_generates_drop_column() {
-        let stmt = make_alter_stmt("users", vec![alter_op(
-            "ADD_COLUMN", "age", "", "",
-            "ADD COLUMN age INT",
-        )]);
-        let pair = gen_alter_metadata(&stmt, 1, SourceRef::placeholder(), "ALTER TABLE users ADD COLUMN age INT", &MySqlRenderer);
-        assert_eq!(pair.rollback.as_deref(), Some("ALTER TABLE `users` DROP COLUMN `age`;"));
+        let stmt = make_alter_stmt(
+            "users",
+            vec![alter_op("ADD_COLUMN", "age", "", "", "ADD COLUMN age INT")],
+        );
+        let pair = gen_alter_metadata(
+            &stmt,
+            1,
+            SourceRef::placeholder(),
+            "ALTER TABLE users ADD COLUMN age INT",
+            &MySqlRenderer,
+        );
+        assert_eq!(
+            pair.rollback.as_deref(),
+            Some("ALTER TABLE `users` DROP COLUMN `age`;")
+        );
         assert!(pair.safety.reliable);
     }
 
     #[test]
     fn add_index_generates_drop_index() {
-        let stmt = make_alter_stmt("users", vec![alter_op(
-            "ADD_INDEX", "", "", "idx_email",
-            "ADD INDEX idx_email (email)",
-        )]);
-        let pair = gen_alter_metadata(&stmt, 1, SourceRef::placeholder(), "ALTER TABLE users ADD INDEX idx_email (email)", &MySqlRenderer);
-        assert_eq!(pair.rollback.as_deref(), Some("ALTER TABLE `users` DROP INDEX `idx_email`;"));
+        let stmt = make_alter_stmt(
+            "users",
+            vec![alter_op(
+                "ADD_INDEX",
+                "",
+                "",
+                "idx_email",
+                "ADD INDEX idx_email (email)",
+            )],
+        );
+        let pair = gen_alter_metadata(
+            &stmt,
+            1,
+            SourceRef::placeholder(),
+            "ALTER TABLE users ADD INDEX idx_email (email)",
+            &MySqlRenderer,
+        );
+        assert_eq!(
+            pair.rollback.as_deref(),
+            Some("ALTER TABLE `users` DROP INDEX `idx_email`;")
+        );
     }
 
     #[test]
     fn multiple_alter_ops_generate_multi_line_rollback() {
-        let stmt = make_alter_stmt("users", vec![
-            alter_op("ADD_COLUMN", "age", "", "", "ADD COLUMN age INT"),
-            alter_op("ADD_INDEX", "", "", "idx_email", "ADD INDEX idx_email (email)"),
-        ]);
-        let pair = gen_alter_metadata(&stmt, 1, SourceRef::placeholder(), "ALTER TABLE users ADD COLUMN age INT, ADD INDEX idx_email (email)", &MySqlRenderer);
+        let stmt = make_alter_stmt(
+            "users",
+            vec![
+                alter_op("ADD_COLUMN", "age", "", "", "ADD COLUMN age INT"),
+                alter_op(
+                    "ADD_INDEX",
+                    "",
+                    "",
+                    "idx_email",
+                    "ADD INDEX idx_email (email)",
+                ),
+            ],
+        );
+        let pair = gen_alter_metadata(
+            &stmt,
+            1,
+            SourceRef::placeholder(),
+            "ALTER TABLE users ADD COLUMN age INT, ADD INDEX idx_email (email)",
+            &MySqlRenderer,
+        );
         let rollback = pair.rollback.unwrap();
         assert!(rollback.contains("ALTER TABLE `users` DROP COLUMN `age`;"));
         assert!(rollback.contains("ALTER TABLE `users` DROP INDEX `idx_email`;"));
@@ -503,9 +792,18 @@ mod tests {
 
     #[test]
     fn extract_renamed_to_basic() {
-        assert_eq!(extract_renamed_to("RENAME COLUMN name TO full_name"), Some("full_name".to_string()));
-        assert_eq!(extract_renamed_to("RENAME COLUMN name TO `full_name`"), Some("full_name".to_string()));
-        assert_eq!(extract_renamed_to("RENAME TO users_new"), Some("users_new".to_string()));
+        assert_eq!(
+            extract_renamed_to("RENAME COLUMN name TO full_name"),
+            Some("full_name".to_string())
+        );
+        assert_eq!(
+            extract_renamed_to("RENAME COLUMN name TO `full_name`"),
+            Some("full_name".to_string())
+        );
+        assert_eq!(
+            extract_renamed_to("RENAME TO users_new"),
+            Some("users_new".to_string())
+        );
         assert_eq!(extract_renamed_to("RENAME COLUMN name"), None);
         assert_eq!(extract_renamed_to(""), None);
     }

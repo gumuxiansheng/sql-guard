@@ -113,7 +113,9 @@ fn extract_refid(tag: &str) -> Option<String> {
     let mut j = idx + key.len();
     let bytes = tag.as_bytes();
     // 跳过空白和 =
-    while j < bytes.len() && (bytes[j] == b' ' || bytes[j] == b'\t' || bytes[j] == b'\n' || bytes[j] == b'=') {
+    while j < bytes.len()
+        && (bytes[j] == b' ' || bytes[j] == b'\t' || bytes[j] == b'\n' || bytes[j] == b'=')
+    {
         j += 1;
     }
     if j >= bytes.len() {

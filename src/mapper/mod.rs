@@ -8,8 +8,8 @@
 //! XML 解析与 SQL 提取见 [`parser`]，占位符标准化见 [`placeholder`]，
 //! `<include>` 解析见 [`include`]。
 
-use std::path::{Path, PathBuf};
 use std::collections::HashSet;
+use std::path::{Path, PathBuf};
 
 use globset::{Glob, GlobSetBuilder};
 
@@ -114,7 +114,10 @@ fn collect_xml_files(
 /// 让 SELECT 走 query 类型规则，与 DML 分别治理。
 ///
 /// 未在 mapping 中配置的标签回退到 `"other"`。
-pub fn map_statement_type<'a>(stmt_type: &str, mapping: &'a std::collections::HashMap<String, String>) -> &'a str {
+pub fn map_statement_type<'a>(
+    stmt_type: &str,
+    mapping: &'a std::collections::HashMap<String, String>,
+) -> &'a str {
     // 优先查配置映射（大小写不敏感：标签名转小写后匹配）
     let lower = stmt_type.to_lowercase();
     if let Some(t) = mapping.get(&lower) {

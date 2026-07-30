@@ -18,10 +18,10 @@
 //! - UPDATE 的 SET 子句提取为简化文本解析，不支持函数调用内含逗号、CASE WHEN 等复杂表达式
 //! - 单列 PK 的 IN 列表生成仅取首个 PK 列；多列 PK 退化为全表备份
 
-use crate::rule::engine::ast::StmtInfo;
 use super::dialect::DialectRenderer;
 use super::generator::RollbackGenerator;
-use super::{BackupRollbackPair, SourceRef, SafetyClass, BackupStrategy, strip_ident_quotes};
+use super::{strip_ident_quotes, BackupRollbackPair, BackupStrategy, SafetyClass, SourceRef};
+use crate::rule::engine::ast::StmtInfo;
 
 // ===== INSERT =====
 
@@ -42,7 +42,9 @@ pub fn gen_insert(
         None => return missing_insert_info(seq, source, original),
     };
     let table = strip_ident_quotes(&insert.table_name);
-    let columns: Vec<String> = insert.columns.iter()
+    let columns: Vec<String> = insert
+        .columns
+        .iter()
         .map(|c| strip_ident_quotes(c))
         .collect();
 
@@ -51,18 +53,30 @@ pub fn gen_insert(
     let pk_cols = gen.pk_resolver.resolve(&table, None);
 
     let (rollback, reliable, warnings) = if tuples.is_empty() {
-        (None, false, vec!["VALUES extraction failed, rollback not generated".to_string()])
+        (
+            None,
+            false,
+            vec!["VALUES extraction failed, rollback not generated".to_string()],
+        )
     } else if pk_cols.is_empty() {
         // 无主键：全列匹配 DELETE
         let del = build_full_column_delete(&table, &columns, &tuples, r);
-        (Some(del), false, vec!["no primary key, fallback to full-column match".to_string()])
+        (
+            Some(del),
+            false,
+            vec!["no primary key, fallback to full-column match".to_string()],
+        )
     } else {
         // 有主键：尝试按 PK 生成 WHERE
         let pk_indices = find_pk_indices(&columns, &pk_cols);
         if pk_indices.is_empty() {
             // PK 列不在 INSERT 列表里（可能 INSERT 没列显式列名，且 PK 是 AUTO_INCREMENT）
             let del = build_full_column_delete(&table, &columns, &tuples, r);
-            (Some(del), false, vec!["PK column not in INSERT columns, fallback to full-column match".to_string()])
+            (
+                Some(del),
+                false,
+                vec!["PK column not in INSERT columns, fallback to full-column match".to_string()],
+            )
         } else {
             let del = build_pk_delete(&table, &pk_cols, &pk_indices, &tuples, r);
             (Some(del), true, vec![])
@@ -76,7 +90,10 @@ pub fn gen_insert(
         original_sql: original.to_string(),
         backup: None,
         rollback,
-        safety: SafetyClass { reliable, ..Default::default() },
+        safety: SafetyClass {
+            reliable,
+            ..Default::default()
+        },
         strategy: BackupStrategy::default(),
         expected_schema: None,
         warnings,
@@ -123,45 +140,67 @@ pub fn gen_update(
     let pk_cols = gen.pk_resolver.resolve(&table, None);
 
     let (rollback, reliable, mut warnings) = if set_cols.is_empty() {
-        (None, false, vec!["SET clause extraction failed, rollback not generated".to_string()])
+        (
+            None,
+            false,
+            vec!["SET clause extraction failed, rollback not generated".to_string()],
+        )
     } else {
         // SET 子句：t.col = bks.col（用 bks_ 表的旧值还原 t 表的列）
-        let set_clause = set_cols.iter()
-            .map(|c| format!(
-                "{}.{} = {}.{}",
-                r.quote_ident(&table),
-                r.quote_ident(c),
-                r.quote_ident(&bks_name),
-                r.quote_ident(c)
-            ))
+        let set_clause = set_cols
+            .iter()
+            .map(|c| {
+                format!(
+                    "{}.{} = {}.{}",
+                    r.quote_ident(&table),
+                    r.quote_ident(c),
+                    r.quote_ident(&bks_name),
+                    r.quote_ident(c)
+                )
+            })
             .collect::<Vec<_>>()
             .join(", ");
 
         // JOIN 条件：有 PK 用 PK，否则全列 JOIN
         let (join_cond, pk_warning) = if !pk_cols.is_empty() {
-            let cond = pk_cols.iter()
-                .map(|c| format!(
-                    "{}.{} = {}.{}",
-                    r.quote_ident(&table), r.quote_ident(c),
-                    r.quote_ident(&bks_name), r.quote_ident(c)
-                ))
+            let cond = pk_cols
+                .iter()
+                .map(|c| {
+                    format!(
+                        "{}.{} = {}.{}",
+                        r.quote_ident(&table),
+                        r.quote_ident(c),
+                        r.quote_ident(&bks_name),
+                        r.quote_ident(c)
+                    )
+                })
                 .collect::<Vec<_>>()
                 .join(" AND ");
             (cond, None)
         } else {
             // 无 PK，全列 JOIN（仅对备份的列做 JOIN，备份是 SELECT *，故全表列）
             // 这里只能用 set_cols + 一个提示，因为不知道完整列列表
-            let cond = set_cols.iter()
-                .map(|c| format!(
-                    "({}.{} = {}.{} OR ({}.{} IS NULL AND {}.{} IS NULL))",
-                    r.quote_ident(&table), r.quote_ident(c),
-                    r.quote_ident(&bks_name), r.quote_ident(c),
-                    r.quote_ident(&table), r.quote_ident(c),
-                    r.quote_ident(&bks_name), r.quote_ident(c)
-                ))
+            let cond = set_cols
+                .iter()
+                .map(|c| {
+                    format!(
+                        "({}.{} = {}.{} OR ({}.{} IS NULL AND {}.{} IS NULL))",
+                        r.quote_ident(&table),
+                        r.quote_ident(c),
+                        r.quote_ident(&bks_name),
+                        r.quote_ident(c),
+                        r.quote_ident(&table),
+                        r.quote_ident(c),
+                        r.quote_ident(&bks_name),
+                        r.quote_ident(c)
+                    )
+                })
                 .collect::<Vec<_>>()
                 .join(" AND ");
-            (cond, Some("no primary key, fallback to all-column JOIN (less reliable)".to_string()))
+            (
+                cond,
+                Some("no primary key, fallback to all-column JOIN (less reliable)".to_string()),
+            )
         };
 
         let rollback = format!(
@@ -353,7 +392,9 @@ pub fn gen_replace(
         None => return missing_insert_info(seq, source, original),
     };
     let table = strip_ident_quotes(&insert.table_name);
-    let columns: Vec<String> = insert.columns.iter()
+    let columns: Vec<String> = insert
+        .columns
+        .iter()
         .map(|c| strip_ident_quotes(c))
         .collect();
 
@@ -364,31 +405,48 @@ pub fn gen_replace(
     // 生成 backup：优先按 PK IN (...) 增量备份旧行；失败则全表备份
     let (backup, mut warnings) = if tuples.is_empty() {
         let b = render_incremental_backup(r, &table, &bks_name, "");
-        (b, vec!["VALUES extraction failed, full table backup".to_string()])
+        (
+            b,
+            vec!["VALUES extraction failed, full table backup".to_string()],
+        )
     } else if pk_cols.is_empty() {
         let b = render_incremental_backup(r, &table, &bks_name, "");
         (b, vec!["no primary key, full table backup".to_string()])
     } else if pk_cols.len() > 1 {
         // 多列 PK 的 IN 列表生成复杂，退化为全表备份
         let b = render_incremental_backup(r, &table, &bks_name, "");
-        (b, vec!["composite PK not supported for REPLACE incremental backup, full table backup".to_string()])
+        (
+            b,
+            vec![
+                "composite PK not supported for REPLACE incremental backup, full table backup"
+                    .to_string(),
+            ],
+        )
     } else {
         // 单列 PK：从 VALUES 提取 PK 值，生成 WHERE pk IN (...)
         let pk_indices = find_pk_indices(&columns, &pk_cols);
         if pk_indices.is_empty() {
             let b = render_incremental_backup(r, &table, &bks_name, "");
-            (b, vec!["PK column not in REPLACE columns, full table backup".to_string()])
+            (
+                b,
+                vec!["PK column not in REPLACE columns, full table backup".to_string()],
+            )
         } else {
             let pk_idx = pk_indices[0];
-            let pk_values: Vec<String> = tuples.iter()
+            let pk_values: Vec<String> = tuples
+                .iter()
                 .filter_map(|t| t.get(pk_idx).cloned())
                 .collect();
             if pk_values.is_empty() {
                 let b = render_incremental_backup(r, &table, &bks_name, "");
-                (b, vec!["PK value extraction failed, full table backup".to_string()])
+                (
+                    b,
+                    vec!["PK value extraction failed, full table backup".to_string()],
+                )
             } else {
                 let in_list = pk_values.join(", ");
-                let where_filter = format!(" WHERE {} IN ({})", r.quote_ident(&pk_cols[0]), in_list);
+                let where_filter =
+                    format!(" WHERE {} IN ({})", r.quote_ident(&pk_cols[0]), in_list);
                 let b = render_incremental_backup(r, &table, &bks_name, &where_filter);
                 (b, vec![])
             }
@@ -845,7 +903,8 @@ fn extract_col_from_segment(segment: &str) -> Option<String> {
 
 /// 找出 PK 列在 INSERT 列列表中的索引位置。
 fn find_pk_indices(columns: &[String], pk_cols: &[String]) -> Vec<usize> {
-    pk_cols.iter()
+    pk_cols
+        .iter()
         .filter_map(|pk| {
             let pk_lower = pk.to_lowercase();
             columns.iter().position(|c| c.to_lowercase() == pk_lower)
@@ -863,7 +922,9 @@ fn build_pk_delete(
 ) -> String {
     let mut deletes = Vec::with_capacity(tuples.len());
     for tuple in tuples {
-        let where_parts: Vec<String> = pk_cols.iter().enumerate()
+        let where_parts: Vec<String> = pk_cols
+            .iter()
+            .enumerate()
             .filter_map(|(i, pk)| {
                 let idx = pk_indices.get(i).copied()?;
                 let val = tuple.get(idx)?;
@@ -891,7 +952,9 @@ fn build_full_column_delete(
 ) -> String {
     let mut deletes = Vec::with_capacity(tuples.len());
     for tuple in tuples {
-        let where_parts: Vec<String> = columns.iter().enumerate()
+        let where_parts: Vec<String> = columns
+            .iter()
+            .enumerate()
             .filter_map(|(i, col)| {
                 let val = tuple.get(i)?;
                 // 跳过 DEFAULT 关键字
@@ -992,11 +1055,12 @@ fn missing_truncate_info(seq: u64, source: SourceRef, original: &str) -> BackupR
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{Config, RollbackConfig, PrimaryKeyDecl};
-    use crate::rollback::{dialect::{MySqlRenderer, PostgreSqlRenderer}, RollbackGenerator};
-    use crate::rule::engine::ast::{
-        StmtInfo, InsertInfo, UpdateInfo, DeleteInfo, TruncateInfo,
+    use crate::config::{Config, PrimaryKeyDecl, RollbackConfig};
+    use crate::rollback::{
+        dialect::{MySqlRenderer, PostgreSqlRenderer},
+        RollbackGenerator,
     };
+    use crate::rule::engine::ast::{DeleteInfo, InsertInfo, StmtInfo, TruncateInfo, UpdateInfo};
 
     fn make_config_with_pk(table: &str, pk: &[&str]) -> (Config, RollbackConfig) {
         let mut rc = RollbackConfig::default();
@@ -1008,19 +1072,25 @@ mod tests {
         }
         let cfg = Config {
             structure: crate::config::StructureConfig {
-                paths: vec![], strict: false, allow_extra: vec![],
+                paths: vec![],
+                strict: false,
+                allow_extra: vec![],
             },
             classification: crate::config::ClassificationConfig {
-                rules: vec![], default_type: "other".to_string(),
+                rules: vec![],
+                default_type: "other".to_string(),
             },
-            rules: vec![], rules_file: None, rules_dir: std::path::PathBuf::new(),
+            rules: vec![],
+            rules_file: None,
+            rules_dir: std::path::PathBuf::new(),
             output: crate::config::OutputConfig::default(),
             mapper: crate::config::MapperConfig::default(),
             scan: crate::config::ScanConfig::default(),
             file_check: crate::config::FileCheckConfig::default(),
             rollback: rc.clone(),
             cache: crate::config::CacheConfig::default(),
-            dialect: crate::config::CheckDialect::default(), dialect_fallback: None,
+            dialect: crate::config::CheckDialect::default(),
+            dialect_fallback: None,
         };
         (cfg, rc)
     }
@@ -1028,56 +1098,92 @@ mod tests {
     fn make_insert_stmt(table: &str, columns: &[&str]) -> StmtInfo {
         StmtInfo {
             kind: "INSERT".to_string(),
-            line: 1, end_line: 1, column: 0,
-            create_table: None, drop_object: None, select: None,
+            line: 1,
+            end_line: 1,
+            column: 0,
+            create_table: None,
+            drop_object: None,
+            select: None,
             insert: Some(InsertInfo {
                 table_name: table.to_string(),
                 columns: columns.iter().map(|s| s.to_string()).collect(),
             }),
-            update: None, delete: None, alter_table: None,
-            truncate: None, create_view: None, create_index: None, transaction: None,
+            update: None,
+            delete: None,
+            alter_table: None,
+            truncate: None,
+            create_view: None,
+            create_index: None,
+            transaction: None,
         }
     }
 
     fn make_update_stmt(table: &str, where_clause: Option<&str>) -> StmtInfo {
         StmtInfo {
             kind: "UPDATE".to_string(),
-            line: 1, end_line: 1, column: 0,
-            create_table: None, drop_object: None, select: None, insert: None,
+            line: 1,
+            end_line: 1,
+            column: 0,
+            create_table: None,
+            drop_object: None,
+            select: None,
+            insert: None,
             update: Some(UpdateInfo {
                 table_name: table.to_string(),
                 where_clause: where_clause.map(|s| s.to_string()),
             }),
-            delete: None, alter_table: None,
-            truncate: None, create_view: None, create_index: None, transaction: None,
+            delete: None,
+            alter_table: None,
+            truncate: None,
+            create_view: None,
+            create_index: None,
+            transaction: None,
         }
     }
 
     fn make_delete_stmt(table: &str, where_clause: Option<&str>) -> StmtInfo {
         StmtInfo {
             kind: "DELETE".to_string(),
-            line: 1, end_line: 1, column: 0,
-            create_table: None, drop_object: None, select: None, insert: None,
+            line: 1,
+            end_line: 1,
+            column: 0,
+            create_table: None,
+            drop_object: None,
+            select: None,
+            insert: None,
             update: None,
             delete: Some(DeleteInfo {
                 table_name: table.to_string(),
                 where_clause: where_clause.map(|s| s.to_string()),
             }),
-            alter_table: None, truncate: None, create_view: None, create_index: None, transaction: None,
+            alter_table: None,
+            truncate: None,
+            create_view: None,
+            create_index: None,
+            transaction: None,
         }
     }
 
     fn make_truncate_stmt(table: &str) -> StmtInfo {
         StmtInfo {
             kind: "TRUNCATE".to_string(),
-            line: 1, end_line: 1, column: 0,
-            create_table: None, drop_object: None, select: None, insert: None,
-            update: None, delete: None, alter_table: None,
+            line: 1,
+            end_line: 1,
+            column: 0,
+            create_table: None,
+            drop_object: None,
+            select: None,
+            insert: None,
+            update: None,
+            delete: None,
+            alter_table: None,
             truncate: Some(TruncateInfo {
                 table_name: table.to_string(),
                 has_table_keyword: true,
             }),
-            create_view: None, create_index: None, transaction: None,
+            create_view: None,
+            create_index: None,
+            transaction: None,
         }
     }
 
@@ -1216,16 +1322,22 @@ mod tests {
     #[test]
     fn insert_with_chinese_value_generates_correct_rollback() {
         // ★ BUG#1 端到端回归：INSERT 含中文 VALUES，无 PK 全列匹配时生成的 DELETE 应保留中文
-        let (cfg, rc) = make_config_with_pk("users", &[]);  // 无 PK → 全列匹配
+        let (cfg, rc) = make_config_with_pk("users", &[]); // 无 PK → 全列匹配
         let mut gen = RollbackGenerator::new(&cfg, &rc, &MySqlRenderer);
         let stmt = make_insert_stmt("users", &["id", "name"]);
         let pair = gen_insert(
-            &stmt, 1, SourceRef::placeholder(),
+            &stmt,
+            1,
+            SourceRef::placeholder(),
             "INSERT INTO users (id, name) VALUES (1, '张三')",
             &mut gen,
         );
         let rollback = pair.rollback.expect("rollback should exist");
-        assert!(rollback.contains("'张三'"), "rollback must preserve Chinese: {}", rollback);
+        assert!(
+            rollback.contains("'张三'"),
+            "rollback must preserve Chinese: {}",
+            rollback
+        );
         assert!(rollback.contains("`name` = '张三'"));
     }
 
@@ -1237,7 +1349,9 @@ mod tests {
         let mut gen = RollbackGenerator::new(&cfg, &rc, &MySqlRenderer);
         let stmt = make_insert_stmt("users", &["id", "name"]);
         let pair = gen_insert(
-            &stmt, 1, SourceRef::placeholder(),
+            &stmt,
+            1,
+            SourceRef::placeholder(),
             "INSERT INTO users (id, name) VALUES (1001, 'alice')",
             &mut gen,
         );
@@ -1253,7 +1367,9 @@ mod tests {
         let mut gen = RollbackGenerator::new(&cfg, &rc, &MySqlRenderer);
         let stmt = make_insert_stmt("users", &["id", "name"]);
         let pair = gen_insert(
-            &stmt, 1, SourceRef::placeholder(),
+            &stmt,
+            1,
+            SourceRef::placeholder(),
             "INSERT INTO users (id, name) VALUES (1001, 'alice')",
             &mut gen,
         );
@@ -1269,7 +1385,9 @@ mod tests {
         let mut gen = RollbackGenerator::new(&cfg, &rc, &MySqlRenderer);
         let stmt = make_insert_stmt("users", &["id", "name"]);
         let pair = gen_insert(
-            &stmt, 1, SourceRef::placeholder(),
+            &stmt,
+            1,
+            SourceRef::placeholder(),
             "INSERT INTO users (id, name) VALUES (1, 'a'), (2, 'b'), (3, 'c')",
             &mut gen,
         );
@@ -1285,7 +1403,9 @@ mod tests {
         let mut gen = RollbackGenerator::new(&cfg, &rc, &MySqlRenderer);
         let stmt = make_update_stmt("orders", Some("status = 'pending'"));
         let pair = gen_update(
-            &stmt, 1, SourceRef::placeholder(),
+            &stmt,
+            1,
+            SourceRef::placeholder(),
             "UPDATE orders SET status = 'shipped', shipped_at = NOW() WHERE status = 'pending'",
             &mut gen,
         );
@@ -1307,7 +1427,9 @@ mod tests {
         let mut gen = RollbackGenerator::new(&cfg, &rc, &MySqlRenderer);
         let stmt = make_update_stmt("orders", None);
         let pair = gen_update(
-            &stmt, 1, SourceRef::placeholder(),
+            &stmt,
+            1,
+            SourceRef::placeholder(),
             "UPDATE orders SET status = 'shipped'",
             &mut gen,
         );
@@ -1321,7 +1443,9 @@ mod tests {
         let mut gen = RollbackGenerator::new(&cfg, &rc, &MySqlRenderer);
         let stmt = make_update_stmt("orders", Some("status = 'pending'"));
         let pair = gen_update(
-            &stmt, 1, SourceRef::placeholder(),
+            &stmt,
+            1,
+            SourceRef::placeholder(),
             "UPDATE orders SET status = 'shipped' WHERE status = 'pending'",
             &mut gen,
         );
@@ -1337,7 +1461,9 @@ mod tests {
         let mut gen = RollbackGenerator::new(&cfg, &rc, &MySqlRenderer);
         let stmt = make_delete_stmt("orders", Some("status = 'cancelled'"));
         let pair = gen_delete(
-            &stmt, 1, SourceRef::placeholder(),
+            &stmt,
+            1,
+            SourceRef::placeholder(),
             "DELETE FROM orders WHERE status = 'cancelled'",
             &mut gen,
         );
@@ -1354,7 +1480,9 @@ mod tests {
         let mut gen = RollbackGenerator::new(&cfg, &rc, &MySqlRenderer);
         let stmt = make_delete_stmt("orders", None);
         let pair = gen_delete(
-            &stmt, 1, SourceRef::placeholder(),
+            &stmt,
+            1,
+            SourceRef::placeholder(),
             "DELETE FROM orders",
             &mut gen,
         );
@@ -1370,7 +1498,9 @@ mod tests {
         let mut gen = RollbackGenerator::new(&cfg, &rc, &MySqlRenderer);
         let stmt = make_truncate_stmt("audit_log");
         let pair = gen_truncate(
-            &stmt, 1, SourceRef::placeholder(),
+            &stmt,
+            1,
+            SourceRef::placeholder(),
             "TRUNCATE TABLE audit_log",
             &mut gen,
         );
@@ -1393,7 +1523,9 @@ mod tests {
         let mut gen = RollbackGenerator::new(&cfg, &rc, &MySqlRenderer);
         let stmt = make_insert_stmt("users", &["id", "name"]);
         let pair = gen_replace(
-            &stmt, 1, SourceRef::placeholder(),
+            &stmt,
+            1,
+            SourceRef::placeholder(),
             "REPLACE INTO users (id, name) VALUES (1, 'alice'), (2, 'bob')",
             &mut gen,
         );
@@ -1402,7 +1534,10 @@ mod tests {
         let rollback = pair.rollback.expect("rollback should exist");
         assert!(rollback.contains("INSERT INTO `users` SELECT * FROM `bks_users_"));
         assert!(pair.safety.partial);
-        assert!(pair.warnings.iter().any(|w| w.contains("REPLACE rollback incomplete")));
+        assert!(pair
+            .warnings
+            .iter()
+            .any(|w| w.contains("REPLACE rollback incomplete")));
     }
 
     #[test]
@@ -1411,7 +1546,9 @@ mod tests {
         let mut gen = RollbackGenerator::new(&cfg, &rc, &MySqlRenderer);
         let stmt = make_insert_stmt("users", &["id", "name"]);
         let pair = gen_replace(
-            &stmt, 1, SourceRef::placeholder(),
+            &stmt,
+            1,
+            SourceRef::placeholder(),
             "REPLACE INTO users (id, name) VALUES (1, 'alice')",
             &mut gen,
         );
@@ -1427,7 +1564,9 @@ mod tests {
         let mut gen = RollbackGenerator::new(&cfg, &rc, &MySqlRenderer);
         let stmt = make_insert_stmt("t", &["a", "b"]);
         let pair = gen_replace(
-            &stmt, 1, SourceRef::placeholder(),
+            &stmt,
+            1,
+            SourceRef::placeholder(),
             "REPLACE INTO t (a, b) VALUES (1, 2)",
             &mut gen,
         );
@@ -1442,7 +1581,9 @@ mod tests {
         let mut gen = RollbackGenerator::new(&cfg, &rc, &PostgreSqlRenderer);
         let stmt = make_update_stmt("orders", Some("status = 'pending'"));
         let pair = gen_update(
-            &stmt, 1, SourceRef::placeholder(),
+            &stmt,
+            1,
+            SourceRef::placeholder(),
             "UPDATE orders SET status = 'shipped' WHERE status = 'pending'",
             &mut gen,
         );

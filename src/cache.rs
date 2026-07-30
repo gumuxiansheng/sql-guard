@@ -436,7 +436,9 @@ mod tests {
         cache.flush();
 
         let content = fs::read_to_string(
-            &std::env::temp_dir().join("sqlguard_cache_relkey_test").join(".cache.json"),
+            &std::env::temp_dir()
+                .join("sqlguard_cache_relkey_test")
+                .join(".cache.json"),
         )
         .unwrap();
         assert!(

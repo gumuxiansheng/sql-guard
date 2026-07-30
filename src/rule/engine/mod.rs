@@ -1,9 +1,9 @@
-pub mod ast;
-pub mod parser;
 pub mod analyzer;
-pub mod scanner;
-pub mod runner;
+pub mod ast;
 pub mod gaussdb_rewrite;
+pub mod parser;
+pub mod runner;
+pub mod scanner;
 
 pub use ast::*;
 pub use runner::*;

@@ -2,12 +2,12 @@
 //!
 //! 对应设计文档 §4.4。
 
-use crate::config::{Config, RollbackConfig};
-use crate::rule::engine::ast::StmtInfo;
 use super::dialect::DialectRenderer;
 use super::naming::NamingAllocator;
 use super::pk::PrimaryKeyResolver;
-use super::{BackupRollbackPair, SourceRef, SafetyClass, BackupStrategy, strip_ident_quotes};
+use super::{strip_ident_quotes, BackupRollbackPair, BackupStrategy, SafetyClass, SourceRef};
+use crate::config::{Config, RollbackConfig};
+use crate::rule::engine::ast::StmtInfo;
 
 pub struct RollbackGenerator<'a> {
     pub(crate) renderer: &'a dyn DialectRenderer,
@@ -22,7 +22,11 @@ pub struct RollbackGenerator<'a> {
 }
 
 impl<'a> RollbackGenerator<'a> {
-    pub fn new(_config: &'a Config, rc: &'a RollbackConfig, renderer: &'a dyn DialectRenderer) -> Self {
+    pub fn new(
+        _config: &'a Config,
+        rc: &'a RollbackConfig,
+        renderer: &'a dyn DialectRenderer,
+    ) -> Self {
         RollbackGenerator {
             renderer,
             naming: NamingAllocator::new(rc),
@@ -33,7 +37,12 @@ impl<'a> RollbackGenerator<'a> {
     }
 
     /// 对单条语句生成 backup/rollback。stmt_kind 决定走 ddl / ddl_like / dml 分支。
-    pub fn generate(&mut self, stmt: &StmtInfo, source: SourceRef, original: &str) -> BackupRollbackPair {
+    pub fn generate(
+        &mut self,
+        stmt: &StmtInfo,
+        source: SourceRef,
+        original: &str,
+    ) -> BackupRollbackPair {
         self.seq += 1;
         let seq = self.seq;
 
@@ -136,7 +145,9 @@ fn normalize_table_name_case(stmt: &StmtInfo) -> StmtInfo {
 fn to_lowercase_if_all_upper(name: &str) -> String {
     let bare = strip_ident_quotes(name);
     let has_letter = bare.chars().any(|c| c.is_ascii_alphabetic());
-    let all_upper = bare.chars().all(|c| !c.is_ascii_alphabetic() || c.is_ascii_uppercase());
+    let all_upper = bare
+        .chars()
+        .all(|c| !c.is_ascii_alphabetic() || c.is_ascii_uppercase());
     if has_letter && all_upper {
         bare.to_lowercase()
     } else {
@@ -158,9 +169,9 @@ pub fn is_metadata_only_alter(stmt: &StmtInfo) -> bool {
             match op.operation_type.as_str() {
                 // ★ ADD COLUMN 必须检查列约束子句（F17）
                 "ADD_COLUMN" => !alter_op_has_constraints(op),
-                "ADD_CONSTRAINT" | "ADD_INDEX" | "RENAME_COLUMN"
-                | "RENAME_TABLE" | "ADD_PRIMARY_KEY" => true,
-                _ => false,  // DROP/MODIFY COLUMN、DROP INDEX/CONSTRAINT/PK 等
+                "ADD_CONSTRAINT" | "ADD_INDEX" | "RENAME_COLUMN" | "RENAME_TABLE"
+                | "ADD_PRIMARY_KEY" => true,
+                _ => false, // DROP/MODIFY COLUMN、DROP INDEX/CONSTRAINT/PK 等
             }
         })
     } else {
@@ -202,7 +213,12 @@ pub fn skip(seq: u64, source: SourceRef, original: &str) -> BackupRollbackPair {
 }
 
 /// 不支持的语句：标记 `irreversible=true`，CI 阻断发布。
-pub fn unsupported(seq: u64, source: SourceRef, original: &str, reason: &str) -> BackupRollbackPair {
+pub fn unsupported(
+    seq: u64,
+    source: SourceRef,
+    original: &str,
+    reason: &str,
+) -> BackupRollbackPair {
     BackupRollbackPair {
         seq,
         stmt_kind: String::new(),
@@ -225,15 +241,24 @@ pub fn unsupported(seq: u64, source: SourceRef, original: &str, reason: &str) ->
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::rule::engine::ast::{StmtInfo, AlterTableInfo, AlterOpInfo};
+    use crate::rule::engine::ast::{AlterOpInfo, AlterTableInfo, StmtInfo};
 
     fn make_alter_stmt(ops: Vec<AlterOpInfo>) -> StmtInfo {
         StmtInfo {
             kind: "ALTER_TABLE".to_string(),
-            line: 1, end_line: 1, column: 0,
-            create_table: None, drop_object: None, select: None, insert: None,
-            update: None, delete: None, truncate: None, create_view: None,
-            create_index: None, transaction: None,
+            line: 1,
+            end_line: 1,
+            column: 0,
+            create_table: None,
+            drop_object: None,
+            select: None,
+            insert: None,
+            update: None,
+            delete: None,
+            truncate: None,
+            create_view: None,
+            create_index: None,
+            transaction: None,
             alter_table: Some(AlterTableInfo {
                 table_name: "t".to_string(),
                 operations: ops,
@@ -294,17 +319,32 @@ mod tests {
     fn not_metadata_only_when_no_alter_info() {
         let stmt = StmtInfo {
             kind: "ALTER_TABLE".to_string(),
-            line: 1, end_line: 1, column: 0,
-            create_table: None, drop_object: None, select: None, insert: None,
-            update: None, delete: None, truncate: None, create_view: None,
-            create_index: None, transaction: None, alter_table: None,
+            line: 1,
+            end_line: 1,
+            column: 0,
+            create_table: None,
+            drop_object: None,
+            select: None,
+            insert: None,
+            update: None,
+            delete: None,
+            truncate: None,
+            create_view: None,
+            create_index: None,
+            transaction: None,
+            alter_table: None,
         };
         assert!(!is_metadata_only_alter(&stmt));
     }
 
     #[test]
     fn unsupported_marks_irreversible() {
-        let pair = unsupported(1, SourceRef::placeholder(), "MERGE INTO ...", "MERGE not supported");
+        let pair = unsupported(
+            1,
+            SourceRef::placeholder(),
+            "MERGE INTO ...",
+            "MERGE not supported",
+        );
         assert!(pair.safety.irreversible);
         assert!(!pair.safety.reliable);
         assert!(pair.rollback.is_none());
@@ -322,16 +362,29 @@ mod tests {
 
     fn make_cfg_with_backup_mode(backup_mode: &str) -> (Config, RollbackConfig) {
         let cfg = Config {
-            structure: crate::config::StructureConfig { paths: vec![], strict: false, allow_extra: vec![] },
-            classification: crate::config::ClassificationConfig { rules: vec![], default_type: "other".to_string() },
-            rules: vec![], rules_file: None, rules_dir: std::path::PathBuf::new(),
+            structure: crate::config::StructureConfig {
+                paths: vec![],
+                strict: false,
+                allow_extra: vec![],
+            },
+            classification: crate::config::ClassificationConfig {
+                rules: vec![],
+                default_type: "other".to_string(),
+            },
+            rules: vec![],
+            rules_file: None,
+            rules_dir: std::path::PathBuf::new(),
             output: crate::config::OutputConfig::default(),
             mapper: crate::config::MapperConfig::default(),
             scan: crate::config::ScanConfig::default(),
             file_check: crate::config::FileCheckConfig::default(),
-            rollback: RollbackConfig { backup_mode: backup_mode.to_string(), ..RollbackConfig::default() },
+            rollback: RollbackConfig {
+                backup_mode: backup_mode.to_string(),
+                ..RollbackConfig::default()
+            },
             cache: crate::config::CacheConfig::default(),
-            dialect: crate::config::CheckDialect::default(), dialect_fallback: None,
+            dialect: crate::config::CheckDialect::default(),
+            dialect_fallback: None,
         };
         let rc = cfg.rollback.clone();
         (cfg, rc)
@@ -343,10 +396,20 @@ mod tests {
         let (cfg, rc) = make_cfg_with_backup_mode("incremental");
         let mut gen = RollbackGenerator::new(&cfg, &rc, &crate::rollback::dialect::MySqlRenderer);
         let stmt = make_alter_stmt(vec![op("DROP_COLUMN", "")]);
-        let pair = gen.generate(&stmt, SourceRef::placeholder(), "ALTER TABLE t DROP COLUMN x");
-        assert!(pair.safety.irreversible, "incremental 模式下 ALTER DROP COLUMN 应标 irreversible");
+        let pair = gen.generate(
+            &stmt,
+            SourceRef::placeholder(),
+            "ALTER TABLE t DROP COLUMN x",
+        );
+        assert!(
+            pair.safety.irreversible,
+            "incremental 模式下 ALTER DROP COLUMN 应标 irreversible"
+        );
         assert!(pair.rollback.is_none());
-        assert!(pair.warnings.iter().any(|w| w.contains("backup_mode=incremental")));
+        assert!(pair
+            .warnings
+            .iter()
+            .any(|w| w.contains("backup_mode=incremental")));
     }
 
     #[test]
@@ -355,8 +418,15 @@ mod tests {
         let (cfg, rc) = make_cfg_with_backup_mode("auto");
         let mut gen = RollbackGenerator::new(&cfg, &rc, &crate::rollback::dialect::MySqlRenderer);
         let stmt = make_alter_stmt(vec![op("DROP_COLUMN", "")]);
-        let pair = gen.generate(&stmt, SourceRef::placeholder(), "ALTER TABLE t DROP COLUMN x");
-        assert!(!pair.safety.irreversible, "auto 模式下 ALTER DROP COLUMN 不应标 irreversible");
+        let pair = gen.generate(
+            &stmt,
+            SourceRef::placeholder(),
+            "ALTER TABLE t DROP COLUMN x",
+        );
+        assert!(
+            !pair.safety.irreversible,
+            "auto 模式下 ALTER DROP COLUMN 不应标 irreversible"
+        );
         assert!(pair.rollback.is_some());
     }
 
@@ -366,7 +436,11 @@ mod tests {
         let (cfg, rc) = make_cfg_with_backup_mode("full");
         let mut gen = RollbackGenerator::new(&cfg, &rc, &crate::rollback::dialect::MySqlRenderer);
         let stmt = make_alter_stmt(vec![op("DROP_COLUMN", "")]);
-        let pair = gen.generate(&stmt, SourceRef::placeholder(), "ALTER TABLE t DROP COLUMN x");
+        let pair = gen.generate(
+            &stmt,
+            SourceRef::placeholder(),
+            "ALTER TABLE t DROP COLUMN x",
+        );
         assert!(!pair.safety.irreversible);
         assert!(pair.rollback.is_some());
     }
@@ -378,14 +452,23 @@ mod tests {
     fn make_insert_stmt(table: &str, columns: &[&str]) -> StmtInfo {
         StmtInfo {
             kind: "INSERT".to_string(),
-            line: 1, end_line: 1, column: 0,
-            create_table: None, drop_object: None, select: None,
+            line: 1,
+            end_line: 1,
+            column: 0,
+            create_table: None,
+            drop_object: None,
+            select: None,
             insert: Some(InsertInfo {
                 table_name: table.to_string(),
                 columns: columns.iter().map(|s| s.to_string()).collect(),
             }),
-            update: None, delete: None, alter_table: None,
-            truncate: None, create_view: None, create_index: None, transaction: None,
+            update: None,
+            delete: None,
+            alter_table: None,
+            truncate: None,
+            create_view: None,
+            create_index: None,
+            transaction: None,
         }
     }
 
@@ -483,6 +566,10 @@ mod tests {
             "INSERT INTO users (id, name) VALUES (1, 'alice')",
         );
         let rollback = pair.rollback.expect("rollback should exist");
-        assert!(rollback.contains("`users`"), "全小写表名保持 `users`，got: {}", rollback);
+        assert!(
+            rollback.contains("`users`"),
+            "全小写表名保持 `users`，got: {}",
+            rollback
+        );
     }
 }

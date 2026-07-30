@@ -47,7 +47,13 @@ pub fn normalize_placeholders(sql: &str) -> String {
             } else {
                 let cleaned: String = var_name
                     .chars()
-                    .map(|c| if c.is_alphanumeric() || c == '_' { c } else { '_' })
+                    .map(|c| {
+                        if c.is_alphanumeric() || c == '_' {
+                            c
+                        } else {
+                            '_'
+                        }
+                    })
                     .collect();
                 if cleaned.is_empty() {
                     out.push_str("_var");

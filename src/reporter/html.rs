@@ -39,7 +39,10 @@ pub fn generate_html_report(
     files_checked: usize,
 ) -> String {
     let error_count = violations.iter().filter(|v| v.severity == "error").count();
-    let warning_count = violations.iter().filter(|v| v.severity == "warning").count();
+    let warning_count = violations
+        .iter()
+        .filter(|v| v.severity == "warning")
+        .count();
     let has_dir_issues = !missing.is_empty() || !unexpected.is_empty();
     let passed = violations.is_empty() && missing.is_empty();
 
@@ -256,4 +259,92 @@ pub fn generate_html_report(
         dir_section = dir_section,
         violation_section = violation_section,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use crate::error::{DirectoryIssue, DirectoryIssueType, Violation};
+
+    use super::{escape_html, generate_html_report};
+
+    fn make_violation(
+        rule_id: &str,
+        severity: &str,
+        line: Option<usize>,
+        message: &str,
+    ) -> Violation {
+        Violation {
+            rule_id: rule_id.to_string(),
+            rule_name: "test_rule".to_string(),
+            rule_group: Some("test".to_string()),
+            severity: severity.to_string(),
+            message: message.to_string(),
+            file_path: PathBuf::from("test.sql"),
+            script_type: "dml".to_string(),
+            line,
+            end_line: line,
+            column: None,
+        }
+    }
+
+    #[test]
+    fn escape_html_escapes_all_special_chars() {
+        assert_eq!(escape_html("&"), "&amp;");
+        assert_eq!(escape_html("<"), "&lt;");
+        assert_eq!(escape_html(">"), "&gt;");
+        assert_eq!(escape_html("\""), "&quot;");
+        assert_eq!(escape_html("'"), "&#39;");
+        // combined input escapes every special char in order
+        assert_eq!(escape_html("&<>\"'"), "&amp;&lt;&gt;&quot;&#39;");
+    }
+
+    #[test]
+    fn generate_html_report_empty_violations() {
+        let output = generate_html_report(&[], &[], &[], 5);
+        assert!(output.contains("PASSED"));
+        assert!(output.contains("No violations found"));
+    }
+
+    #[test]
+    fn generate_html_report_with_error_violation() {
+        let v = make_violation("S001", "error", Some(10), "bad sql");
+        let output = generate_html_report(&[v], &[], &[], 5);
+        assert!(output.contains("FAILED"));
+        assert!(output.contains("S001"));
+        assert!(output.contains("test.sql"));
+        assert!(output.contains("severity-error"));
+    }
+
+    #[test]
+    fn generate_html_report_with_directory_issues() {
+        let missing = DirectoryIssue {
+            path: PathBuf::from("missing_dir"),
+            issue_type: DirectoryIssueType::Missing,
+        };
+        let unexpected = DirectoryIssue {
+            path: PathBuf::from("unexpected_dir"),
+            issue_type: DirectoryIssueType::Unexpected,
+        };
+        let output = generate_html_report(&[], &[missing], &[unexpected], 5);
+        assert!(output.contains("missing"));
+        assert!(output.contains("unexpected"));
+    }
+
+    #[test]
+    fn generate_html_report_counts_in_summary_cards() {
+        let violations = vec![
+            make_violation("E001", "error", Some(1), "err1"),
+            make_violation("E002", "error", Some(2), "err2"),
+            make_violation("W001", "warning", Some(3), "warn1"),
+        ];
+        let output = generate_html_report(&violations, &[], &[], 5);
+        // error_count == 2 rendered in the red summary card
+        assert!(output.contains("value-red\">2</div>"));
+        // warning_count == 1 rendered in the yellow summary card
+        assert!(output.contains("value-yellow\">1</div>"));
+        assert!(output.contains("Errors"));
+        assert!(output.contains("Warnings"));
+    }
 }

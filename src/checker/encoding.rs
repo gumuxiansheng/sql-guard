@@ -170,7 +170,10 @@ fn detect_line_ending_issue(bytes: &[u8]) -> Option<(usize, String)> {
 
     let first = first_bad_line?;
     let kind = if crlf_count > 0 && cr_count > 0 {
-        format!("mixed CRLF ({}) and lone CR ({}) line endings", crlf_count, cr_count)
+        format!(
+            "mixed CRLF ({}) and lone CR ({}) line endings",
+            crlf_count, cr_count
+        )
     } else if crlf_count > 0 {
         format!("CRLF line endings ({} line(s))", crlf_count)
     } else {

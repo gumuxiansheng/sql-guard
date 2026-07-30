@@ -155,7 +155,11 @@ impl DialectRenderer for MySqlRenderer {
     }
 
     fn rename_table(&self, old: &str, new: &str) -> String {
-        format!("RENAME TABLE {} TO {}", self.quote_ident(old), self.quote_ident(new))
+        format!(
+            "RENAME TABLE {} TO {}",
+            self.quote_ident(old),
+            self.quote_ident(new)
+        )
     }
 
     fn drop_primary_key(&self, tbl: &str, _constraint_name: Option<&str>) -> String {
@@ -181,22 +185,50 @@ impl DialectRenderer for MySqlRenderer {
 
     fn render_atomic_rename_rollback(&self, table: &str, bks: &str, shadow: &str) -> String {
         let mut s = String::new();
-        s.push_str("-- ★ F12 原子 RENAME 切换（MySQL）：原表保留为 _old 兜底，影子表 RENAME 为原表名\n");
+        s.push_str(
+            "-- ★ F12 原子 RENAME 切换（MySQL）：原表保留为 _old 兜底，影子表 RENAME 为原表名\n",
+        );
         s.push_str("-- 乙-3 修正：RENAME 前关闭外键检查，避免 FK 拓扑破坏\n");
         s.push_str("SET FOREIGN_KEY_CHECKS=0;\n");
         // ★ N5 守卫：RENAME 前先 DROP 已存在的 _old / shadow，确保脚本可重跑
-        let old_name = format!("{}_old_{}", table, shadow.strip_prefix("_rb_").and_then(|r| r.split('_').next()).unwrap_or("0001"));
-        s.push_str(&format!("DROP TABLE IF EXISTS {};\n", self.quote_ident(&old_name)));
-        s.push_str(&format!("DROP TABLE IF EXISTS {};\n", self.quote_ident(shadow)));
-        s.push_str(&format!("CREATE TABLE {} LIKE {};\n", self.quote_ident(shadow), self.quote_ident(bks)));
-        s.push_str(&format!("INSERT INTO {} SELECT * FROM {};\n", self.quote_ident(shadow), self.quote_ident(bks)));
+        let old_name = format!(
+            "{}_old_{}",
+            table,
+            shadow
+                .strip_prefix("_rb_")
+                .and_then(|r| r.split('_').next())
+                .unwrap_or("0001")
+        );
+        s.push_str(&format!(
+            "DROP TABLE IF EXISTS {};\n",
+            self.quote_ident(&old_name)
+        ));
+        s.push_str(&format!(
+            "DROP TABLE IF EXISTS {};\n",
+            self.quote_ident(shadow)
+        ));
+        s.push_str(&format!(
+            "CREATE TABLE {} LIKE {};\n",
+            self.quote_ident(shadow),
+            self.quote_ident(bks)
+        ));
+        s.push_str(&format!(
+            "INSERT INTO {} SELECT * FROM {};\n",
+            self.quote_ident(shadow),
+            self.quote_ident(bks)
+        ));
         s.push_str(&format!(
             "RENAME TABLE {} TO {}, {} TO {};\n",
-            self.quote_ident(table), self.quote_ident(&old_name),
-            self.quote_ident(shadow), self.quote_ident(table)
+            self.quote_ident(table),
+            self.quote_ident(&old_name),
+            self.quote_ident(shadow),
+            self.quote_ident(table)
         ));
         s.push_str("SET FOREIGN_KEY_CHECKS=1;\n");
-        s.push_str(&format!("-- 校验通过后由 cleanup.sql 删除：DROP TABLE {};\n", self.quote_ident(&old_name)));
+        s.push_str(&format!(
+            "-- 校验通过后由 cleanup.sql 删除：DROP TABLE {};\n",
+            self.quote_ident(&old_name)
+        ));
         s
     }
 
@@ -210,8 +242,16 @@ impl DialectRenderer for MySqlRenderer {
         s.push_str("-- ★ RebuildFromBackup：DROP TABLE 回滚特例，从 bks_ 表 LIKE 重建（非原子）\n");
         s.push_str("-- 若其他表 FK 指向本表，需先关闭外键检查\n");
         s.push_str("SET FOREIGN_KEY_CHECKS=0;\n");
-        s.push_str(&format!("CREATE TABLE {} LIKE {};\n", self.quote_ident(table), self.quote_ident(bks)));
-        s.push_str(&format!("INSERT INTO {} SELECT * FROM {};\n", self.quote_ident(table), self.quote_ident(bks)));
+        s.push_str(&format!(
+            "CREATE TABLE {} LIKE {};\n",
+            self.quote_ident(table),
+            self.quote_ident(bks)
+        ));
+        s.push_str(&format!(
+            "INSERT INTO {} SELECT * FROM {};\n",
+            self.quote_ident(table),
+            self.quote_ident(bks)
+        ));
         s.push_str("SET FOREIGN_KEY_CHECKS=1;\n");
         s
     }
@@ -220,9 +260,20 @@ impl DialectRenderer for MySqlRenderer {
         let mut s = String::new();
         // ★ 乙-2/N4：必须用全局 FLUSH TABLES WITH READ LOCK（无表名），不被隐式提交释放
         s.push_str("FLUSH TABLES WITH READ LOCK;\n");
-        s.push_str(&format!("DROP TABLE IF EXISTS {};\n", self.quote_ident(bks)));
-        s.push_str(&format!("CREATE TABLE {} LIKE {};\n", self.quote_ident(bks), self.quote_ident(table)));
-        s.push_str(&format!("INSERT INTO {} SELECT * FROM {};\n", self.quote_ident(bks), self.quote_ident(table)));
+        s.push_str(&format!(
+            "DROP TABLE IF EXISTS {};\n",
+            self.quote_ident(bks)
+        ));
+        s.push_str(&format!(
+            "CREATE TABLE {} LIKE {};\n",
+            self.quote_ident(bks),
+            self.quote_ident(table)
+        ));
+        s.push_str(&format!(
+            "INSERT INTO {} SELECT * FROM {};\n",
+            self.quote_ident(bks),
+            self.quote_ident(table)
+        ));
         s.push_str("UNLOCK TABLES;\n");
         s
     }
@@ -289,14 +340,22 @@ impl DialectRenderer for PostgreSqlRenderer {
     }
 
     fn rename_table(&self, old: &str, new: &str) -> String {
-        format!("ALTER TABLE {} RENAME TO {}", self.quote_ident(old), self.quote_ident(new))
+        format!(
+            "ALTER TABLE {} RENAME TO {}",
+            self.quote_ident(old),
+            self.quote_ident(new)
+        )
     }
 
     fn drop_primary_key(&self, tbl: &str, constraint_name: Option<&str>) -> String {
         // PG 主键约束名默认是 <table>_pkey，可显式指定
         let default_name = format!("{}_pkey", tbl);
         let name = constraint_name.unwrap_or(&default_name);
-        format!("ALTER TABLE {} DROP CONSTRAINT {}", self.quote_ident(tbl), self.quote_ident(name))
+        format!(
+            "ALTER TABLE {} DROP CONSTRAINT {}",
+            self.quote_ident(tbl),
+            self.quote_ident(name)
+        )
     }
 
     fn partial_like_warning(&self) -> String {
@@ -322,13 +381,20 @@ impl DialectRenderer for PostgreSqlRenderer {
     fn render_transactional_rollback(&self, table: &str, bks: &str) -> String {
         let mut s = String::new();
         s.push_str("-- ★ PG 事务内 rollback（外层 BEGIN/COMMIT 由 render.rs 统一包裹）\n");
-        s.push_str(&format!("DROP TABLE IF EXISTS {};\n", self.quote_ident(table)));
+        s.push_str(&format!(
+            "DROP TABLE IF EXISTS {};\n",
+            self.quote_ident(table)
+        ));
         s.push_str(&format!(
             "CREATE TABLE {} {};\n",
             self.quote_ident(table),
             self.create_table_like_clause(bks)
         ));
-        s.push_str(&format!("INSERT INTO {} SELECT * FROM {};\n", self.quote_ident(table), self.quote_ident(bks)));
+        s.push_str(&format!(
+            "INSERT INTO {} SELECT * FROM {};\n",
+            self.quote_ident(table),
+            self.quote_ident(bks)
+        ));
         s
     }
 
@@ -340,21 +406,35 @@ impl DialectRenderer for PostgreSqlRenderer {
             self.quote_ident(table),
             self.create_table_like_clause(bks)
         ));
-        s.push_str(&format!("INSERT INTO {} SELECT * FROM {};\n", self.quote_ident(table), self.quote_ident(bks)));
+        s.push_str(&format!(
+            "INSERT INTO {} SELECT * FROM {};\n",
+            self.quote_ident(table),
+            self.quote_ident(bks)
+        ));
         s
     }
 
     fn render_idempotent_backup(&self, table: &str, bks: &str) -> String {
         let mut s = String::new();
         // PG 段内发 LOCK TABLE ... IN ACCESS SHARE MODE（PG 锁不被 DDL 释放）
-        s.push_str(&format!("LOCK TABLE {} IN ACCESS SHARE MODE;\n", self.quote_ident(table)));
-        s.push_str(&format!("DROP TABLE IF EXISTS {};\n", self.quote_ident(bks)));
+        s.push_str(&format!(
+            "LOCK TABLE {} IN ACCESS SHARE MODE;\n",
+            self.quote_ident(table)
+        ));
+        s.push_str(&format!(
+            "DROP TABLE IF EXISTS {};\n",
+            self.quote_ident(bks)
+        ));
         s.push_str(&format!(
             "CREATE TABLE {} {};\n",
             self.quote_ident(bks),
             self.create_table_like_clause(table)
         ));
-        s.push_str(&format!("INSERT INTO {} SELECT * FROM {};\n", self.quote_ident(bks), self.quote_ident(table)));
+        s.push_str(&format!(
+            "INSERT INTO {} SELECT * FROM {};\n",
+            self.quote_ident(bks),
+            self.quote_ident(table)
+        ));
         s
     }
 
@@ -496,7 +576,10 @@ mod tests {
         assert_eq!(Dialect::from_str("mariadb").unwrap(), Dialect::MySql);
         assert_eq!(Dialect::from_str("pg").unwrap(), Dialect::PostgreSql);
         assert_eq!(Dialect::from_str("postgres").unwrap(), Dialect::PostgreSql);
-        assert_eq!(Dialect::from_str("postgresql").unwrap(), Dialect::PostgreSql);
+        assert_eq!(
+            Dialect::from_str("postgresql").unwrap(),
+            Dialect::PostgreSql
+        );
         assert_eq!(Dialect::from_str("gaussdb").unwrap(), Dialect::GaussDB);
         assert_eq!(Dialect::from_str("GaussDB").unwrap(), Dialect::GaussDB);
         assert_eq!(Dialect::from_str("gauss").unwrap(), Dialect::GaussDB);
@@ -506,15 +589,27 @@ mod tests {
     #[test]
     fn mysql_atomic_strategy_drop_table_rebuilds() {
         let r = MySqlRenderer;
-        assert_eq!(r.atomic_ddl_rollback_strategy("DROP_TABLE"), AtomicStrategy::RebuildFromBackup);
-        assert_eq!(r.atomic_ddl_rollback_strategy("ALTER_TABLE"), AtomicStrategy::AtomicRename);
+        assert_eq!(
+            r.atomic_ddl_rollback_strategy("DROP_TABLE"),
+            AtomicStrategy::RebuildFromBackup
+        );
+        assert_eq!(
+            r.atomic_ddl_rollback_strategy("ALTER_TABLE"),
+            AtomicStrategy::AtomicRename
+        );
     }
 
     #[test]
     fn pg_atomic_strategy_drop_table_rebuilds() {
         let r = PostgreSqlRenderer;
-        assert_eq!(r.atomic_ddl_rollback_strategy("DROP_TABLE"), AtomicStrategy::RebuildFromBackup);
-        assert_eq!(r.atomic_ddl_rollback_strategy("ALTER_TABLE"), AtomicStrategy::Transactional);
+        assert_eq!(
+            r.atomic_ddl_rollback_strategy("DROP_TABLE"),
+            AtomicStrategy::RebuildFromBackup
+        );
+        assert_eq!(
+            r.atomic_ddl_rollback_strategy("ALTER_TABLE"),
+            AtomicStrategy::Transactional
+        );
     }
 
     #[test]
@@ -553,11 +648,20 @@ mod tests {
     fn mysql_atomic_rename_includes_n5_guard_drops() {
         // ★ N5 守卫：RENAME 前必须先 DROP _old 和 shadow，确保脚本可重跑
         let r = MySqlRenderer;
-        let sql = r.render_atomic_rename_rollback("users", "bks_users_20260731_0001", "_rb_0001_users");
-        assert!(sql.contains("DROP TABLE IF EXISTS `users_old_0001`;"), "N5 guard: must DROP _old before RENAME");
-        assert!(sql.contains("DROP TABLE IF EXISTS `_rb_0001_users`;"), "N5 guard: must DROP shadow before RENAME");
+        let sql =
+            r.render_atomic_rename_rollback("users", "bks_users_20260731_0001", "_rb_0001_users");
+        assert!(
+            sql.contains("DROP TABLE IF EXISTS `users_old_0001`;"),
+            "N5 guard: must DROP _old before RENAME"
+        );
+        assert!(
+            sql.contains("DROP TABLE IF EXISTS `_rb_0001_users`;"),
+            "N5 guard: must DROP shadow before RENAME"
+        );
         assert!(sql.contains("CREATE TABLE `_rb_0001_users` LIKE `bks_users_20260731_0001`;"));
-        assert!(sql.contains("RENAME TABLE `users` TO `users_old_0001`, `_rb_0001_users` TO `users`;"));
+        assert!(
+            sql.contains("RENAME TABLE `users` TO `users_old_0001`, `_rb_0001_users` TO `users`;")
+        );
     }
 
     #[test]
@@ -566,10 +670,18 @@ mod tests {
         let r = GaussDBRenderer;
         assert_eq!(r.name(), "gaussdb");
         assert_eq!(r.quote_ident("order"), "\"order\"");
-        assert!(r.create_table_like_clause("users").contains("LIKE \"users\" INCLUDING"));
+        assert!(r
+            .create_table_like_clause("users")
+            .contains("LIKE \"users\" INCLUDING"));
         // DDL 回滚策略与 PG 一致：DROP_TABLE → RebuildFromBackup，ALTER → Transactional
-        assert_eq!(r.atomic_ddl_rollback_strategy("DROP_TABLE"), AtomicStrategy::RebuildFromBackup);
-        assert_eq!(r.atomic_ddl_rollback_strategy("ALTER_TABLE"), AtomicStrategy::Transactional);
+        assert_eq!(
+            r.atomic_ddl_rollback_strategy("DROP_TABLE"),
+            AtomicStrategy::RebuildFromBackup
+        );
+        assert_eq!(
+            r.atomic_ddl_rollback_strategy("ALTER_TABLE"),
+            AtomicStrategy::Transactional
+        );
         // 幂等 backup 段：与 PG 一致使用 ACCESS SHARE MODE
         let sql = r.render_idempotent_backup("users", "bks_users_20260731_0001");
         assert!(sql.contains("LOCK TABLE \"users\" IN ACCESS SHARE MODE;"));

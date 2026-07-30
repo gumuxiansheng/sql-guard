@@ -2,7 +2,11 @@ use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
 #[derive(Parser)]
-#[clap(name = "sqlguard", version, about = "SQL script checking tool with customizable rules engine")]
+#[clap(
+    name = "sqlguard",
+    version,
+    about = "SQL script checking tool with customizable rules engine"
+)]
 pub struct Cli {
     #[clap(subcommand)]
     pub command: Commands,

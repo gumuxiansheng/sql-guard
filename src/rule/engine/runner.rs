@@ -44,10 +44,7 @@ pub fn run_rules_for_file(
     // 两种失败模式：
     //   1) 顶层 tokenize 失败 → ast.parse_error = Some(...)
     //   2) 单条语句 parse_statement 失败 → 该语句 kind = "PARSE_ERROR"
-    let has_parse_error_stmt = ast
-        .statements
-        .iter()
-        .any(|s| s.kind == "PARSE_ERROR");
+    let has_parse_error_stmt = ast.statements.iter().any(|s| s.kind == "PARSE_ERROR");
     if let Some(err) = &ast.parse_error {
         eprintln!(
             "Warning: {} failed to tokenize with {} dialect ({}); AST rules will be skipped",
@@ -72,7 +69,11 @@ pub fn run_rules_for_file(
             column: None,
         });
     } else if has_parse_error_stmt {
-        let count = ast.statements.iter().filter(|s| s.kind == "PARSE_ERROR").count();
+        let count = ast
+            .statements
+            .iter()
+            .filter(|s| s.kind == "PARSE_ERROR")
+            .count();
         eprintln!(
             "Warning: {} has {} statement(s) failed to parse with {} dialect; those statements are skipped",
             file_path.display(),
@@ -116,11 +117,7 @@ pub fn run_rules_for_file(
         if !rule_config.enabled {
             continue;
         }
-        if !rule_config
-            .applies_to
-            .iter()
-            .any(|t| t == script_type)
-        {
+        if !rule_config.applies_to.iter().any(|t| t == script_type) {
             continue;
         }
         if !filter.matches(rule_config) {
@@ -197,7 +194,8 @@ pub fn run_rules_for_file(
 ///
 /// 行号为 1-indexed。返回的 HashMap 中 `*` 表示通配（豁免所有规则）。
 fn parse_exemptions(sql_content: &str) -> std::collections::HashMap<usize, Vec<String>> {
-    let mut exemptions: std::collections::HashMap<usize, Vec<String>> = std::collections::HashMap::new();
+    let mut exemptions: std::collections::HashMap<usize, Vec<String>> =
+        std::collections::HashMap::new();
     let lines: Vec<&str> = sql_content.lines().collect();
 
     for (idx, line) in lines.iter().enumerate() {
@@ -209,10 +207,7 @@ fn parse_exemptions(sql_content: &str) -> std::collections::HashMap<usize, Vec<S
             let after = &line[pos + "sqlguard-disable-next-line".len()..];
             let rule_ids = parse_rule_ids(after);
             if !rule_ids.is_empty() {
-                exemptions
-                    .entry(line_no + 1)
-                    .or_default()
-                    .extend(rule_ids);
+                exemptions.entry(line_no + 1).or_default().extend(rule_ids);
             }
             continue;
         }
@@ -222,10 +217,7 @@ fn parse_exemptions(sql_content: &str) -> std::collections::HashMap<usize, Vec<S
             let after = &line[pos + "sqlguard-disable-line".len()..];
             let rule_ids = parse_rule_ids(after);
             if !rule_ids.is_empty() {
-                exemptions
-                    .entry(line_no)
-                    .or_default()
-                    .extend(rule_ids);
+                exemptions.entry(line_no).or_default().extend(rule_ids);
             }
             continue;
         }
@@ -239,10 +231,7 @@ fn parse_exemptions(sql_content: &str) -> std::collections::HashMap<usize, Vec<S
                 let after = &line[pos + "sqlguard-disable".len()..];
                 let rule_ids = parse_rule_ids(after);
                 if !rule_ids.is_empty() {
-                    exemptions
-                        .entry(line_no)
-                        .or_default()
-                        .extend(rule_ids);
+                    exemptions.entry(line_no).or_default().extend(rule_ids);
                 }
             }
         }
@@ -265,7 +254,10 @@ fn parse_rule_ids(s: &str) -> Vec<String> {
             continue;
         }
         // 规则 ID 形如 DML001 / DDL* / *，仅接受字母数字与通配符
-        if trimmed.chars().all(|c| c.is_ascii_alphanumeric() || c == '*' || c == '_' || c == '-') {
+        if trimmed
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '*' || c == '_' || c == '-')
+        {
             ids.push(trimmed.to_uppercase());
         }
     }
@@ -467,7 +459,10 @@ pub fn build_engine() -> Engine {
     // SqlAst 方法
     // 返回 Vec<CustomType> 的闭包需显式转为 Array，否则 Rhai for 循环无法迭代
     engine.register_fn("statements", |ast: &mut SqlAst| -> Array {
-        ast.statements().into_iter().map(|s| Dynamic::from(s)).collect()
+        ast.statements()
+            .into_iter()
+            .map(|s| Dynamic::from(s))
+            .collect()
     });
     engine.register_fn("has_parse_error", |ast: &mut SqlAst| ast.has_parse_error());
     engine.register_fn("parse_error", |ast: &mut SqlAst| ast.parse_error());
@@ -475,15 +470,26 @@ pub fn build_engine() -> Engine {
         ast.kinds().into_iter().map(Dynamic::from).collect()
     });
     engine.register_fn("create_tables", |ast: &mut SqlAst| -> Array {
-        ast.create_tables().into_iter().map(|c| Dynamic::from(c)).collect()
+        ast.create_tables()
+            .into_iter()
+            .map(|c| Dynamic::from(c))
+            .collect()
     });
     engine.register_fn("drop_objects", |ast: &mut SqlAst| -> Array {
-        ast.drop_objects().into_iter().map(|d| Dynamic::from(d)).collect()
+        ast.drop_objects()
+            .into_iter()
+            .map(|d| Dynamic::from(d))
+            .collect()
     });
     engine.register_fn("selects", |ast: &mut SqlAst| -> Array {
-        ast.selects().into_iter().map(|s| Dynamic::from(s)).collect()
+        ast.selects()
+            .into_iter()
+            .map(|s| Dynamic::from(s))
+            .collect()
     });
-    engine.register_fn("has_create_table", |ast: &mut SqlAst| ast.has_create_table());
+    engine.register_fn("has_create_table", |ast: &mut SqlAst| {
+        ast.has_create_table()
+    });
     engine.register_fn("has_drop_table", |ast: &mut SqlAst| ast.has_drop_table());
     engine.register_fn("has_comma_join_anywhere", |ast: &mut SqlAst| {
         ast.has_comma_join_anywhere()
@@ -527,13 +533,21 @@ pub fn build_engine() -> Engine {
     // CreateInfo 方法
     engine.register_fn("table_name", |c: &mut CreateInfo| c.table_name());
     engine.register_fn("columns", |c: &mut CreateInfo| -> Array {
-        c.columns().into_iter().map(|col| Dynamic::from(col)).collect()
+        c.columns()
+            .into_iter()
+            .map(|col| Dynamic::from(col))
+            .collect()
     });
     engine.register_fn("has_primary_key", |c: &mut CreateInfo| c.has_primary_key());
     engine.register_fn("primary_key_columns", |c: &mut CreateInfo| -> Array {
-        c.primary_key_columns().into_iter().map(Dynamic::from).collect()
+        c.primary_key_columns()
+            .into_iter()
+            .map(Dynamic::from)
+            .collect()
     });
-    engine.register_fn("primary_key_name", |c: &mut CreateInfo| c.primary_key_name());
+    engine.register_fn("primary_key_name", |c: &mut CreateInfo| {
+        c.primary_key_name()
+    });
     engine.register_fn("if_not_exists", |c: &mut CreateInfo| c.if_not_exists());
     engine.register_fn("is_create_as", |c: &mut CreateInfo| c.is_create_as());
     engine.register_fn("column_names", |c: &mut CreateInfo| -> Array {
@@ -566,12 +580,18 @@ pub fn build_engine() -> Engine {
     engine.register_fn("is_not_null", |c: &mut ColumnInfo| c.is_not_null());
     engine.register_fn("is_unique", |c: &mut ColumnInfo| c.is_unique());
     engine.register_fn("default_value", |c: &mut ColumnInfo| c.default_value());
-    engine.register_fn("has_default_value", |c: &mut ColumnInfo| c.has_default_value());
-    engine.register_fn("is_auto_increment", |c: &mut ColumnInfo| c.is_auto_increment());
+    engine.register_fn("has_default_value", |c: &mut ColumnInfo| {
+        c.has_default_value()
+    });
+    engine.register_fn("is_auto_increment", |c: &mut ColumnInfo| {
+        c.is_auto_increment()
+    });
     engine.register_fn("comment", |c: &mut ColumnInfo| c.comment());
     engine.register_fn("has_comment", |c: &mut ColumnInfo| c.has_comment());
     engine.register_fn("has_check", |c: &mut ColumnInfo| c.has_check());
-    engine.register_fn("references_table", |c: &mut ColumnInfo| c.references_table());
+    engine.register_fn("references_table", |c: &mut ColumnInfo| {
+        c.references_table()
+    });
     engine.register_fn("has_foreign_key", |c: &mut ColumnInfo| c.has_foreign_key());
     engine.register_fn("line", |c: &mut ColumnInfo| c.line());
     engine.register_fn("column", |c: &mut ColumnInfo| c.column());
@@ -588,20 +608,29 @@ pub fn build_engine() -> Engine {
     });
     engine.register_fn("has_from_table", |s: &mut SelectInfo| s.has_from_table());
     engine.register_fn("from_table", |s: &mut SelectInfo| s.from_table());
-    engine.register_fn("from_table_alias", |s: &mut SelectInfo| s.from_table_alias());
-    engine.register_fn("has_from_table_alias", |s: &mut SelectInfo| s.has_from_table_alias());
+    engine.register_fn("from_table_alias", |s: &mut SelectInfo| {
+        s.from_table_alias()
+    });
+    engine.register_fn("has_from_table_alias", |s: &mut SelectInfo| {
+        s.has_from_table_alias()
+    });
     engine.register_fn("joins", |s: &mut SelectInfo| -> Array {
         s.joins().into_iter().map(|j| Dynamic::from(j)).collect()
     });
     engine.register_fn("has_joins", |s: &mut SelectInfo| s.has_joins());
     engine.register_fn("has_cross_join", |s: &mut SelectInfo| s.has_cross_join());
-    engine.register_fn(
-        "has_join_without_condition",
-        |s: &mut SelectInfo| s.has_join_without_condition(),
-    );
-    engine.register_fn("has_subquery_in_from", |s: &mut SelectInfo| s.has_subquery_in_from());
-    engine.register_fn("from_subquery_has_alias", |s: &mut SelectInfo| s.from_subquery_has_alias());
-    engine.register_fn("has_unqualified_column", |s: &mut SelectInfo| s.has_unqualified_column());
+    engine.register_fn("has_join_without_condition", |s: &mut SelectInfo| {
+        s.has_join_without_condition()
+    });
+    engine.register_fn("has_subquery_in_from", |s: &mut SelectInfo| {
+        s.has_subquery_in_from()
+    });
+    engine.register_fn("from_subquery_has_alias", |s: &mut SelectInfo| {
+        s.from_subquery_has_alias()
+    });
+    engine.register_fn("has_unqualified_column", |s: &mut SelectInfo| {
+        s.has_unqualified_column()
+    });
     engine.register_fn("is_union", |s: &mut SelectInfo| s.is_union());
     engine.register_fn("is_union_all", |s: &mut SelectInfo| s.is_union_all());
     engine.register_fn("is_intersect", |s: &mut SelectInfo| s.is_intersect());
@@ -628,7 +657,9 @@ pub fn build_engine() -> Engine {
             .collect()
     });
     engine.register_fn("has_subquery", |s: &mut SelectInfo| s.has_subquery());
-    engine.register_fn("has_window_function", |s: &mut SelectInfo| s.has_window_function());
+    engine.register_fn("has_window_function", |s: &mut SelectInfo| {
+        s.has_window_function()
+    });
     engine.register_fn("window_functions", |s: &mut SelectInfo| -> Array {
         s.window_functions()
             .into_iter()
@@ -654,7 +685,9 @@ pub fn build_engine() -> Engine {
     engine.register_fn("alias", |j: &mut JoinInfo| j.alias());
     engine.register_fn("has_alias", |j: &mut JoinInfo| j.has_alias());
     engine.register_fn("condition_text", |j: &mut JoinInfo| j.condition_text());
-    engine.register_fn("has_condition_text", |j: &mut JoinInfo| j.has_condition_text());
+    engine.register_fn("has_condition_text", |j: &mut JoinInfo| {
+        j.has_condition_text()
+    });
     engine.register_fn("line", |j: &mut JoinInfo| j.line());
     engine.register_fn("column", |j: &mut JoinInfo| j.column());
 
@@ -677,14 +710,21 @@ pub fn build_engine() -> Engine {
 
     // AlterTableInfo 方法
     engine.register_fn("table_name", |a: &mut AlterTableInfo| a.table_name());
-    engine.register_fn("adds_primary_key", |a: &mut AlterTableInfo| a.adds_primary_key());
-    engine.register_fn("drops_primary_key", |a: &mut AlterTableInfo| a.drops_primary_key());
-    engine.register_fn("added_primary_key_columns", |a: &mut AlterTableInfo| -> Array {
-        a.added_primary_key_columns()
-            .into_iter()
-            .map(Dynamic::from)
-            .collect()
+    engine.register_fn("adds_primary_key", |a: &mut AlterTableInfo| {
+        a.adds_primary_key()
     });
+    engine.register_fn("drops_primary_key", |a: &mut AlterTableInfo| {
+        a.drops_primary_key()
+    });
+    engine.register_fn(
+        "added_primary_key_columns",
+        |a: &mut AlterTableInfo| -> Array {
+            a.added_primary_key_columns()
+                .into_iter()
+                .map(Dynamic::from)
+                .collect()
+        },
+    );
     engine.register_fn("operations", |a: &mut AlterTableInfo| -> Array {
         a.operations()
             .into_iter()
@@ -701,7 +741,9 @@ pub fn build_engine() -> Engine {
 
     // TruncateInfo 方法
     engine.register_fn("table_name", |t: &mut TruncateInfo| t.table_name());
-    engine.register_fn("has_table_keyword", |t: &mut TruncateInfo| t.has_table_keyword());
+    engine.register_fn("has_table_keyword", |t: &mut TruncateInfo| {
+        t.has_table_keyword()
+    });
 
     // ViewInfo 方法
     engine.register_fn("name", |v: &mut ViewInfo| v.name());
@@ -727,9 +769,13 @@ pub fn build_engine() -> Engine {
 
     // WindowFuncInfo 方法
     engine.register_fn("function_name", |w: &mut WindowFuncInfo| w.function_name());
-    engine.register_fn("has_partition_by", |w: &mut WindowFuncInfo| w.has_partition_by());
+    engine.register_fn("has_partition_by", |w: &mut WindowFuncInfo| {
+        w.has_partition_by()
+    });
     engine.register_fn("has_order_by", |w: &mut WindowFuncInfo| w.has_order_by());
-    engine.register_fn("has_window_frame", |w: &mut WindowFuncInfo| w.has_window_frame());
+    engine.register_fn("has_window_frame", |w: &mut WindowFuncInfo| {
+        w.has_window_frame()
+    });
 
     // ExprInfo 方法
     engine.register_fn("kind", |e: &mut ExprInfo| e.kind());
@@ -751,7 +797,10 @@ pub fn build_engine() -> Engine {
     });
     engine.register_fn("foreign_table", |f: &mut ForeignKeyInfo| f.foreign_table());
     engine.register_fn("referred_columns", |f: &mut ForeignKeyInfo| -> Array {
-        f.referred_columns().into_iter().map(Dynamic::from).collect()
+        f.referred_columns()
+            .into_iter()
+            .map(Dynamic::from)
+            .collect()
     });
     engine.register_fn("on_delete", |f: &mut ForeignKeyInfo| f.on_delete());
     engine.register_fn("on_update", |f: &mut ForeignKeyInfo| f.on_update());
@@ -787,4 +836,202 @@ pub fn build_engine() -> Engine {
     engine.register_fn("kind", |c: &mut CommentInfo| c.kind());
 
     engine
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+
+    // ===== 辅助函数 =====
+
+    fn make_violation(rule_id: &str, line: Option<usize>) -> Violation {
+        Violation {
+            rule_id: rule_id.to_string(),
+            rule_name: "test_rule".to_string(),
+            rule_group: None,
+            severity: "warning".to_string(),
+            message: "test message".to_string(),
+            file_path: PathBuf::new(),
+            script_type: "sql".to_string(),
+            line,
+            end_line: None,
+            column: None,
+        }
+    }
+
+    // ===== parse_rule_ids =====
+
+    #[test]
+    fn test_parse_rule_ids_single() {
+        assert_eq!(parse_rule_ids("DML001"), vec!["DML001".to_string()]);
+    }
+
+    #[test]
+    fn test_parse_rule_ids_multiple_comma() {
+        assert_eq!(
+            parse_rule_ids("DML001, DML002"),
+            vec!["DML001".to_string(), "DML002".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_parse_rule_ids_wildcard() {
+        assert_eq!(parse_rule_ids("*"), vec!["*".to_string()]);
+    }
+
+    #[test]
+    fn test_parse_rule_ids_prefix_wildcard() {
+        assert_eq!(parse_rule_ids("DML*"), vec!["DML*".to_string()]);
+    }
+
+    #[test]
+    fn test_parse_rule_ids_block_comment_terminator() {
+        assert_eq!(parse_rule_ids(" DML001 */"), vec!["DML001".to_string()]);
+    }
+
+    #[test]
+    fn test_parse_rule_ids_empty_mixed() {
+        assert!(parse_rule_ids("  ").is_empty());
+    }
+
+    #[test]
+    fn test_parse_rule_ids_lowercase_normalized() {
+        assert_eq!(parse_rule_ids("dml001"), vec!["DML001".to_string()]);
+    }
+
+    // ===== parse_exemptions =====
+
+    #[test]
+    fn test_parse_exemptions_next_line() {
+        let sql = "-- sqlguard-disable-next-line DML001\nSELECT *";
+        let exemptions = parse_exemptions(sql);
+        assert_eq!(exemptions.get(&2), Some(&vec!["DML001".to_string()]));
+    }
+
+    #[test]
+    fn test_parse_exemptions_current_line() {
+        let sql = "SELECT * -- sqlguard-disable-line DML001";
+        let exemptions = parse_exemptions(sql);
+        assert_eq!(exemptions.get(&1), Some(&vec!["DML001".to_string()]));
+    }
+
+    #[test]
+    fn test_parse_exemptions_block_comment() {
+        let sql = "/* sqlguard-disable DML001 */";
+        let exemptions = parse_exemptions(sql);
+        assert_eq!(exemptions.get(&1), Some(&vec!["DML001".to_string()]));
+    }
+
+    #[test]
+    fn test_parse_exemptions_multiple_rules() {
+        let sql = "-- sqlguard-disable-next-line DML001,DML002";
+        let exemptions = parse_exemptions(sql);
+        assert_eq!(
+            exemptions.get(&2),
+            Some(&vec!["DML001".to_string(), "DML002".to_string()])
+        );
+    }
+
+    #[test]
+    fn test_parse_exemptions_wildcard() {
+        let sql = "-- sqlguard-disable-next-line *";
+        let exemptions = parse_exemptions(sql);
+        assert_eq!(exemptions.get(&2), Some(&vec!["*".to_string()]));
+    }
+
+    #[test]
+    fn test_parse_exemptions_plain_sql_empty() {
+        let sql = "SELECT * FROM users;\nINSERT INTO t VALUES (1);";
+        let exemptions = parse_exemptions(sql);
+        assert!(exemptions.is_empty());
+    }
+
+    #[test]
+    fn test_parse_exemptions_case_insensitive() {
+        let sql = "-- SQLGUARD-DISABLE-NEXT-LINE dml001";
+        let exemptions = parse_exemptions(sql);
+        assert_eq!(exemptions.get(&2), Some(&vec!["DML001".to_string()]));
+    }
+
+    // ===== is_exempted =====
+
+    #[test]
+    fn test_is_exempted_exact_match() {
+        let v = make_violation("DML001", Some(2));
+        let mut exemptions = HashMap::new();
+        exemptions.insert(2, vec!["DML001".to_string()]);
+        assert!(is_exempted(&v, &exemptions));
+    }
+
+    #[test]
+    fn test_is_exempted_no_match() {
+        let v = make_violation("DML002", Some(2));
+        let mut exemptions = HashMap::new();
+        exemptions.insert(2, vec!["DML001".to_string()]);
+        assert!(!is_exempted(&v, &exemptions));
+    }
+
+    #[test]
+    fn test_is_exempted_wildcard() {
+        let v = make_violation("DML001", Some(2));
+        let mut exemptions = HashMap::new();
+        exemptions.insert(2, vec!["*".to_string()]);
+        assert!(is_exempted(&v, &exemptions));
+    }
+
+    #[test]
+    fn test_is_exempted_prefix_wildcard() {
+        let v = make_violation("DML001", Some(2));
+        let mut exemptions = HashMap::new();
+        exemptions.insert(2, vec!["DML*".to_string()]);
+        assert!(is_exempted(&v, &exemptions));
+    }
+
+    #[test]
+    fn test_is_exempted_no_line_number() {
+        let v = make_violation("DML001", None);
+        let mut exemptions = HashMap::new();
+        exemptions.insert(1, vec!["DML001".to_string()]);
+        assert!(!is_exempted(&v, &exemptions));
+    }
+
+    #[test]
+    fn test_is_exempted_line_not_in_exemptions() {
+        let v = make_violation("DML001", Some(5));
+        let mut exemptions = HashMap::new();
+        exemptions.insert(2, vec!["DML001".to_string()]);
+        assert!(!is_exempted(&v, &exemptions));
+    }
+
+    // ===== RuleFilter =====
+
+    #[test]
+    fn test_rule_filter_default_is_empty() {
+        assert!(RuleFilter::default().is_empty());
+    }
+
+    #[test]
+    fn test_rule_filter_from_cli_include_rules() {
+        let f = RuleFilter::from_cli(&Some("DML001".to_string()), &None, &None, &None);
+        assert!(!f.is_empty());
+        assert!(f.matches_id_group("DML001", None));
+    }
+
+    #[test]
+    fn test_rule_filter_from_cli_exclude_rules() {
+        let f = RuleFilter::from_cli(&None, &None, &Some("DML001".to_string()), &None);
+        assert!(!f.matches_id_group("DML001", None));
+        // 其他规则不受影响
+        assert!(f.matches_id_group("DML002", None));
+    }
+
+    #[test]
+    fn test_rule_filter_prefix_wildcard() {
+        let f = RuleFilter::from_cli(&Some("DML*".to_string()), &None, &None, &None);
+        assert!(f.matches_id_group("DML001", None));
+        assert!(f.matches_id_group("DML002", None));
+        assert!(!f.matches_id_group("DDL001", None));
+    }
 }

@@ -4,10 +4,10 @@
 //! `ManifestItem` 通过 `#[serde(flatten)]` 把 `SafetyClass` + `BackupStrategy` 字段平铺到 item 下，
 //! 兼容旧发布平台按字段名读取。
 
-use serde::Serialize;
-use super::{BackupRollbackPair, SafetyClass, BackupStrategy, SourceRef, ExpectedSchema};
 use super::util::current_iso8601_utc;
+use super::{BackupRollbackPair, BackupStrategy, ExpectedSchema, SafetyClass, SourceRef};
 use crate::config::RollbackConfig;
+use serde::Serialize;
 
 #[derive(Serialize)]
 pub struct Manifest {
@@ -56,7 +56,12 @@ pub struct ManifestItem {
 impl Manifest {
     /// 从已生成的 pairs 与方言名称构造 manifest。
     /// ★ P1-2：新增 `rc` 参数以透出 `assert_on_schema_mismatch` / `on_partitioned_table` 执行期策略。
-    pub fn from_pairs(pairs: &[BackupRollbackPair], dialect: &str, rc: &RollbackConfig, warnings: Vec<String>) -> Self {
+    pub fn from_pairs(
+        pairs: &[BackupRollbackPair],
+        dialect: &str,
+        rc: &RollbackConfig,
+        warnings: Vec<String>,
+    ) -> Self {
         let mut unreliable = 0usize;
         let mut irreversible = 0usize;
         let mut partial = 0usize;
@@ -97,17 +102,20 @@ impl Manifest {
             }
         }
 
-        let items = pairs.iter().map(|p| ManifestItem {
-            seq: p.seq,
-            source: p.source.clone(),
-            original_sql: p.original_sql.clone(),
-            backup: p.backup.clone(),
-            rollback: p.rollback.clone(),
-            safety: p.safety.clone(),
-            strategy: p.strategy.clone(),
-            expected_schema: p.expected_schema.clone(),
-            warnings: p.warnings.clone(),
-        }).collect();
+        let items = pairs
+            .iter()
+            .map(|p| ManifestItem {
+                seq: p.seq,
+                source: p.source.clone(),
+                original_sql: p.original_sql.clone(),
+                backup: p.backup.clone(),
+                rollback: p.rollback.clone(),
+                safety: p.safety.clone(),
+                strategy: p.strategy.clone(),
+                expected_schema: p.expected_schema.clone(),
+                warnings: p.warnings.clone(),
+            })
+            .collect();
 
         Manifest {
             version: 1,
@@ -162,7 +170,13 @@ mod tests {
     use super::*;
     use crate::rollback::SourceRef;
 
-    fn make_pair(seq: u64, reliable: bool, partial: bool, irreversible: bool, requires_lock: bool) -> BackupRollbackPair {
+    fn make_pair(
+        seq: u64,
+        reliable: bool,
+        partial: bool,
+        irreversible: bool,
+        requires_lock: bool,
+    ) -> BackupRollbackPair {
         BackupRollbackPair {
             seq,
             stmt_kind: String::new(),
@@ -176,7 +190,11 @@ mod tests {
                 irreversible,
                 counter_unrestored: false,
                 requires_lock,
-                lock_type: if requires_lock { Some("FTWRL".to_string()) } else { None },
+                lock_type: if requires_lock {
+                    Some("FTWRL".to_string())
+                } else {
+                    None
+                },
                 lock_timeout_best_effort: false,
                 snapshot_window_unprotected: false,
                 partitioned: false,
@@ -242,7 +260,12 @@ mod tests {
     #[test]
     fn serialize_produces_valid_json() {
         let pairs = vec![make_pair(1, true, false, false, true)];
-        let m = Manifest::from_pairs(&pairs, "mysql", &default_rc(), vec!["test warning".to_string()]);
+        let m = Manifest::from_pairs(
+            &pairs,
+            "mysql",
+            &default_rc(),
+            vec!["test warning".to_string()],
+        );
         let json = serialize_manifest(&m).unwrap();
         assert!(json.contains("\"dialect\": \"mysql\""));
         assert!(json.contains("\"requires_lock_count\": 1"));

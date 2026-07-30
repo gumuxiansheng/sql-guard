@@ -70,7 +70,10 @@ pub fn generate_json_report(
     files_checked: usize,
 ) -> String {
     let error_count = violations.iter().filter(|v| v.severity == "error").count();
-    let warning_count = violations.iter().filter(|v| v.severity == "warning").count();
+    let warning_count = violations
+        .iter()
+        .filter(|v| v.severity == "warning")
+        .count();
 
     let dir_issues: Vec<JsonDirectoryIssue> = missing
         .iter()
@@ -115,4 +118,90 @@ pub fn generate_json_report(
     };
 
     serde_json::to_string_pretty(&report).unwrap_or_else(|_| "{}".to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use crate::error::{DirectoryIssue, DirectoryIssueType, Violation};
+
+    use super::generate_json_report;
+
+    fn make_violation(
+        rule_id: &str,
+        severity: &str,
+        line: Option<usize>,
+        message: &str,
+    ) -> Violation {
+        Violation {
+            rule_id: rule_id.to_string(),
+            rule_name: "test_rule".to_string(),
+            rule_group: Some("test".to_string()),
+            severity: severity.to_string(),
+            message: message.to_string(),
+            file_path: PathBuf::from("test.sql"),
+            script_type: "dml".to_string(),
+            line,
+            end_line: line,
+            column: None,
+        }
+    }
+
+    #[test]
+    fn generate_json_report_empty_violations() {
+        let output = generate_json_report(&[], &[], &[], 5);
+        let json: serde_json::Value = serde_json::from_str(&output).expect("valid JSON");
+        assert_eq!(json["summary"]["passed"], true);
+        assert_eq!(json["summary"]["total_violations"], 0);
+    }
+
+    #[test]
+    fn generate_json_report_with_violations() {
+        let v = make_violation("S001", "error", Some(42), "bad sql");
+        let output = generate_json_report(&[v], &[], &[], 5);
+        let json: serde_json::Value = serde_json::from_str(&output).expect("valid JSON");
+        let violations = json["violations"]
+            .as_array()
+            .expect("violations is an array");
+        assert_eq!(violations.len(), 1);
+        let first = &violations[0];
+        assert_eq!(first["rule_id"], "S001");
+        assert_eq!(first["severity"], "error");
+        assert_eq!(first["file"], "test.sql");
+        assert_eq!(first["line"], 42);
+    }
+
+    #[test]
+    fn generate_json_report_with_directory_issues() {
+        let missing = DirectoryIssue {
+            path: PathBuf::from("missing_dir"),
+            issue_type: DirectoryIssueType::Missing,
+        };
+        let unexpected = DirectoryIssue {
+            path: PathBuf::from("unexpected_dir"),
+            issue_type: DirectoryIssueType::Unexpected,
+        };
+        let output = generate_json_report(&[], &[missing], &[unexpected], 5);
+        let json: serde_json::Value = serde_json::from_str(&output).expect("valid JSON");
+        let dir_issues = json["directory_issues"]
+            .as_array()
+            .expect("directory_issues is an array");
+        assert_eq!(dir_issues.len(), 2);
+        assert_eq!(dir_issues[0]["issue_type"], "missing");
+        assert_eq!(dir_issues[1]["issue_type"], "unexpected");
+    }
+
+    #[test]
+    fn generate_json_report_counts() {
+        let violations = vec![
+            make_violation("E001", "error", Some(1), "err1"),
+            make_violation("E002", "error", Some(2), "err2"),
+            make_violation("W001", "warning", Some(3), "warn1"),
+        ];
+        let output = generate_json_report(&violations, &[], &[], 5);
+        let json: serde_json::Value = serde_json::from_str(&output).expect("valid JSON");
+        assert_eq!(json["summary"]["errors"], 2);
+        assert_eq!(json["summary"]["warnings"], 1);
+    }
 }

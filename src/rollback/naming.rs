@@ -3,10 +3,10 @@
 //! 对应设计文档 §4.6 / F9。每个 rollback 生成周期维护独立的 NamingAllocator，
 //! 同一表多次出现时 NNNN 递增（1-indexed），跨表共用一个计数器以保持全局唯一。
 
-use std::collections::HashSet;
-use crate::config::RollbackConfig;
 use super::strip_ident_quotes;
 use super::util::current_date_yyyymmdd;
+use crate::config::RollbackConfig;
+use std::collections::HashSet;
 
 /// 备份表命名分配器。
 ///
@@ -83,7 +83,13 @@ impl<'a> NamingAllocator<'a> {
 /// 将表名中非 `[a-zA-Z0-9_]` 字符替换为 `_`，保证生成的 bks_ 表名合法。
 fn sanitize_table_name(name: &str) -> String {
     name.chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '_' { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect()
 }
 

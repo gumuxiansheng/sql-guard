@@ -492,9 +492,7 @@ impl SqlAst {
         self.statements.iter().any(|s| s.kind == "CREATE_TABLE")
     }
     pub fn has_drop_table(&self) -> bool {
-        self.statements
-            .iter()
-            .any(|s| s.kind == "DROP_TABLE")
+        self.statements.iter().any(|s| s.kind == "DROP_TABLE")
     }
     pub fn has_comma_join_anywhere(&self) -> bool {
         self.has_comma_join_anywhere
@@ -1149,7 +1147,10 @@ mod tests {
         assert!(matches_any(&pats, "DDL001"));
         assert!(matches_any(&pats, "DML002"));
         assert!(!matches_any(&pats, "DDL002"));
-        assert!(!matches_any(&pats, "ddl001"), "matches_any is case-sensitive");
+        assert!(
+            !matches_any(&pats, "ddl001"),
+            "matches_any is case-sensitive"
+        );
     }
 
     #[test]
@@ -1159,7 +1160,10 @@ mod tests {
         assert!(matches_any(&pats, "DDLXXX"));
         assert!(!matches_any(&pats, "DML001"));
         // "DDL*" 的 prefix 是 "DDL"，"DDL".starts_with("DDL") == true，所以 "DDL" 也命中
-        assert!(matches_any(&pats, "DDL"), "prefix wildcard matches the prefix itself");
+        assert!(
+            matches_any(&pats, "DDL"),
+            "prefix wildcard matches the prefix itself"
+        );
     }
 
     #[test]
@@ -1215,7 +1219,10 @@ mod tests {
             &None,
             &None,
         );
-        assert_eq!(f.include_rules, vec!["DDL001".to_string(), "DML002".to_string()]);
+        assert_eq!(
+            f.include_rules,
+            vec!["DDL001".to_string(), "DML002".to_string()]
+        );
         assert_eq!(f.include_groups, vec!["ddl-safety".to_string()]);
     }
 
@@ -1235,7 +1242,10 @@ mod tests {
             &None,
         );
         // 白名单匹配 DDL*，但黑名单显式排除 DDL001
-        assert!(!f.matches_id_group("DDL001", None), "blacklist must beat whitelist");
+        assert!(
+            !f.matches_id_group("DDL001", None),
+            "blacklist must beat whitelist"
+        );
         assert!(f.matches_id_group("DDL002", None));
     }
 
@@ -1251,7 +1261,10 @@ mod tests {
         // 白名单 include_groups 非空时，group=None 的规则应被排除
         let f = RuleFilter::from_cli(&None, &Some("ddl-safety".to_string()), &None, &None);
         assert!(f.matches_id_group("DDL001", Some("ddl-safety")));
-        assert!(!f.matches_id_group("DDL002", None), "no-group rule must be excluded when include_groups is non-empty");
+        assert!(
+            !f.matches_id_group("DDL002", None),
+            "no-group rule must be excluded when include_groups is non-empty"
+        );
     }
 
     #[test]
@@ -1282,16 +1295,38 @@ mod tests {
             comments: Vec::new(),
         };
         ast.statements.push(StmtInfo {
-            kind: "OTHER".to_string(), line: 1, end_line: 3, column: 1,
-            create_table: None, drop_object: None, select: None, insert: None,
-            update: None, delete: None, alter_table: None, truncate: None,
-            create_view: None, create_index: None, transaction: None,
+            kind: "OTHER".to_string(),
+            line: 1,
+            end_line: 3,
+            column: 1,
+            create_table: None,
+            drop_object: None,
+            select: None,
+            insert: None,
+            update: None,
+            delete: None,
+            alter_table: None,
+            truncate: None,
+            create_view: None,
+            create_index: None,
+            transaction: None,
         });
         ast.statements.push(StmtInfo {
-            kind: "OTHER".to_string(), line: 5, end_line: 7, column: 1,
-            create_table: None, drop_object: None, select: None, insert: None,
-            update: None, delete: None, alter_table: None, truncate: None,
-            create_view: None, create_index: None, transaction: None,
+            kind: "OTHER".to_string(),
+            line: 5,
+            end_line: 7,
+            column: 1,
+            create_table: None,
+            drop_object: None,
+            select: None,
+            insert: None,
+            update: None,
+            delete: None,
+            alter_table: None,
+            truncate: None,
+            create_view: None,
+            create_index: None,
+            transaction: None,
         });
 
         // 边界：起点、终点

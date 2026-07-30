@@ -1,7 +1,6 @@
 use sqlparser::ast::{
-    AlterTable, AlterTableOperation, ColumnOption, CreateIndex, CreateTable, CreateView,
-    Delete, DropBehavior, FromTable, Insert, Statement, TableConstraint,
-    TableFactor, Truncate, Update,
+    AlterTable, AlterTableOperation, ColumnOption, CreateIndex, CreateTable, CreateView, Delete,
+    DropBehavior, FromTable, Insert, Statement, TableConstraint, TableFactor, Truncate, Update,
 };
 use sqlparser::dialect::{
     AnsiDialect, GenericDialect, MySqlDialect, OracleDialect, PostgreSqlDialect,
@@ -36,7 +35,7 @@ use crate::config::CheckDialect;
 /// - 行号保真：重写不引入/删除换行符，violation 行号与原文件一致。
 ///
 /// 见 [`parse_sql_to_ast`]（2 参封装，回退为 `None`）。
-pub(crate) fn parse_sql_to_ast_fb(
+pub fn parse_sql_to_ast_fb(
     sql: &str,
     dialect: CheckDialect,
     fallback: Option<CheckDialect>,
@@ -46,13 +45,18 @@ pub(crate) fn parse_sql_to_ast_fb(
     let (effective_sql, effective_dialect): (std::borrow::Cow<'_, str>, CheckDialect) =
         if dialect == CheckDialect::GaussDB {
             let rewritten = gaussdb_rewrite::rewrite_for_pg_parse(sql);
-            (std::borrow::Cow::Owned(rewritten.sql), CheckDialect::PostgreSql)
+            (
+                std::borrow::Cow::Owned(rewritten.sql),
+                CheckDialect::PostgreSql,
+            )
         } else {
             (std::borrow::Cow::Borrowed(sql), dialect)
         };
 
     let chain_enums = build_chain_enums(effective_dialect, fallback);
-    let primary = *chain_enums.first().expect("dialect chain must be non-empty");
+    let primary = *chain_enums
+        .first()
+        .expect("dialect chain must be non-empty");
     let parser_dialect: Box<dyn sqlparser::dialect::Dialect> = box_dialect(primary);
 
     let mut parser = match Parser::new(&*parser_dialect).try_with_sql(&effective_sql) {
@@ -83,7 +87,8 @@ pub(crate) fn parse_sql_to_ast_fb(
         let line = peek.span.start.line as i64;
         let column = peek.span.start.column as i64;
         // 主方言尝试前记录本语句起始字节偏移（用于失败回退时切片文本）
-        let start_offset = location_to_byte_offset(&effective_sql, peek.span.start.line, peek.span.start.column);
+        let start_offset =
+            location_to_byte_offset(&effective_sql, peek.span.start.line, peek.span.start.column);
 
         // 先尝试主方言
         let mut recovered: Option<Statement> = None;
@@ -92,10 +97,7 @@ pub(crate) fn parse_sql_to_ast_fb(
                 // 主方言「干净地」解析到 `;`/EOF（下一 token 是分隔符或文件尾）→ 采用。
                 // 否则说明主方言只吞掉了前缀（如把 Oracle 的 `CONNECT BY` 误判为表别名），
                 // 不能采用残缺结果，需回退链重新解析整条语句。
-                let clean = matches!(
-                    parser.peek_token().token,
-                    Token::SemiColon | Token::EOF
-                );
+                let clean = matches!(parser.peek_token().token, Token::SemiColon | Token::EOF);
                 if clean {
                     let end_line = end_line_of(parser.peek_token(), line, total_lines);
                     statements.push(convert_statement(&stmt, line, column, end_line));
@@ -114,7 +116,8 @@ pub(crate) fn parse_sql_to_ast_fb(
         loop {
             let t = parser.peek_token();
             if t.token == Token::SemiColon {
-                end_offset = location_to_byte_offset(&effective_sql, t.span.start.line, t.span.start.column);
+                end_offset =
+                    location_to_byte_offset(&effective_sql, t.span.start.line, t.span.start.column);
                 parser.next_token();
                 break;
             } else if t.token == Token::EOF {
@@ -252,7 +255,12 @@ fn location_to_byte_offset(sql: &str, line: u64, column: u64) -> usize {
     sql.len()
 }
 
-pub(crate) fn convert_statement(stmt: &Statement, line: i64, column: i64, end_line: i64) -> StmtInfo {
+pub(crate) fn convert_statement(
+    stmt: &Statement,
+    line: i64,
+    column: i64,
+    end_line: i64,
+) -> StmtInfo {
     match stmt {
         Statement::CreateTable(CreateTable {
             name,
@@ -324,7 +332,8 @@ pub(crate) fn convert_statement(stmt: &Statement, line: i64, column: i64, end_li
                                 name: String::new(),
                                 columns: vec![col_def.name.to_string()],
                                 foreign_table: fk.foreign_table.to_string(),
-                                referred_columns: fk.referred_columns
+                                referred_columns: fk
+                                    .referred_columns
                                     .iter()
                                     .map(|i| i.to_string())
                                     .collect(),
@@ -371,10 +380,7 @@ pub(crate) fn convert_statement(stmt: &Statement, line: i64, column: i64, end_li
                 match con {
                     TableConstraint::Unique(u) => {
                         uniques.push(UniqueInfo {
-                            name: u.name
-                                .as_ref()
-                                .map(|i| i.to_string())
-                                .unwrap_or_default(),
+                            name: u.name.as_ref().map(|i| i.to_string()).unwrap_or_default(),
                             columns: u.columns.iter().map(|i| i.to_string()).collect(),
                             line: None,
                             column: None,
@@ -382,13 +388,11 @@ pub(crate) fn convert_statement(stmt: &Statement, line: i64, column: i64, end_li
                     }
                     TableConstraint::ForeignKey(fk) => {
                         foreign_keys.push(ForeignKeyInfo {
-                            name: fk.name
-                                .as_ref()
-                                .map(|i| i.to_string())
-                                .unwrap_or_default(),
+                            name: fk.name.as_ref().map(|i| i.to_string()).unwrap_or_default(),
                             columns: fk.columns.iter().map(|i| i.to_string()).collect(),
                             foreign_table: fk.foreign_table.to_string(),
-                            referred_columns: fk.referred_columns
+                            referred_columns: fk
+                                .referred_columns
                                 .iter()
                                 .map(|i| i.to_string())
                                 .collect(),
@@ -400,10 +404,7 @@ pub(crate) fn convert_statement(stmt: &Statement, line: i64, column: i64, end_li
                     }
                     TableConstraint::Check(c) => {
                         checks.push(CheckInfo {
-                            name: c.name
-                                .as_ref()
-                                .map(|i| i.to_string())
-                                .unwrap_or_default(),
+                            name: c.name.as_ref().map(|i| i.to_string()).unwrap_or_default(),
                             expr_text: c.expr.to_string(),
                             line: None,
                             column: None,
@@ -411,10 +412,7 @@ pub(crate) fn convert_statement(stmt: &Statement, line: i64, column: i64, end_li
                     }
                     TableConstraint::Index(idx) => {
                         indexes.push(IndexInfo {
-                            name: idx.name
-                                .as_ref()
-                                .map(|i| i.to_string())
-                                .unwrap_or_default(),
+                            name: idx.name.as_ref().map(|i| i.to_string()).unwrap_or_default(),
                             columns: idx.columns.iter().map(|i| i.to_string()).collect(),
                             is_unique: false,
                             line: None,
@@ -517,7 +515,9 @@ pub(crate) fn convert_statement(stmt: &Statement, line: i64, column: i64, end_li
             }
         }
         Statement::Insert(Insert {
-            table: table_name, columns, ..
+            table: table_name,
+            columns,
+            ..
         }) => {
             let col_names: Vec<String> = columns.iter().map(|c| c.to_string()).collect();
             StmtInfo {
@@ -570,7 +570,10 @@ pub(crate) fn convert_statement(stmt: &Statement, line: i64, column: i64, end_li
             }
         }
         Statement::Delete(Delete {
-            tables, from, selection, ..
+            tables,
+            from,
+            selection,
+            ..
         }) => {
             // 优先取 `tables`（MySQL 多表 DELETE），否则从 `from` 取首个表
             let table_name = if !tables.is_empty() {
@@ -630,26 +633,33 @@ pub(crate) fn convert_statement(stmt: &Statement, line: i64, column: i64, end_li
                         AlterTableOperation::AddConstraint { constraint: tc, .. } => {
                             let (t, detail_str, is_pk) = match &tc {
                                 TableConstraint::PrimaryKey(pk) => {
-                                    added_pk_cols = pk.columns.iter().map(|i| i.to_string()).collect();
+                                    added_pk_cols =
+                                        pk.columns.iter().map(|i| i.to_string()).collect();
                                     (
-                                    "ADD_CONSTRAINT",
-                                    format!(
-                                        "ADD{} PRIMARY KEY ({})",
-                                        pk.name.as_ref().map(|n| format!(" CONSTRAINT {}", n)).unwrap_or_default(),
-                                        pk.columns
-                                            .iter()
-                                            .map(|i| i.to_string())
-                                            .collect::<Vec<_>>()
-                                            .join(", ")
-                                    ),
-                                    true,
+                                        "ADD_CONSTRAINT",
+                                        format!(
+                                            "ADD{} PRIMARY KEY ({})",
+                                            pk.name
+                                                .as_ref()
+                                                .map(|n| format!(" CONSTRAINT {}", n))
+                                                .unwrap_or_default(),
+                                            pk.columns
+                                                .iter()
+                                                .map(|i| i.to_string())
+                                                .collect::<Vec<_>>()
+                                                .join(", ")
+                                        ),
+                                        true,
                                     )
-                                },
+                                }
                                 TableConstraint::Unique(u) => (
                                     "ADD_CONSTRAINT",
                                     format!(
                                         "ADD{} UNIQUE ({})",
-                                        u.name.as_ref().map(|n| format!(" CONSTRAINT {}", n)).unwrap_or_default(),
+                                        u.name
+                                            .as_ref()
+                                            .map(|n| format!(" CONSTRAINT {}", n))
+                                            .unwrap_or_default(),
                                         u.columns
                                             .iter()
                                             .map(|i| i.to_string())
@@ -662,7 +672,10 @@ pub(crate) fn convert_statement(stmt: &Statement, line: i64, column: i64, end_li
                                     "ADD_CONSTRAINT",
                                     format!(
                                         "ADD{} FOREIGN KEY ({}) REFERENCES {}",
-                                        fk.name.as_ref().map(|n| format!(" CONSTRAINT {}", n)).unwrap_or_default(),
+                                        fk.name
+                                            .as_ref()
+                                            .map(|n| format!(" CONSTRAINT {}", n))
+                                            .unwrap_or_default(),
                                         fk.columns
                                             .iter()
                                             .map(|i| i.to_string())
@@ -676,20 +689,31 @@ pub(crate) fn convert_statement(stmt: &Statement, line: i64, column: i64, end_li
                                     "ADD_CONSTRAINT",
                                     format!(
                                         "ADD{} CHECK ({})",
-                                        c.name.as_ref().map(|n| format!(" CONSTRAINT {}", n)).unwrap_or_default(),
+                                        c.name
+                                            .as_ref()
+                                            .map(|n| format!(" CONSTRAINT {}", n))
+                                            .unwrap_or_default(),
                                         c.expr
                                     ),
                                     false,
                                 ),
                                 _ => ("ADD_CONSTRAINT", format!("ADD {}", tc), false),
                             };
-                            (t.to_string(), String::new(), String::new(),
-                             name_of_table_constraint(tc), detail_str, is_pk, false)
+                            (
+                                t.to_string(),
+                                String::new(),
+                                String::new(),
+                                name_of_table_constraint(tc),
+                                detail_str,
+                                is_pk,
+                                false,
+                            )
                         }
                         AlterTableOperation::AddColumn { column_def, .. } => {
-                            let has_pk = column_def.options.iter().any(|o| {
-                                matches!(o.option, ColumnOption::PrimaryKey(_))
-                            });
+                            let has_pk = column_def
+                                .options
+                                .iter()
+                                .any(|o| matches!(o.option, ColumnOption::PrimaryKey(_)));
                             (
                                 "ADD_COLUMN".to_string(),
                                 column_def.name.to_string(),
@@ -823,7 +847,9 @@ pub(crate) fn convert_statement(stmt: &Statement, line: i64, column: i64, end_li
                 transaction: None,
             }
         }
-        Statement::Truncate(Truncate { table_names, table, .. }) => StmtInfo {
+        Statement::Truncate(Truncate {
+            table_names, table, ..
+        }) => StmtInfo {
             kind: "TRUNCATE".to_string(),
             line,
             end_line,
@@ -883,14 +909,8 @@ pub(crate) fn convert_statement(stmt: &Statement, line: i64, column: i64, end_li
             unique,
             ..
         }) => {
-            let idx_name = name
-                .as_ref()
-                .map(|n| n.to_string())
-                .unwrap_or_default();
-            let col_names: Vec<String> = columns
-                .iter()
-                .map(|obe| obe.to_string())
-                .collect();
+            let idx_name = name.as_ref().map(|n| n.to_string()).unwrap_or_default();
+            let col_names: Vec<String> = columns.iter().map(|obe| obe.to_string()).collect();
             let _ = using;
             StmtInfo {
                 kind: "CREATE_INDEX".to_string(),
@@ -1086,38 +1106,22 @@ pub(crate) fn convert_statement(stmt: &Statement, line: i64, column: i64, end_li
 /// 生产环境建议用 [`parse_sql_to_ast_fb`] 并传入 `Some(Oracle)` 以获得 Oracle 兜底。
 ///
 /// 供单元测试与 `replay_export` 等不需要回退链的场景直接调用。
-pub(crate) fn parse_sql_to_ast(sql: &str, dialect: CheckDialect) -> SqlAst {
+pub fn parse_sql_to_ast(sql: &str, dialect: CheckDialect) -> SqlAst {
     parse_sql_to_ast_fb(sql, dialect, None)
 }
 
 /// 提取 TableConstraint 的名字（用于 AlterOpInfo.constraint_name）。
 pub(crate) fn name_of_table_constraint(tc: &TableConstraint) -> String {
     match tc {
-        TableConstraint::Unique(u) => u
-            .name
-            .as_ref()
-            .map(|i| i.to_string())
-            .unwrap_or_default(),
-        TableConstraint::PrimaryKey(pk) => pk
-            .name
-            .as_ref()
-            .map(|i| i.to_string())
-            .unwrap_or_default(),
-        TableConstraint::ForeignKey(fk) => fk
-            .name
-            .as_ref()
-            .map(|i| i.to_string())
-            .unwrap_or_default(),
-        TableConstraint::Check(c) => c
-            .name
-            .as_ref()
-            .map(|i| i.to_string())
-            .unwrap_or_default(),
-        TableConstraint::Index(idx) => idx
-            .name
-            .as_ref()
-            .map(|i| i.to_string())
-            .unwrap_or_default(),
+        TableConstraint::Unique(u) => u.name.as_ref().map(|i| i.to_string()).unwrap_or_default(),
+        TableConstraint::PrimaryKey(pk) => {
+            pk.name.as_ref().map(|i| i.to_string()).unwrap_or_default()
+        }
+        TableConstraint::ForeignKey(fk) => {
+            fk.name.as_ref().map(|i| i.to_string()).unwrap_or_default()
+        }
+        TableConstraint::Check(c) => c.name.as_ref().map(|i| i.to_string()).unwrap_or_default(),
+        TableConstraint::Index(idx) => idx.name.as_ref().map(|i| i.to_string()).unwrap_or_default(),
         _ => String::new(),
     }
 }
@@ -1174,27 +1178,29 @@ mod tests {
     #[test]
     fn test_parse_error_emits_parse_error_stmt() {
         // sqlparser 无法解析的语法应作为 PARSE_ERROR 语句记录
-        for input in [
-            "SELECT 1 +",
-            "CREATE TABLE",
-            "SELECT ) FROM t",
-        ] {
+        for input in ["SELECT 1 +", "CREATE TABLE", "SELECT ) FROM t"] {
             let ast = parse_sql_to_ast(input, CheckDialect::Generic);
-            assert!(ast.statements.iter().any(|s| s.kind == "PARSE_ERROR"), "expected PARSE_ERROR for {:?}", input);
+            assert!(
+                ast.statements.iter().any(|s| s.kind == "PARSE_ERROR"),
+                "expected PARSE_ERROR for {:?}",
+                input
+            );
         }
     }
 
     #[test]
     fn test_parse_mysql_dialect_specific_syntax() {
         // Generic 方言可能不支持 INSERT IGNORE，MySQL 方言可以
-        let mysql_ast = parse_sql_to_ast(
-            "INSERT IGNORE INTO t (a) VALUES (1)",
-            CheckDialect::MySql,
-        );
+        let mysql_ast =
+            parse_sql_to_ast("INSERT IGNORE INTO t (a) VALUES (1)", CheckDialect::MySql);
         assert!(
             mysql_ast.statements.iter().any(|s| s.kind == "INSERT"),
             "MySQL dialect should parse INSERT IGNORE; got kinds: {:?}",
-            mysql_ast.statements.iter().map(|s| &s.kind).collect::<Vec<_>>()
+            mysql_ast
+                .statements
+                .iter()
+                .map(|s| &s.kind)
+                .collect::<Vec<_>>()
         );
     }
 
@@ -1204,7 +1210,10 @@ mod tests {
         let ast = parse_sql_to_ast("SELECT id FROM a, b", CheckDialect::Generic);
         assert!(ast.has_comma_join_anywhere);
 
-        let ast2 = parse_sql_to_ast("SELECT id FROM a JOIN b ON a.id = b.id", CheckDialect::Generic);
+        let ast2 = parse_sql_to_ast(
+            "SELECT id FROM a JOIN b ON a.id = b.id",
+            CheckDialect::Generic,
+        );
         assert!(!ast2.has_comma_join_anywhere);
     }
 
@@ -1248,10 +1257,7 @@ mod tests {
 
     #[test]
     fn test_parse_transaction_statements() {
-        let ast = parse_sql_to_ast(
-            "BEGIN; COMMIT; ROLLBACK;",
-            CheckDialect::Generic,
-        );
+        let ast = parse_sql_to_ast("BEGIN; COMMIT; ROLLBACK;", CheckDialect::Generic);
         let kinds: Vec<&str> = ast.statements.iter().map(|s| s.kind.as_str()).collect();
         assert_eq!(kinds, vec!["START_TRANSACTION", "COMMIT", "ROLLBACK"]);
     }
@@ -1294,7 +1300,10 @@ mod tests {
 
     #[test]
     fn test_format_referral_action_cascade() {
-        assert_eq!(format_referral_action(&Some(sqlparser::ast::ReferentialAction::Cascade)), "CASCADE");
+        assert_eq!(
+            format_referral_action(&Some(sqlparser::ast::ReferentialAction::Cascade)),
+            "CASCADE"
+        );
     }
 
     #[test]
@@ -1348,12 +1357,19 @@ mod tests {
             CheckDialect::PostgreSql,
             Some(CheckDialect::Oracle),
         );
-        assert!(!ast.has_parse_error(), "expected successful parse via Oracle fallback; kinds={:?}", ast.statements.iter().map(|s| &s.kind).collect::<Vec<_>>());
+        assert!(
+            !ast.has_parse_error(),
+            "expected successful parse via Oracle fallback; kinds={:?}",
+            ast.statements.iter().map(|s| &s.kind).collect::<Vec<_>>()
+        );
         let kinds: Vec<&str> = ast.statements.iter().map(|s| s.kind.as_str()).collect();
         assert_eq!(kinds, vec!["SELECT"]);
         // 回退解析出的 SELECT 应识别为 MINUS（在 analyzer 中映射为 except）
         let sel = ast.statements[0].select.as_ref().unwrap();
-        assert!(sel.except, "MINUS should be detected as EXCEPT via Oracle fallback");
+        assert!(
+            sel.except,
+            "MINUS should be detected as EXCEPT via Oracle fallback"
+        );
     }
 
     #[test]
@@ -1378,7 +1394,11 @@ mod tests {
             CheckDialect::PostgreSql,
             Some(CheckDialect::Oracle),
         );
-        assert!(!ast.has_parse_error(), "CONNECT BY should parse via Oracle fallback; kinds={:?}", ast.statements.iter().map(|s| &s.kind).collect::<Vec<_>>());
+        assert!(
+            !ast.has_parse_error(),
+            "CONNECT BY should parse via Oracle fallback; kinds={:?}",
+            ast.statements.iter().map(|s| &s.kind).collect::<Vec<_>>()
+        );
         assert_eq!(ast.statements[0].kind, "SELECT");
 
         // 链结构正确性：即便回退链退化为 [PG, Generic]（无 Oracle），
@@ -1403,8 +1423,15 @@ mod tests {
     fn test_parse_oracle_as_primary() {
         // 直接以 Oracle 作主方言解析（不依赖回退链），验证 OracleDialect 路径本身正确。
         // 1) MINUS 集合运算符
-        let ast = parse_sql_to_ast("SELECT a FROM t1 MINUS SELECT a FROM t2", CheckDialect::Oracle);
-        assert!(!ast.has_parse_error(), "Oracle should parse MINUS directly; kinds={:?}", ast.statements.iter().map(|s| &s.kind).collect::<Vec<_>>());
+        let ast = parse_sql_to_ast(
+            "SELECT a FROM t1 MINUS SELECT a FROM t2",
+            CheckDialect::Oracle,
+        );
+        assert!(
+            !ast.has_parse_error(),
+            "Oracle should parse MINUS directly; kinds={:?}",
+            ast.statements.iter().map(|s| &s.kind).collect::<Vec<_>>()
+        );
         assert_eq!(ast.statements[0].kind, "SELECT");
         assert!(
             ast.statements[0].select.as_ref().unwrap().except,
@@ -1416,12 +1443,20 @@ mod tests {
             "SELECT empno FROM emp CONNECT BY PRIOR empno = mgr START WITH empno = 1",
             CheckDialect::Oracle,
         );
-        assert!(!ast2.has_parse_error(), "Oracle should parse CONNECT BY directly; kinds={:?}", ast2.statements.iter().map(|s| &s.kind).collect::<Vec<_>>());
+        assert!(
+            !ast2.has_parse_error(),
+            "Oracle should parse CONNECT BY directly; kinds={:?}",
+            ast2.statements.iter().map(|s| &s.kind).collect::<Vec<_>>()
+        );
         assert_eq!(ast2.statements[0].kind, "SELECT");
 
         // 3) 标准 SELECT（含 Oracle 伪表 dual）
         let ast3 = parse_sql_to_ast("SELECT 1 FROM dual", CheckDialect::Oracle);
-        assert!(!ast3.has_parse_error(), "Oracle should parse plain SELECT ... FROM dual; kinds={:?}", ast3.statements.iter().map(|s| &s.kind).collect::<Vec<_>>());
+        assert!(
+            !ast3.has_parse_error(),
+            "Oracle should parse plain SELECT ... FROM dual; kinds={:?}",
+            ast3.statements.iter().map(|s| &s.kind).collect::<Vec<_>>()
+        );
         assert_eq!(ast3.statements[0].kind, "SELECT");
     }
 
@@ -1435,7 +1470,11 @@ mod tests {
             "CREATE TABLE t (id INT GENERATED ALWAYS AS IDENTITY, name VARCHAR(10))",
             CheckDialect::PostgreSql,
         );
-        assert!(!ast.has_parse_error(), "CREATE TABLE with GENERATED AS IDENTITY must parse; kinds={:?}", ast.statements.iter().map(|s| &s.kind).collect::<Vec<_>>());
+        assert!(
+            !ast.has_parse_error(),
+            "CREATE TABLE with GENERATED AS IDENTITY must parse; kinds={:?}",
+            ast.statements.iter().map(|s| &s.kind).collect::<Vec<_>>()
+        );
         let create = ast.statements[0].create_table.as_ref().unwrap();
         let id_col = create
             .columns
@@ -1459,10 +1498,17 @@ mod tests {
             CheckDialect::GaussDB,
             Some(CheckDialect::Oracle),
         );
-        assert!(!ast.has_parse_error(), "GaussDB should parse MINUS via rewrite; kinds={:?}", ast.statements.iter().map(|s| &s.kind).collect::<Vec<_>>());
+        assert!(
+            !ast.has_parse_error(),
+            "GaussDB should parse MINUS via rewrite; kinds={:?}",
+            ast.statements.iter().map(|s| &s.kind).collect::<Vec<_>>()
+        );
         assert_eq!(ast.statements[0].kind, "SELECT");
         let sel = ast.statements[0].select.as_ref().unwrap();
-        assert!(sel.except, "MINUS (rewritten to EXCEPT) should be detected as except");
+        assert!(
+            sel.except,
+            "MINUS (rewritten to EXCEPT) should be detected as except"
+        );
     }
 
     #[test]
@@ -1477,7 +1523,8 @@ mod tests {
         // 用 NVL + SYSDATE（重写为 COALESCE + CURRENT_TIMESTAMP），PG 方言直接解析成功，
         // 表名保留 PG 语义（不折叠为大写 USERS）。
         let sql = "SELECT NVL(name, 'x') FROM Users WHERE created > SYSDATE";
-        let gaussdb_ast = parse_sql_to_ast_fb(sql, CheckDialect::GaussDB, Some(CheckDialect::Oracle));
+        let gaussdb_ast =
+            parse_sql_to_ast_fb(sql, CheckDialect::GaussDB, Some(CheckDialect::Oracle));
         assert!(!gaussdb_ast.has_parse_error());
         assert_eq!(gaussdb_ast.statements.len(), 1);
         assert_eq!(gaussdb_ast.statements[0].kind, "SELECT");
@@ -1498,7 +1545,11 @@ mod tests {
             CheckDialect::GaussDB,
             Some(CheckDialect::Oracle),
         );
-        assert!(!ast.has_parse_error(), "GaussDB should parse NVL/SYSDATE via rewrite; kinds={:?}", ast.statements.iter().map(|s| &s.kind).collect::<Vec<_>>());
+        assert!(
+            !ast.has_parse_error(),
+            "GaussDB should parse NVL/SYSDATE via rewrite; kinds={:?}",
+            ast.statements.iter().map(|s| &s.kind).collect::<Vec<_>>()
+        );
         assert_eq!(ast.statements[0].kind, "SELECT");
     }
 
@@ -1510,7 +1561,11 @@ mod tests {
             CheckDialect::GaussDB,
             Some(CheckDialect::Oracle),
         );
-        assert!(!ast.has_parse_error(), "GaussDB should parse FROM dual via rewrite; kinds={:?}", ast.statements.iter().map(|s| &s.kind).collect::<Vec<_>>());
+        assert!(
+            !ast.has_parse_error(),
+            "GaussDB should parse FROM dual via rewrite; kinds={:?}",
+            ast.statements.iter().map(|s| &s.kind).collect::<Vec<_>>()
+        );
         assert_eq!(ast.statements[0].kind, "SELECT");
     }
 
@@ -1523,7 +1578,11 @@ mod tests {
             CheckDialect::GaussDB,
             Some(CheckDialect::Oracle),
         );
-        assert!(!ast.has_parse_error(), "GaussDB should parse backtick identifier via rewrite; kinds={:?}", ast.statements.iter().map(|s| &s.kind).collect::<Vec<_>>());
+        assert!(
+            !ast.has_parse_error(),
+            "GaussDB should parse backtick identifier via rewrite; kinds={:?}",
+            ast.statements.iter().map(|s| &s.kind).collect::<Vec<_>>()
+        );
         assert_eq!(ast.statements[0].kind, "SELECT");
         // PG 语义：双引号标识符保留大小写。analyzer 提取的表名可能带引号（如 "\"order\""），
         // 关键是包含 "order" 且不为大写 "ORDER"（Oracle 会折叠为大写）。
@@ -1543,11 +1602,18 @@ mod tests {
             CheckDialect::GaussDB,
             Some(CheckDialect::Oracle),
         );
-        assert!(!ast.has_parse_error(), "GaussDB should parse mixed Oracle/MySQL constructs; kinds={:?}", ast.statements.iter().map(|s| &s.kind).collect::<Vec<_>>());
+        assert!(
+            !ast.has_parse_error(),
+            "GaussDB should parse mixed Oracle/MySQL constructs; kinds={:?}",
+            ast.statements.iter().map(|s| &s.kind).collect::<Vec<_>>()
+        );
         assert_eq!(ast.statements.len(), 1);
         assert_eq!(ast.statements[0].kind, "SELECT");
         let sel = ast.statements[0].select.as_ref().unwrap();
-        assert!(sel.except, "MINUS should be detected as except after rewrite");
+        assert!(
+            sel.except,
+            "MINUS should be detected as except after rewrite"
+        );
     }
 
     #[test]
@@ -1559,7 +1625,11 @@ mod tests {
             CheckDialect::GaussDB,
             Some(CheckDialect::Oracle),
         );
-        assert!(!ast.has_parse_error(), "GaussDB should parse CONNECT BY via Oracle fallback; kinds={:?}", ast.statements.iter().map(|s| &s.kind).collect::<Vec<_>>());
+        assert!(
+            !ast.has_parse_error(),
+            "GaussDB should parse CONNECT BY via Oracle fallback; kinds={:?}",
+            ast.statements.iter().map(|s| &s.kind).collect::<Vec<_>>()
+        );
         assert_eq!(ast.statements[0].kind, "SELECT");
     }
 
@@ -1618,7 +1688,11 @@ mod tests {
             CheckDialect::GaussDB,
             Some(CheckDialect::Oracle),
         );
-        assert!(!ast.has_parse_error(), "GaussDB should parse ALTER TABLE ADD (...) via rewrite; kinds={:?}", ast.statements.iter().map(|s| &s.kind).collect::<Vec<_>>());
+        assert!(
+            !ast.has_parse_error(),
+            "GaussDB should parse ALTER TABLE ADD (...) via rewrite; kinds={:?}",
+            ast.statements.iter().map(|s| &s.kind).collect::<Vec<_>>()
+        );
         assert_eq!(ast.statements.len(), 1);
         assert_eq!(ast.statements[0].kind, "ALTER_TABLE");
         let alter = ast.statements[0].alter_table.as_ref().unwrap();
@@ -1628,7 +1702,11 @@ mod tests {
             .iter()
             .filter(|op| op.operation_type == "ADD_COLUMN")
             .count();
-        assert_eq!(add_count, 2, "should have 2 ADD_COLUMN operations; ops={:?}", alter.operations);
+        assert_eq!(
+            add_count, 2,
+            "should have 2 ADD_COLUMN operations; ops={:?}",
+            alter.operations
+        );
     }
 
     #[test]
@@ -1639,6 +1717,24 @@ mod tests {
             Some(CheckDialect::Oracle),
         );
         assert!(!ast.has_parse_error());
+        assert_eq!(ast.statements[0].kind, "ALTER_TABLE");
+    }
+
+    #[test]
+    fn test_gaussdb_dialect_parses_pk_using_index() {
+        // Oracle 简化语法：ALTER TABLE a ADD CONSTRAINT pk PRIMARY KEY USING INDEX idx
+        // 重写为 PRIMARY KEY (idx) USING INDEX idx 后 PG 方言解析成功
+        let ast = parse_sql_to_ast_fb(
+            "ALTER TABLE a ADD CONSTRAINT pk_a PRIMARY KEY USING INDEX pk_a",
+            CheckDialect::GaussDB,
+            Some(CheckDialect::Oracle),
+        );
+        assert!(
+            !ast.has_parse_error(),
+            "GaussDB should parse PRIMARY KEY USING INDEX via rewrite; kinds={:?}",
+            ast.statements.iter().map(|s| &s.kind).collect::<Vec<_>>()
+        );
+        assert_eq!(ast.statements.len(), 1);
         assert_eq!(ast.statements[0].kind, "ALTER_TABLE");
     }
 }

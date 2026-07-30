@@ -1,6 +1,6 @@
 use sqlparser::ast::{
-    Expr, GroupByExpr, JoinConstraint, JoinOperator, LimitClause, Query, SelectItem,
-    SetExpr, SetOperator, SetQuantifier, TableFactor, TableWithJoins, WindowType,
+    Expr, GroupByExpr, JoinConstraint, JoinOperator, LimitClause, Query, SelectItem, SetExpr,
+    SetOperator, SetQuantifier, TableFactor, TableWithJoins, WindowType,
 };
 
 use super::ast::*;
@@ -15,11 +15,13 @@ pub(crate) fn set_expr_has_wildcard(e: &SetExpr) -> bool {
     match e {
         SetExpr::Select(s) => {
             let proj_wc = s.projection.iter().any(|item| {
-                matches!(item, SelectItem::Wildcard(_) | SelectItem::QualifiedWildcard(_, _))
+                matches!(
+                    item,
+                    SelectItem::Wildcard(_) | SelectItem::QualifiedWildcard(_, _)
+                )
             });
             let derived_wc = |tf: &TableWithJoins| -> bool {
-                let rel_wc =
-                    matches!(&tf.relation, TableFactor::Derived { subquery, .. } if query_has_wildcard(subquery));
+                let rel_wc = matches!(&tf.relation, TableFactor::Derived { subquery, .. } if query_has_wildcard(subquery));
                 let join_wc = tf
                     .joins
                     .iter()
@@ -175,8 +177,7 @@ pub(crate) fn analyze_query(q: &Query) -> SelectInfo {
                         info.from_table = Some(name.to_string());
                     }
                     if info.from_table_alias.is_none() {
-                        info.from_table_alias =
-                            alias.as_ref().map(|a| a.name.to_string());
+                        info.from_table_alias = alias.as_ref().map(|a| a.name.to_string());
                     }
                 }
                 TableFactor::Derived { alias, .. } => {
@@ -231,21 +232,31 @@ pub(crate) fn analyze_join_operator(
 ) -> (String, String, bool, Option<String>, Option<String>) {
     let (table_name, alias) = table_factor_name_and_alias(relation);
     match op {
-        JoinOperator::Inner(constraint)
+        JoinOperator::Join(constraint)
+        | JoinOperator::Inner(constraint)
+        | JoinOperator::Left(constraint)
         | JoinOperator::LeftOuter(constraint)
+        | JoinOperator::Right(constraint)
         | JoinOperator::RightOuter(constraint)
         | JoinOperator::FullOuter(constraint)
+        | JoinOperator::Semi(constraint)
         | JoinOperator::LeftSemi(constraint)
         | JoinOperator::RightSemi(constraint)
+        | JoinOperator::Anti(constraint)
         | JoinOperator::LeftAnti(constraint)
         | JoinOperator::RightAnti(constraint) => {
             let join_type = match op {
+                JoinOperator::Join(_) => "INNER",
                 JoinOperator::Inner(_) => "INNER",
+                JoinOperator::Left(_) => "LEFT",
                 JoinOperator::LeftOuter(_) => "LEFT",
+                JoinOperator::Right(_) => "RIGHT",
                 JoinOperator::RightOuter(_) => "RIGHT",
                 JoinOperator::FullOuter(_) => "FULL",
+                JoinOperator::Semi(_) => "SEMI",
                 JoinOperator::LeftSemi(_) => "LEFT_SEMI",
                 JoinOperator::RightSemi(_) => "RIGHT_SEMI",
+                JoinOperator::Anti(_) => "ANTI",
                 JoinOperator::LeftAnti(_) => "LEFT_ANTI",
                 JoinOperator::RightAnti(_) => "RIGHT_ANTI",
                 _ => "OTHER",
@@ -262,11 +273,12 @@ pub(crate) fn analyze_join_operator(
 /// 从 TableFactor 提取表名（或派生表的字符串形式）与别名。
 pub(crate) fn table_factor_name_and_alias(tf: &TableFactor) -> (String, Option<String>) {
     match tf {
-        TableFactor::Table { name, alias, .. } => (
-            name.to_string(),
-            alias.as_ref().map(|a| a.name.to_string()),
-        ),
-        TableFactor::Derived { alias, subquery, .. } => (
+        TableFactor::Table { name, alias, .. } => {
+            (name.to_string(), alias.as_ref().map(|a| a.name.to_string()))
+        }
+        TableFactor::Derived {
+            alias, subquery, ..
+        } => (
             format!("({})", subquery),
             alias.as_ref().map(|a| a.name.to_string()),
         ),
@@ -274,10 +286,9 @@ pub(crate) fn table_factor_name_and_alias(tf: &TableFactor) -> (String, Option<S
             format!("TABLE({})", expr),
             alias.as_ref().map(|a| a.name.to_string()),
         ),
-        TableFactor::Function { name, alias, .. } => (
-            name.to_string(),
-            alias.as_ref().map(|a| a.name.to_string()),
-        ),
+        TableFactor::Function { name, alias, .. } => {
+            (name.to_string(), alias.as_ref().map(|a| a.name.to_string()))
+        }
         _ => (tf.to_string(), None),
     }
 }
@@ -426,9 +437,7 @@ pub(crate) fn collect_subqueries_in_expr(e: &Expr, out: &mut Vec<SelectInfo>, de
             collect_subqueries_in_expr(right, out, depth);
         }
         Expr::UnaryOp { expr, .. } => collect_subqueries_in_expr(expr, out, depth),
-        Expr::IsNull(expr) | Expr::IsNotNull(expr) => {
-            collect_subqueries_in_expr(expr, out, depth)
-        }
+        Expr::IsNull(expr) | Expr::IsNotNull(expr) => collect_subqueries_in_expr(expr, out, depth),
         Expr::InList { expr, list, .. } => {
             collect_subqueries_in_expr(expr, out, depth);
             for x in list {
@@ -464,9 +473,9 @@ pub(crate) fn collect_subqueries_in_expr(e: &Expr, out: &mut Vec<SelectInfo>, de
             if let sqlparser::ast::FunctionArguments::List(list) = &f.args {
                 for arg in &list.args {
                     let inner = match arg {
-                    sqlparser::ast::FunctionArg::Named { arg, .. } => arg,
-                    sqlparser::ast::FunctionArg::ExprNamed { arg, .. } => arg,
-                    sqlparser::ast::FunctionArg::Unnamed(arg) => arg,
+                        sqlparser::ast::FunctionArg::Named { arg, .. } => arg,
+                        sqlparser::ast::FunctionArg::ExprNamed { arg, .. } => arg,
+                        sqlparser::ast::FunctionArg::Unnamed(arg) => arg,
                     };
                     if let sqlparser::ast::FunctionArgExpr::Expr(e) = inner {
                         collect_subqueries_in_expr(e, out, depth);
@@ -492,12 +501,7 @@ pub(crate) fn collect_window_funcs_in_expr(e: &Expr, out: &mut Vec<WindowFuncInf
                     ),
                     WindowType::NamedWindow(_) => (false, false, false),
                 };
-                let func_name = f
-                    .name
-                    .0
-                    .last()
-                    .map(|i| i.to_string())
-                    .unwrap_or_default();
+                let func_name = f.name.0.last().map(|i| i.to_string()).unwrap_or_default();
                 out.push(WindowFuncInfo {
                     function_name: func_name,
                     has_partition_by,
@@ -509,9 +513,9 @@ pub(crate) fn collect_window_funcs_in_expr(e: &Expr, out: &mut Vec<WindowFuncInf
             if let sqlparser::ast::FunctionArguments::List(list) = &f.args {
                 for arg in &list.args {
                     let inner = match arg {
-                    sqlparser::ast::FunctionArg::Named { arg, .. } => arg,
-                    sqlparser::ast::FunctionArg::ExprNamed { arg, .. } => arg,
-                    sqlparser::ast::FunctionArg::Unnamed(arg) => arg,
+                        sqlparser::ast::FunctionArg::Named { arg, .. } => arg,
+                        sqlparser::ast::FunctionArg::ExprNamed { arg, .. } => arg,
+                        sqlparser::ast::FunctionArg::Unnamed(arg) => arg,
                     };
                     if let sqlparser::ast::FunctionArgExpr::Expr(inner_e) = inner {
                         collect_window_funcs_in_expr(inner_e, out);
@@ -563,7 +567,16 @@ pub(crate) fn collect_window_funcs_in_expr(e: &Expr, out: &mut Vec<WindowFuncInf
 /// 分析表达式的顶层信息（不递归暴露子表达式）。
 pub(crate) fn analyze_expr(e: &Expr) -> ExprInfo {
     let text = e.to_string();
-    let (kind, function_name, is_literal, is_column, is_subquery, operator, column_name, has_null_test) = match e {
+    let (
+        kind,
+        function_name,
+        is_literal,
+        is_column,
+        is_subquery,
+        operator,
+        column_name,
+        has_null_test,
+    ) = match e {
         Expr::Identifier(ident) => (
             "IDENTIFIER",
             String::new(),
@@ -584,7 +597,16 @@ pub(crate) fn analyze_expr(e: &Expr) -> ExprInfo {
             idents.last().map(|i| i.value.clone()).unwrap_or_default(),
             false,
         ),
-        Expr::Value(_) => ("LITERAL", String::new(), true, false, false, String::new(), String::new(), false),
+        Expr::Value(_) => (
+            "LITERAL",
+            String::new(),
+            true,
+            false,
+            false,
+            String::new(),
+            String::new(),
+            false,
+        ),
         Expr::BinaryOp { op, .. } => (
             "BINARY_OP",
             String::new(),
@@ -615,10 +637,46 @@ pub(crate) fn analyze_expr(e: &Expr) -> ExprInfo {
             String::new(),
             false,
         ),
-        Expr::Case { .. } => ("CASE", String::new(), false, false, false, String::new(), String::new(), false),
-        Expr::Subquery(_) => ("SUBQUERY", String::new(), false, false, true, String::new(), String::new(), false),
-        Expr::Exists { .. } => ("EXISTS", String::new(), false, false, true, String::new(), String::new(), false),
-        Expr::InList { .. } => ("IN_LIST", String::new(), false, false, false, String::new(), String::new(), false),
+        Expr::Case { .. } => (
+            "CASE",
+            String::new(),
+            false,
+            false,
+            false,
+            String::new(),
+            String::new(),
+            false,
+        ),
+        Expr::Subquery(_) => (
+            "SUBQUERY",
+            String::new(),
+            false,
+            false,
+            true,
+            String::new(),
+            String::new(),
+            false,
+        ),
+        Expr::Exists { .. } => (
+            "EXISTS",
+            String::new(),
+            false,
+            false,
+            true,
+            String::new(),
+            String::new(),
+            false,
+        ),
+        Expr::InList { .. } => (
+            "IN_LIST",
+            String::new(),
+            false,
+            false,
+            false,
+            String::new(),
+            String::new(),
+            false,
+        ),
         Expr::InSubquery { .. } => (
             "IN_SUBQUERY",
             String::new(),
@@ -629,13 +687,76 @@ pub(crate) fn analyze_expr(e: &Expr) -> ExprInfo {
             String::new(),
             false,
         ),
-        Expr::Between { .. } => ("BETWEEN", String::new(), false, false, false, String::new(), String::new(), false),
-        Expr::Cast { .. } => ("CAST", String::new(), false, false, false, String::new(), String::new(), false),
-        Expr::IsNull(_) => ("IS_NULL", String::new(), false, false, false, String::new(), String::new(), true),
-        Expr::IsNotNull(_) => ("IS_NOT_NULL", String::new(), false, false, false, String::new(), String::new(), true),
-        Expr::TypedString { .. } => ("TYPED_STRING", String::new(), true, false, false, String::new(), String::new(), false),
-        Expr::Interval(_) => ("INTERVAL", String::new(), true, false, false, String::new(), String::new(), false),
-        _ => ("OTHER", String::new(), false, false, false, String::new(), String::new(), false),
+        Expr::Between { .. } => (
+            "BETWEEN",
+            String::new(),
+            false,
+            false,
+            false,
+            String::new(),
+            String::new(),
+            false,
+        ),
+        Expr::Cast { .. } => (
+            "CAST",
+            String::new(),
+            false,
+            false,
+            false,
+            String::new(),
+            String::new(),
+            false,
+        ),
+        Expr::IsNull(_) => (
+            "IS_NULL",
+            String::new(),
+            false,
+            false,
+            false,
+            String::new(),
+            String::new(),
+            true,
+        ),
+        Expr::IsNotNull(_) => (
+            "IS_NOT_NULL",
+            String::new(),
+            false,
+            false,
+            false,
+            String::new(),
+            String::new(),
+            true,
+        ),
+        Expr::TypedString { .. } => (
+            "TYPED_STRING",
+            String::new(),
+            true,
+            false,
+            false,
+            String::new(),
+            String::new(),
+            false,
+        ),
+        Expr::Interval(_) => (
+            "INTERVAL",
+            String::new(),
+            true,
+            false,
+            false,
+            String::new(),
+            String::new(),
+            false,
+        ),
+        _ => (
+            "OTHER",
+            String::new(),
+            false,
+            false,
+            false,
+            String::new(),
+            String::new(),
+            false,
+        ),
     };
     ExprInfo {
         kind: kind.to_string(),
@@ -649,5 +770,389 @@ pub(crate) fn analyze_expr(e: &Expr) -> ExprInfo {
         has_null_test,
         line: None,
         column: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sqlparser::dialect::GenericDialect;
+    use sqlparser::parser::Parser;
+
+    /// 解析 SQL，返回首个 Query（适用于 SELECT / UNION / WITH ... SELECT 等）。
+    fn parse_query(sql: &str) -> Query {
+        let dialect = GenericDialect {};
+        let ast = Parser::parse_sql(&dialect, sql).unwrap();
+        match &ast[0] {
+            sqlparser::ast::Statement::Query(q) => (**q).clone(),
+            _ => panic!("expected a Query statement"),
+        }
+    }
+
+    /// 取 Query 的 Select body（非集合运算 / 非 Values）。
+    fn select_body(q: &Query) -> &sqlparser::ast::Select {
+        match &*q.body {
+            SetExpr::Select(s) => s,
+            _ => panic!("expected a Select body"),
+        }
+    }
+
+    /// 取首个投影表达式（UnnamedExpr 或 ExprWithAlias 的内部 expr）。
+    fn first_proj_expr(q: &Query) -> &Expr {
+        let s = select_body(q);
+        match &s.projection[0] {
+            SelectItem::UnnamedExpr(e) => e,
+            SelectItem::ExprWithAlias { expr, .. } => expr,
+            _ => panic!("first projection item is not an expression"),
+        }
+    }
+
+    /// 从任意带约束槽的 JoinOperator 中提取 &JoinConstraint。
+    fn join_constraint(op: &JoinOperator) -> &JoinConstraint {
+        match op {
+            JoinOperator::Join(c)
+            | JoinOperator::Inner(c)
+            | JoinOperator::Left(c)
+            | JoinOperator::LeftOuter(c)
+            | JoinOperator::Right(c)
+            | JoinOperator::RightOuter(c)
+            | JoinOperator::FullOuter(c)
+            | JoinOperator::Semi(c)
+            | JoinOperator::LeftSemi(c)
+            | JoinOperator::RightSemi(c)
+            | JoinOperator::Anti(c)
+            | JoinOperator::LeftAnti(c)
+            | JoinOperator::RightAnti(c)
+            | JoinOperator::CrossJoin(c) => c,
+            _ => panic!("join operator has no constraint slot"),
+        }
+    }
+
+    // ===== query_has_wildcard =====
+
+    #[test]
+    fn test_query_has_wildcard_select_star() {
+        let q = parse_query("SELECT * FROM t");
+        assert!(query_has_wildcard(&q));
+    }
+
+    #[test]
+    fn test_query_has_wildcard_no_star() {
+        let q = parse_query("SELECT id FROM t");
+        assert!(!query_has_wildcard(&q));
+    }
+
+    #[test]
+    fn test_query_has_wildcard_nested_subquery() {
+        let q = parse_query("SELECT * FROM (SELECT * FROM t) AS sub");
+        assert!(query_has_wildcard(&q));
+    }
+
+    #[test]
+    fn test_query_has_wildcard_union_branch() {
+        let q = parse_query("SELECT id FROM t UNION SELECT * FROM t2");
+        assert!(query_has_wildcard(&q));
+    }
+
+    // ===== analyze_query =====
+
+    #[test]
+    fn test_analyze_query_wildcard_and_from_table() {
+        let q = parse_query("SELECT * FROM users");
+        let info = analyze_query(&q);
+        assert!(info.has_wildcard);
+        assert_eq!(info.from_table.as_deref(), Some("users"));
+    }
+
+    #[test]
+    fn test_analyze_query_join_with_condition() {
+        let q = parse_query("SELECT id FROM users JOIN orders ON users.id = orders.uid");
+        let info = analyze_query(&q);
+        assert!(!info.joins.is_empty(), "joins should not be empty");
+        assert!(info.joins[0].has_condition);
+    }
+
+    #[test]
+    fn test_analyze_query_where_clause() {
+        let q = parse_query("SELECT id FROM users WHERE x = 1");
+        let info = analyze_query(&q);
+        assert!(info.has_where);
+    }
+
+    #[test]
+    fn test_analyze_query_group_by() {
+        let q = parse_query("SELECT id FROM users GROUP BY id");
+        let info = analyze_query(&q);
+        assert!(info.has_group_by);
+    }
+
+    #[test]
+    fn test_analyze_query_order_by_and_limit() {
+        let q = parse_query("SELECT id FROM users ORDER BY id LIMIT 10");
+        let info = analyze_query(&q);
+        assert!(info.has_order_by);
+        assert!(info.has_limit);
+    }
+
+    #[test]
+    fn test_analyze_query_subquery_in_from() {
+        let q = parse_query("SELECT id FROM (SELECT * FROM t) AS sub");
+        let info = analyze_query(&q);
+        assert!(info.has_subquery_in_from);
+        assert!(info.has_subquery);
+    }
+
+    #[test]
+    fn test_analyze_query_cte() {
+        let q = parse_query("WITH cte AS (SELECT 1) SELECT * FROM cte");
+        let info = analyze_query(&q);
+        assert!(info.has_cte);
+    }
+
+    #[test]
+    fn test_analyze_query_union_distinct() {
+        let q = parse_query("SELECT id FROM a UNION SELECT id FROM b");
+        let info = analyze_query(&q);
+        assert!(info.union);
+        assert!(!info.union_all);
+    }
+
+    #[test]
+    fn test_analyze_query_union_all() {
+        let q = parse_query("SELECT id FROM a UNION ALL SELECT id FROM b");
+        let info = analyze_query(&q);
+        assert!(info.union);
+        assert!(info.union_all);
+    }
+
+    #[test]
+    fn test_analyze_query_comma_join() {
+        let q = parse_query("SELECT id FROM a, b");
+        let info = analyze_query(&q);
+        assert!(info.has_comma_join);
+    }
+
+    #[test]
+    fn test_analyze_query_window_function() {
+        let q = parse_query("SELECT ROW_NUMBER() OVER (ORDER BY id) FROM t");
+        let info = analyze_query(&q);
+        assert!(info.has_window_function);
+    }
+
+    #[test]
+    fn test_analyze_query_join_alias() {
+        let q = parse_query("SELECT id FROM users u JOIN orders o ON u.id = o.uid");
+        let info = analyze_query(&q);
+        assert!(!info.joins.is_empty());
+        assert_eq!(info.joins[0].alias.as_deref(), Some("o"));
+    }
+
+    // ===== analyze_join_operator =====
+
+    #[test]
+    fn test_analyze_join_operator_inner_on() {
+        let q = parse_query("SELECT id FROM a JOIN b ON a.id = b.id");
+        let s = select_body(&q);
+        let join = &s.from[0].joins[0];
+        let (table, jtype, has_cond, _alias, cond_text) =
+            analyze_join_operator(&join.join_operator, &join.relation);
+        assert_eq!(table, "b");
+        assert_eq!(jtype, "INNER");
+        assert!(has_cond);
+        assert!(cond_text.is_some());
+    }
+
+    #[test]
+    fn test_analyze_join_operator_left_on() {
+        let q = parse_query("SELECT id FROM a LEFT JOIN b ON a.id = b.id");
+        let s = select_body(&q);
+        let join = &s.from[0].joins[0];
+        let (_, jtype, _, _, _) = analyze_join_operator(&join.join_operator, &join.relation);
+        assert_eq!(jtype, "LEFT");
+    }
+
+    #[test]
+    fn test_analyze_join_operator_cross() {
+        let q = parse_query("SELECT id FROM a CROSS JOIN b");
+        let s = select_body(&q);
+        let join = &s.from[0].joins[0];
+        let (_, jtype, has_cond, _, _) = analyze_join_operator(&join.join_operator, &join.relation);
+        assert_eq!(jtype, "CROSS");
+        assert!(has_cond);
+    }
+
+    #[test]
+    fn test_analyze_join_operator_using() {
+        let q = parse_query("SELECT id FROM a JOIN b USING (id)");
+        let s = select_body(&q);
+        let join = &s.from[0].joins[0];
+        let (_, _, has_cond, _, cond_text) =
+            analyze_join_operator(&join.join_operator, &join.relation);
+        assert!(has_cond);
+        assert!(cond_text.is_none());
+    }
+
+    #[test]
+    fn test_analyze_join_operator_none_constraint() {
+        // None 约束无法通过常规 SQL 解析得到，这里手动构造 JoinOperator。
+        let tf_q = parse_query("SELECT 1 FROM b");
+        let tf = match &*tf_q.body {
+            SetExpr::Select(s) => &s.from[0].relation,
+            _ => panic!("expected a Select body"),
+        };
+        let op = JoinOperator::Inner(JoinConstraint::None);
+        let (_, _, has_cond, _, cond_text) = analyze_join_operator(&op, tf);
+        assert!(!has_cond);
+        assert!(cond_text.is_none());
+    }
+
+    // ===== analyze_join_constraint =====
+
+    #[test]
+    fn test_analyze_join_constraint_on() {
+        let q = parse_query("SELECT id FROM a JOIN b ON a.id = b.id");
+        let s = select_body(&q);
+        let c = join_constraint(&s.from[0].joins[0].join_operator);
+        let (has_cond, text) = analyze_join_constraint(c);
+        assert!(has_cond);
+        assert!(text.is_some());
+        assert_eq!(text.as_deref(), Some("a.id = b.id"));
+    }
+
+    #[test]
+    fn test_analyze_join_constraint_using() {
+        let q = parse_query("SELECT id FROM a JOIN b USING (id)");
+        let s = select_body(&q);
+        let c = join_constraint(&s.from[0].joins[0].join_operator);
+        let (has_cond, text) = analyze_join_constraint(c);
+        assert!(has_cond);
+        assert!(text.is_none());
+    }
+
+    #[test]
+    fn test_analyze_join_constraint_natural() {
+        let q = parse_query("SELECT id FROM a NATURAL JOIN b");
+        let s = select_body(&q);
+        let c = join_constraint(&s.from[0].joins[0].join_operator);
+        let (has_cond, text) = analyze_join_constraint(c);
+        assert!(has_cond);
+        assert!(text.is_none());
+    }
+
+    #[test]
+    fn test_analyze_join_constraint_none() {
+        let (has_cond, text) = analyze_join_constraint(&JoinConstraint::None);
+        assert!(!has_cond);
+        assert!(text.is_none());
+    }
+
+    // ===== collect_subqueries_in_query =====
+
+    #[test]
+    fn test_collect_subqueries_single_from_subquery() {
+        let q = parse_query("SELECT * FROM (SELECT 1) AS sub");
+        let mut subs: Vec<SelectInfo> = Vec::new();
+        collect_subqueries_in_query(&q, &mut subs, 0);
+        assert_eq!(subs.len(), 1);
+    }
+
+    #[test]
+    fn test_collect_subqueries_two_from_subqueries() {
+        let q = parse_query("SELECT * FROM (SELECT 1) AS a, (SELECT 2) AS b");
+        let mut subs: Vec<SelectInfo> = Vec::new();
+        collect_subqueries_in_query(&q, &mut subs, 0);
+        assert_eq!(subs.len(), 2);
+    }
+
+    #[test]
+    fn test_collect_subqueries_in_subquery() {
+        let q = parse_query("SELECT id FROM t WHERE x IN (SELECT id FROM t2)");
+        let mut subs: Vec<SelectInfo> = Vec::new();
+        collect_subqueries_in_query(&q, &mut subs, 0);
+        assert_eq!(subs.len(), 1);
+    }
+
+    #[test]
+    fn test_collect_subqueries_exists() {
+        let q = parse_query("SELECT id FROM t WHERE EXISTS (SELECT 1 FROM t2)");
+        let mut subs: Vec<SelectInfo> = Vec::new();
+        collect_subqueries_in_query(&q, &mut subs, 0);
+        assert_eq!(subs.len(), 1);
+    }
+
+    // ===== collect_window_funcs_in_expr =====
+
+    #[test]
+    fn test_collect_window_funcs_order_by_only() {
+        let q = parse_query("SELECT ROW_NUMBER() OVER (ORDER BY id) FROM t");
+        let expr = first_proj_expr(&q);
+        let mut out: Vec<WindowFuncInfo> = Vec::new();
+        collect_window_funcs_in_expr(expr, &mut out);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].function_name, "ROW_NUMBER");
+        assert!(out[0].has_order_by);
+        assert!(!out[0].has_partition_by);
+    }
+
+    #[test]
+    fn test_collect_window_funcs_partition_and_order() {
+        let q = parse_query("SELECT ROW_NUMBER() OVER (PARTITION BY x ORDER BY id) FROM t");
+        let expr = first_proj_expr(&q);
+        let mut out: Vec<WindowFuncInfo> = Vec::new();
+        collect_window_funcs_in_expr(expr, &mut out);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].function_name, "ROW_NUMBER");
+        assert!(out[0].has_partition_by);
+        assert!(out[0].has_order_by);
+    }
+
+    // ===== analyze_expr =====
+
+    #[test]
+    fn test_analyze_expr_identifier() {
+        let q = parse_query("SELECT id FROM t");
+        let info = analyze_expr(first_proj_expr(&q));
+        assert_eq!(info.kind, "IDENTIFIER");
+        assert!(info.is_column);
+        assert_eq!(info.column_name, "id");
+    }
+
+    #[test]
+    fn test_analyze_expr_value_literal() {
+        let q = parse_query("SELECT 1 FROM t");
+        let info = analyze_expr(first_proj_expr(&q));
+        assert_eq!(info.kind, "LITERAL");
+        assert!(info.is_literal);
+    }
+
+    #[test]
+    fn test_analyze_expr_binary_op_plus() {
+        let q = parse_query("SELECT a + b FROM t");
+        let info = analyze_expr(first_proj_expr(&q));
+        assert_eq!(info.kind, "BINARY_OP");
+        assert_eq!(info.operator, "PLUS");
+    }
+
+    #[test]
+    fn test_analyze_expr_function_count() {
+        let q = parse_query("SELECT COUNT(*) FROM t");
+        let info = analyze_expr(first_proj_expr(&q));
+        assert_eq!(info.kind, "FUNCTION");
+        assert_eq!(info.function_name, "COUNT");
+    }
+
+    #[test]
+    fn test_analyze_expr_subquery() {
+        let q = parse_query("SELECT (SELECT 1 FROM t) FROM a");
+        let info = analyze_expr(first_proj_expr(&q));
+        assert_eq!(info.kind, "SUBQUERY");
+        assert!(info.is_subquery);
+    }
+
+    #[test]
+    fn test_analyze_expr_is_null() {
+        let q = parse_query("SELECT x IS NULL FROM t");
+        let info = analyze_expr(first_proj_expr(&q));
+        assert!(info.has_null_test);
     }
 }

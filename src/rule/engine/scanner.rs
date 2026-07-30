@@ -110,8 +110,7 @@ pub(crate) fn detect_comma_join_in_sql(sql: &str) -> bool {
             // 词边界检查（前后非字母数字下划线）
             let prev_ok = start == 0
                 || !(bytes[start - 1].is_ascii_alphanumeric() || bytes[start - 1] == b'_');
-            let next_ok = i == n
-                || !(bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_');
+            let next_ok = i == n || !(bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_');
             if !prev_ok || !next_ok {
                 continue;
             }
@@ -122,9 +121,21 @@ pub(crate) fn detect_comma_join_in_sql(sql: &str) -> bool {
                 // FROM 子句终止关键字
                 if matches!(
                     word_str.as_str(),
-                    "WHERE" | "GROUP" | "HAVING" | "ORDER" | "LIMIT" | "OFFSET"
-                        | "UNION" | "EXCEPT" | "INTERSECT" | "FOR" | "FETCH" | "RETURNING"
-                        | "QUALIFY" | "WINDOW" | "INTO"
+                    "WHERE"
+                        | "GROUP"
+                        | "HAVING"
+                        | "ORDER"
+                        | "LIMIT"
+                        | "OFFSET"
+                        | "UNION"
+                        | "EXCEPT"
+                        | "INTERSECT"
+                        | "FOR"
+                        | "FETCH"
+                        | "RETURNING"
+                        | "QUALIFY"
+                        | "WINDOW"
+                        | "INTO"
                 ) {
                     in_from = false;
                 }
@@ -270,7 +281,9 @@ mod tests {
     fn test_no_comma_join_simple_select() {
         assert!(!detect_comma_join_in_sql("SELECT 1"));
         assert!(!detect_comma_join_in_sql("SELECT id FROM users"));
-        assert!(!detect_comma_join_in_sql("SELECT id FROM users WHERE id = 1"));
+        assert!(!detect_comma_join_in_sql(
+            "SELECT id FROM users WHERE id = 1"
+        ));
     }
 
     #[test]
@@ -300,9 +313,7 @@ mod tests {
             "SELECT id FROM (SELECT a, b FROM t) sub"
         ));
         // 函数参数列表里的逗号也不算
-        assert!(!detect_comma_join_in_sql(
-            "SELECT CONCAT(a, b) FROM users"
-        ));
+        assert!(!detect_comma_join_in_sql("SELECT CONCAT(a, b) FROM users"));
     }
 
     #[test]
@@ -324,9 +335,7 @@ mod tests {
             "SELECT id FROM users; SELECT 1, 2"
         ));
         // 但第二条若也有 FROM，则正常检测
-        assert!(detect_comma_join_in_sql(
-            "SELECT 1; SELECT id FROM a, b"
-        ));
+        assert!(detect_comma_join_in_sql("SELECT 1; SELECT id FROM a, b"));
     }
 
     #[test]
@@ -336,9 +345,7 @@ mod tests {
             "SELECT id FROM users -- a, b\nWHERE 1=1"
         ));
         // 块注释里的逗号
-        assert!(!detect_comma_join_in_sql(
-            "SELECT id FROM /* a, b */ users"
-        ));
+        assert!(!detect_comma_join_in_sql("SELECT id FROM /* a, b */ users"));
     }
 
     #[test]
@@ -379,7 +386,10 @@ mod tests {
         let comments = collect_comments(sql);
         assert_eq!(comments.len(), 1);
         assert_eq!(comments[0].kind, "BLOCK");
-        assert_eq!(comments[0].line, 1, "block comment line should be start line");
+        assert_eq!(
+            comments[0].line, 1,
+            "block comment line should be start line"
+        );
         assert!(comments[0].text.contains("multi"));
         assert!(comments[0].text.contains("comment"));
     }
@@ -389,7 +399,10 @@ mod tests {
         // 字符串字面量里的 -- 不应被识别为行注释
         let sql = "SELECT 'a -- not a comment' FROM t";
         let comments = collect_comments(sql);
-        assert!(comments.is_empty(), "no comment should be collected from string literal");
+        assert!(
+            comments.is_empty(),
+            "no comment should be collected from string literal"
+        );
     }
 
     #[test]

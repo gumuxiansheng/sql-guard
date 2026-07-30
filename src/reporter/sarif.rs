@@ -171,18 +171,16 @@ pub fn generate_sarif_report(
         rules.push(SarifRule {
             id: v.rule_id.clone(),
             name: v.rule_name.clone(),
-            short_description: v
-                .rule_group
-                .as_ref()
-                .map(|g| SarifMessage {
-                    text: format!("group: {}", g),
-                }),
+            short_description: v.rule_group.as_ref().map(|g| SarifMessage {
+                text: format!("group: {}", g),
+            }),
             help_uri: Some(TOOL_INFO_URI),
         });
     }
 
     // 2) 构造 results
-    let mut results: Vec<SarifResult> = Vec::with_capacity(violations.len() + missing.len() + unexpected.len());
+    let mut results: Vec<SarifResult> =
+        Vec::with_capacity(violations.len() + missing.len() + unexpected.len());
 
     for v in violations {
         let idx = *rule_index.get(&v.rule_id).unwrap_or(&0);
@@ -190,7 +188,9 @@ pub fn generate_sarif_report(
             rule_id: v.rule_id.clone(),
             rule_index: idx,
             level: severity_to_level(&v.severity),
-            message: SarifMessage { text: v.message.clone() },
+            message: SarifMessage {
+                text: v.message.clone(),
+            },
             locations: vec![SarifLocation {
                 physical_location: SarifPhysicalLocation {
                     artifact_location: SarifArtifactLocation {
@@ -208,7 +208,9 @@ pub fn generate_sarif_report(
 
     // 3) 目录结构问题：归到一条虚拟规则 STRUCT001（group: structure）
     const STRUCT_RULE_ID: &str = "STRUCT001";
-    let struct_idx = if !rule_index.contains_key(STRUCT_RULE_ID) && (!missing.is_empty() || !unexpected.is_empty()) {
+    let struct_idx = if !rule_index.contains_key(STRUCT_RULE_ID)
+        && (!missing.is_empty() || !unexpected.is_empty())
+    {
         let idx = rules.len();
         rule_index.insert(STRUCT_RULE_ID.to_string(), idx);
         rules.push(SarifRule {
@@ -319,10 +321,17 @@ mod tests {
         assert_eq!(parsed["version"], "2.1.0");
         assert_eq!(parsed["$schema"], SARIF_SCHEMA);
         assert_eq!(parsed["runs"][0]["tool"]["driver"]["name"], "SqlGuard");
-        assert_eq!(parsed["runs"][0]["tool"]["driver"]["rules"][0]["id"], "DML001");
+        assert_eq!(
+            parsed["runs"][0]["tool"]["driver"]["rules"][0]["id"],
+            "DML001"
+        );
         assert_eq!(parsed["runs"][0]["results"][0]["ruleId"], "DML001");
         assert_eq!(parsed["runs"][0]["results"][0]["level"], "error");
-        assert_eq!(parsed["runs"][0]["results"][0]["locations"][0]["physicalLocation"]["region"]["startLine"], 10);
+        assert_eq!(
+            parsed["runs"][0]["results"][0]["locations"][0]["physicalLocation"]["region"]
+                ["startLine"],
+            10
+        );
     }
 
     #[test]
@@ -336,7 +345,9 @@ mod tests {
         let out = generate_sarif_report(&v, &[], &[]);
         let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
 
-        let rules = parsed["runs"][0]["tool"]["driver"]["rules"].as_array().unwrap();
+        let rules = parsed["runs"][0]["tool"]["driver"]["rules"]
+            .as_array()
+            .unwrap();
         assert_eq!(rules.len(), 2, "rules should be deduplicated");
 
         let results = parsed["runs"][0]["results"].as_array().unwrap();
@@ -358,7 +369,9 @@ mod tests {
         let out = generate_sarif_report(&[], &missing, &unexpected);
         let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
 
-        let rules = parsed["runs"][0]["tool"]["driver"]["rules"].as_array().unwrap();
+        let rules = parsed["runs"][0]["tool"]["driver"]["rules"]
+            .as_array()
+            .unwrap();
         assert_eq!(rules[0]["id"], "STRUCT001");
 
         let results = parsed["runs"][0]["results"].as_array().unwrap();
@@ -375,8 +388,10 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
 
         let loc = &parsed["runs"][0]["results"][0]["locations"][0]["physicalLocation"];
-        assert!(loc.get("region").is_none() || loc["region"].is_null(),
-            "region should be absent when line is None");
+        assert!(
+            loc.get("region").is_none() || loc["region"].is_null(),
+            "region should be absent when line is None"
+        );
         assert_eq!(loc["artifactLocation"]["uri"], "/tmp/test.sql");
     }
 }

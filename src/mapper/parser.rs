@@ -226,7 +226,9 @@ impl<'a> XmlScanner<'a> {
     /// 使用 `into_owned()` 把 Event 转为 `'static`，避免借用 `self.buf`
     /// 导致后续无法 clear buf（这是 quick-xml `read_event_into` 的常见陷阱）。
     /// 单文件 mapper XML 性能可接受。
-    fn next_event(&mut self) -> Option<Result<(quick_xml::events::Event<'static>, usize), SqlGuardError>> {
+    fn next_event(
+        &mut self,
+    ) -> Option<Result<(quick_xml::events::Event<'static>, usize), SqlGuardError>> {
         let line_before = self.current_line;
         let event = self.reader.read_event_into(&mut self.buf);
         let cur_pos = self.reader.buffer_position().min(self.content.len());
@@ -263,9 +265,9 @@ impl<'a> XmlScanner<'a> {
             let (event, _line) = result?;
             match event {
                 Event::Text(t) => {
-                    let unescaped = t
-                        .unescape()
-                        .map_err(|e| SqlGuardError::MapperError(format!("XML text unescape error: {}", e)))?;
+                    let unescaped = t.unescape().map_err(|e| {
+                        SqlGuardError::MapperError(format!("XML text unescape error: {}", e))
+                    })?;
                     out.push_str(&unescaped);
                 }
                 Event::Empty(e) => {
@@ -312,13 +314,12 @@ fn extract_attr(
     key: &str,
 ) -> Result<Option<String>, SqlGuardError> {
     for attr in attrs {
-        let attr = attr.map_err(|e| {
-            SqlGuardError::MapperError(format!("XML attribute parse error: {}", e))
-        })?;
+        let attr = attr
+            .map_err(|e| SqlGuardError::MapperError(format!("XML attribute parse error: {}", e)))?;
         if attr.key.as_ref().eq_ignore_ascii_case(key.as_bytes()) {
-            let v = attr
-                .unescape_value()
-                .map_err(|e| SqlGuardError::MapperError(format!("XML attribute unescape error: {}", e)))?;
+            let v = attr.unescape_value().map_err(|e| {
+                SqlGuardError::MapperError(format!("XML attribute unescape error: {}", e))
+            })?;
             return Ok(Some(v.into_owned()));
         }
     }
@@ -346,7 +347,11 @@ fn process_where_markers(s: &str) -> String {
                 let after_marker = &remaining[pos + MARKER.len()..];
                 let after_ws = after_marker.trim_start();
                 // Strip leading AND or OR (case-insensitive, after optional whitespace)
-                let upper_4: String = after_ws.chars().take(4).flat_map(|c| c.to_uppercase()).collect();
+                let upper_4: String = after_ws
+                    .chars()
+                    .take(4)
+                    .flat_map(|c| c.to_uppercase())
+                    .collect();
                 let stripped = if upper_4.starts_with("AND ") {
                     Some(4)
                 } else if upper_4.starts_with("OR ") {
@@ -466,10 +471,22 @@ mod tests {
         assert_eq!(result.len(), 1);
         let sql = result[0].processed_sql.trim();
         // Must contain WHERE keyword (inserted by the fix)
-        assert!(sql.contains("WHERE"), "processed_sql should contain WHERE: {}", sql);
+        assert!(
+            sql.contains("WHERE"),
+            "processed_sql should contain WHERE: {}",
+            sql
+        );
         // First AND after WHERE should be stripped
-        assert!(!sql.contains("WHERE AND"), "WHERE AND should not appear: {}", sql);
-        assert!(!sql.contains("WHERE\nAND"), "WHERE\\nAND should not appear: {}", sql);
+        assert!(
+            !sql.contains("WHERE AND"),
+            "WHERE AND should not appear: {}",
+            sql
+        );
+        assert!(
+            !sql.contains("WHERE\nAND"),
+            "WHERE\\nAND should not appear: {}",
+            sql
+        );
     }
 
     #[test]
@@ -488,10 +505,22 @@ mod tests {
         let result = extract_sql_from_xml(&path).unwrap();
         assert_eq!(result.len(), 1);
         let sql = result[0].processed_sql.trim();
-        assert!(sql.contains("WHERE"), "processed_sql should contain WHERE: {}", sql);
+        assert!(
+            sql.contains("WHERE"),
+            "processed_sql should contain WHERE: {}",
+            sql
+        );
         // The AND from the include should be stripped
-        assert!(!sql.contains("WHERE AND"), "WHERE AND should not appear: {}", sql);
-        assert!(sql.contains("WHERE status"), "should have WHERE status: {}", sql);
+        assert!(
+            !sql.contains("WHERE AND"),
+            "WHERE AND should not appear: {}",
+            sql
+        );
+        assert!(
+            sql.contains("WHERE status"),
+            "should have WHERE status: {}",
+            sql
+        );
     }
 
     #[test]
@@ -509,18 +538,44 @@ mod tests {
         let result = extract_sql_from_xml(&path).unwrap();
         assert_eq!(result.len(), 1);
         let sql = result[0].processed_sql.trim();
-        assert!(sql.contains("WHERE"), "processed_sql should contain WHERE: {}", sql);
-        assert!(sql.contains("status = ?"), "should have status = ?: {}", sql);
+        assert!(
+            sql.contains("WHERE"),
+            "processed_sql should contain WHERE: {}",
+            sql
+        );
+        assert!(
+            sql.contains("status = ?"),
+            "should have status = ?: {}",
+            sql
+        );
     }
 
     #[test]
     fn process_where_markers_strips_first_and() {
-        assert_eq!(process_where_markers("__WHERE__ AND name = ?"), "WHERE name = ?");
-        assert_eq!(process_where_markers("__WHERE__AND name = ?"), "WHERE name = ?");
-        assert_eq!(process_where_markers("__WHERE__\n  AND name = ?"), "WHERE name = ?");
-        assert_eq!(process_where_markers("__WHERE__ OR name = ?"), "WHERE name = ?");
-        assert_eq!(process_where_markers("__WHERE__ name = ?"), "WHERE name = ?");
-        assert_eq!(process_where_markers("__WHERE__ and name = ?"), "WHERE name = ?");
+        assert_eq!(
+            process_where_markers("__WHERE__ AND name = ?"),
+            "WHERE name = ?"
+        );
+        assert_eq!(
+            process_where_markers("__WHERE__AND name = ?"),
+            "WHERE name = ?"
+        );
+        assert_eq!(
+            process_where_markers("__WHERE__\n  AND name = ?"),
+            "WHERE name = ?"
+        );
+        assert_eq!(
+            process_where_markers("__WHERE__ OR name = ?"),
+            "WHERE name = ?"
+        );
+        assert_eq!(
+            process_where_markers("__WHERE__ name = ?"),
+            "WHERE name = ?"
+        );
+        assert_eq!(
+            process_where_markers("__WHERE__ and name = ?"),
+            "WHERE name = ?"
+        );
         assert_eq!(process_where_markers("__WHERE__"), "WHERE ");
     }
 

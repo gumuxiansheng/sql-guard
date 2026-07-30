@@ -15,15 +15,15 @@
 //! - [`render`]：SQL 文本渲染（事务包裹、锁合并、预检查）
 //! - [`manifest`]：rollback-manifest.json 序列化
 
-pub mod dialect;
-pub mod naming;
-pub mod generator;
 pub mod ddl;
 pub mod ddl_like;
+pub mod dialect;
 pub mod dml;
+pub mod generator;
+pub mod manifest;
+pub mod naming;
 pub mod pk;
 pub mod render;
-pub mod manifest;
 pub mod util;
 
 use crate::rule::engine::ast::StmtInfo;
@@ -33,9 +33,9 @@ use serde::Serialize;
 /// `MySqlRenderer` / `PostgreSqlRenderer` / `AtomicStrategy` / `DialectRenderer` / `ManifestItem`
 /// 均通过 `crate::rollback::dialect::X` / `crate::rollback::manifest::X` 直接路径访问，
 /// 无需在此重导出。
-pub use dialect::{Dialect, renderer_for};
-pub use manifest::{Manifest, serialize_manifest};
+pub use dialect::{renderer_for, Dialect};
 pub use generator::RollbackGenerator;
+pub use manifest::{serialize_manifest, Manifest};
 
 /// ★ C2 架构修正：聚合所有"安全分类"标志，避免 flag 散装。
 /// 生成器填充，渲染器/manifest 序列化统一读取，CI 按 class 决策退出码（见 §4.14 决策表）。
@@ -121,7 +121,7 @@ pub struct SourceRef {
     pub file: String,
     pub line: i64,
     pub end_line: i64,
-    pub statement_id: Option<String>, // Mapper 模式
+    pub statement_id: Option<String>,  // Mapper 模式
     pub variant_label: Option<String>, // Mapper 动态分支变体
 }
 

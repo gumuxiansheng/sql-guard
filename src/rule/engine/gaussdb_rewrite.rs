@@ -18,6 +18,8 @@
 //! | G_ORACLE_NVL | `NVL(` | `COALESCE(` | 词法替换（词边界 + 紧跟左括号） |
 //! | G_ORACLE_DUAL | `FROM dual` / `FROM DUAL` | `FROM (SELECT 1) AS dual` | 词法+上下文 |
 //! | G_MYSQL_BACKTICK | `` `ident` `` | `"ident"` | 词法替换（成对反引号） |
+//! | G_ORACLE_ALTER_ADD_PARENS | `ADD (c1 t1, c2 t2)` | `ADD COLUMN c1 t1, ADD COLUMN c2 t2` | 词法+括号匹配 |
+//! | G_ORACLE_PK_USING_INDEX | `PRIMARY KEY USING INDEX idx` | `PRIMARY KEY (idx) USING INDEX idx` | 词法+前瞻匹配 |
 //!
 //! ## 设计约束
 //!
@@ -285,6 +287,30 @@ pub(crate) fn rewrite_for_pg_parse(sql: &str) -> RewrittenSql {
                         i = after_add;
                     }
                 }
+                "PRIMARY" => {
+                    // Oracle 简化语法：PRIMARY KEY USING INDEX <name>（省略列名括号）
+                    // PG 等价：PRIMARY KEY (<name>) USING INDEX <name>
+                    //
+                    // USING INDEX 场景下列信息来自索引而非语句本身，用索引名占位列名位置。
+                    // 对 lint 场景足够（关心"有无主键约束 + 约束名"而非列名精确性）。
+                    let after_primary = i;
+                    if let Some((rewritten_text, new_i)) =
+                        try_rewrite_pk_using_index(sql, after_primary, word)
+                    {
+                        let original = sql[word_start..new_i].to_string();
+                        rewrites.push(RewriteRecord {
+                            rule_id: "G_ORACLE_PK_USING_INDEX",
+                            original,
+                            rewritten: rewritten_text.clone(),
+                            offset: word_start,
+                        });
+                        out.push_str(&rewritten_text);
+                        i = new_i;
+                    } else {
+                        out.push_str(word);
+                        i = after_primary;
+                    }
+                }
                 _ => {
                     out.push_str(word);
                 }
@@ -421,6 +447,90 @@ fn try_rewrite_alter_add_parens(
     let rewritten_text = rewritten.join(", ");
 
     Some((rewritten_text, paren_end))
+}
+
+/// 尝试把 `PRIMARY KEY USING INDEX <name>` 重写为 `PRIMARY KEY (<name>) USING INDEX <name>`。
+///
+/// Oracle/GaussDB 简化语法省略列名括号，直接用已有索引做主键。sqlparser 所有方言
+/// 均不支持此语法（PARSE_ERROR）。用索引名占位列名位置后，PG 方言可正常解析，
+/// AST 保留 PRIMARY KEY 约束 + 约束名 + USING INDEX 信息。
+///
+/// `after_primary` 是 `PRIMARY` 词结束后的字节偏移。
+/// `primary_word` 是原始 `PRIMARY` 词文本（保留大小写）。
+///
+/// 返回 `Some((rewritten_text, new_i))` 表示匹配成功，`new_i` 指向索引名之后；
+/// 返回 `None` 表示不是 `PRIMARY KEY USING INDEX <name>` 模式（如普通列名 PRIMARY）。
+fn try_rewrite_pk_using_index(
+    sql: &str,
+    after_primary: usize,
+    primary_word: &str,
+) -> Option<(String, usize)> {
+    let bytes = sql.as_bytes();
+    let n = bytes.len();
+
+    // 依次前瞻匹配：KEY USING INDEX <ident>
+    // 每个词之间允许空白（空格/Tab/换行），保留每个关键词的原始大小写
+    let keywords = ["KEY", "USING", "INDEX"];
+    let mut original_words: Vec<&str> = Vec::with_capacity(3);
+    let mut j = after_primary;
+    for kw in keywords {
+        j = skip_ws(bytes, j, n);
+        if j + kw.len() > n {
+            return None;
+        }
+        let candidate = &sql[j..j + kw.len()];
+        if !candidate.eq_ignore_ascii_case(kw) {
+            return None;
+        }
+        // 确认是完整词（后一字符非标识符字符）
+        let after_kw = j + kw.len();
+        if after_kw < n && is_ident_char(bytes[after_kw]) {
+            return None;
+        }
+        original_words.push(candidate);
+        j = after_kw;
+    }
+    let key_word = original_words[0];
+    let using_word = original_words[1];
+    let index_word = original_words[2];
+
+    // 匹配索引名 <ident>（可含 schema.name 形式）
+    j = skip_ws(bytes, j, n);
+    let name_start = j;
+    while j < n && is_ident_char(bytes[j]) {
+        j += 1;
+    }
+    // 支持 schema.name（点号后跟标识符）
+    if j < n && bytes[j] == b'.' {
+        j += 1;
+        while j < n && is_ident_char(bytes[j]) {
+            j += 1;
+        }
+    }
+    if j == name_start {
+        return None; // 没有索引名
+    }
+
+    // 确认索引名后是词边界（; , ) EOF 等，不是标识符字符）
+    if j < n && is_ident_char(bytes[j]) {
+        return None;
+    }
+
+    let index_name = &sql[name_start..j];
+    // 保留所有关键词原始大小写；插入括号包裹索引名作为占位列名
+    let rewritten = format!(
+        "{} {} ({}) {} {} {}",
+        primary_word, key_word, index_name, using_word, index_word, index_name
+    );
+    Some((rewritten, j))
+}
+
+/// 跳过空白字符（空格/Tab/换行/回车），返回第一个非空白字节的偏移。
+fn skip_ws(bytes: &[u8], mut i: usize, n: usize) -> usize {
+    while i < n && matches!(bytes[i], b' ' | b'\t' | b'\n' | b'\r') {
+        i += 1;
+    }
+    i
 }
 
 /// 按顶层逗号拆分字符串（忽略嵌套括号、字符串字面量、注释内的逗号）。
@@ -827,14 +937,22 @@ mod tests {
     #[test]
     fn g_oracle_alter_add_multiple_columns() {
         let r = rewrite_for_pg_parse("ALTER TABLE t ADD (c1 INT, c2 VARCHAR(10))");
-        assert_eq!(r.sql, "ALTER TABLE t ADD COLUMN c1 INT, ADD COLUMN c2 VARCHAR(10)");
+        assert_eq!(
+            r.sql,
+            "ALTER TABLE t ADD COLUMN c1 INT, ADD COLUMN c2 VARCHAR(10)"
+        );
     }
 
     #[test]
     fn g_oracle_alter_add_with_column_options() {
         // 列定义带 DEFAULT / NOT NULL 等选项
-        let r = rewrite_for_pg_parse("ALTER TABLE t ADD (c1 INT DEFAULT 0 NOT NULL, c2 VARCHAR(10) NULL)");
-        assert_eq!(r.sql, "ALTER TABLE t ADD COLUMN c1 INT DEFAULT 0 NOT NULL, ADD COLUMN c2 VARCHAR(10) NULL");
+        let r = rewrite_for_pg_parse(
+            "ALTER TABLE t ADD (c1 INT DEFAULT 0 NOT NULL, c2 VARCHAR(10) NULL)",
+        );
+        assert_eq!(
+            r.sql,
+            "ALTER TABLE t ADD COLUMN c1 INT DEFAULT 0 NOT NULL, ADD COLUMN c2 VARCHAR(10) NULL"
+        );
     }
 
     #[test]
@@ -848,21 +966,30 @@ mod tests {
     fn g_oracle_alter_add_newline_between_add_and_paren() {
         // ADD 和 ( 之间可以有换行
         let r = rewrite_for_pg_parse("ALTER TABLE t ADD\n(\n  c1 INT,\n  c2 VARCHAR(10)\n)");
-        assert_eq!(r.sql, "ALTER TABLE t ADD COLUMN c1 INT, ADD COLUMN c2 VARCHAR(10)");
+        assert_eq!(
+            r.sql,
+            "ALTER TABLE t ADD COLUMN c1 INT, ADD COLUMN c2 VARCHAR(10)"
+        );
     }
 
     #[test]
     fn g_oracle_alter_add_nested_type_parens() {
         // 类型中的嵌套括号（NUMERIC(10,2)）不应干扰顶层逗号拆分
         let r = rewrite_for_pg_parse("ALTER TABLE t ADD (c1 NUMERIC(10,2), c2 VARCHAR(10))");
-        assert_eq!(r.sql, "ALTER TABLE t ADD COLUMN c1 NUMERIC(10,2), ADD COLUMN c2 VARCHAR(10)");
+        assert_eq!(
+            r.sql,
+            "ALTER TABLE t ADD COLUMN c1 NUMERIC(10,2), ADD COLUMN c2 VARCHAR(10)"
+        );
     }
 
     #[test]
     fn g_oracle_alter_add_default_with_comma_in_string() {
         // DEFAULT 'a,b' 中的逗号在字符串内，不应被拆分
         let r = rewrite_for_pg_parse("ALTER TABLE t ADD (c1 VARCHAR(10) DEFAULT 'a,b', c2 INT)");
-        assert_eq!(r.sql, "ALTER TABLE t ADD COLUMN c1 VARCHAR(10) DEFAULT 'a,b', ADD COLUMN c2 INT");
+        assert_eq!(
+            r.sql,
+            "ALTER TABLE t ADD COLUMN c1 VARCHAR(10) DEFAULT 'a,b', ADD COLUMN c2 INT"
+        );
     }
 
     #[test]
@@ -901,8 +1028,106 @@ mod tests {
     fn g_oracle_alter_add_mixed_with_other_rewrites() {
         // 与其他重写规则组合：ALTER TABLE 里有反引号 + NVL 默认值
         let r = rewrite_for_pg_parse("ALTER TABLE `order` ADD (c1 INT DEFAULT NVL(x, 0))");
-        assert_eq!(r.sql, "ALTER TABLE \"order\" ADD COLUMN c1 INT DEFAULT COALESCE(x, 0)");
+        assert_eq!(
+            r.sql,
+            "ALTER TABLE \"order\" ADD COLUMN c1 INT DEFAULT COALESCE(x, 0)"
+        );
         // 2 处重写：反引号 + ADD (...)
         assert_eq!(r.rewrites.len(), 2);
+    }
+
+    // ===== G_ORACLE_PK_USING_INDEX =====
+
+    #[test]
+    fn g_oracle_pk_using_index_basic() {
+        let r =
+            rewrite_for_pg_parse("ALTER TABLE a ADD CONSTRAINT pk_a PRIMARY KEY USING INDEX pk_a");
+        assert_eq!(
+            r.sql,
+            "ALTER TABLE a ADD CONSTRAINT pk_a PRIMARY KEY (pk_a) USING INDEX pk_a"
+        );
+        assert_eq!(r.rewrites.len(), 1);
+        assert_eq!(r.rewrites[0].rule_id, "G_ORACLE_PK_USING_INDEX");
+    }
+
+    #[test]
+    fn g_oracle_pk_using_index_lowercase() {
+        let r =
+            rewrite_for_pg_parse("alter table a add constraint pk_a primary key using index pk_a");
+        assert_eq!(
+            r.sql,
+            "alter table a add constraint pk_a primary key (pk_a) using index pk_a"
+        );
+    }
+
+    #[test]
+    fn g_oracle_pk_using_index_schema_qualified() {
+        // 索引名带 schema 前缀：schema.idx_name
+        let r = rewrite_for_pg_parse(
+            "ALTER TABLE a ADD CONSTRAINT pk_a PRIMARY KEY USING INDEX myschema.pk_a",
+        );
+        assert_eq!(
+            r.sql,
+            "ALTER TABLE a ADD CONSTRAINT pk_a PRIMARY KEY (myschema.pk_a) USING INDEX myschema.pk_a"
+        );
+    }
+
+    #[test]
+    fn g_oracle_pk_using_index_with_newlines() {
+        // 关键词之间有换行
+        let r = rewrite_for_pg_parse(
+            "ALTER TABLE a ADD CONSTRAINT pk_a PRIMARY\nKEY\nUSING\nINDEX pk_a",
+        );
+        assert_eq!(
+            r.sql,
+            "ALTER TABLE a ADD CONSTRAINT pk_a PRIMARY KEY (pk_a) USING INDEX pk_a"
+        );
+    }
+
+    #[test]
+    fn g_oracle_pk_using_index_followed_by_semicolon() {
+        let r =
+            rewrite_for_pg_parse("ALTER TABLE a ADD CONSTRAINT pk_a PRIMARY KEY USING INDEX pk_a;");
+        assert_eq!(
+            r.sql,
+            "ALTER TABLE a ADD CONSTRAINT pk_a PRIMARY KEY (pk_a) USING INDEX pk_a;"
+        );
+    }
+
+    #[test]
+    fn g_oracle_pk_using_index_not_triggered_for_standard_syntax() {
+        // 标准 PG 语法 PRIMARY KEY (col) USING INDEX idx 不应被重写
+        let r = rewrite_for_pg_parse(
+            "ALTER TABLE a ADD CONSTRAINT pk_a PRIMARY KEY (id) USING INDEX pk_a",
+        );
+        assert_eq!(
+            r.sql,
+            "ALTER TABLE a ADD CONSTRAINT pk_a PRIMARY KEY (id) USING INDEX pk_a"
+        );
+        assert!(r.is_empty());
+    }
+
+    #[test]
+    fn g_oracle_pk_using_index_not_triggered_for_plain_pk() {
+        // 普通 PRIMARY KEY (col) 不应被重写
+        let r = rewrite_for_pg_parse("ALTER TABLE a ADD CONSTRAINT pk_a PRIMARY KEY (id)");
+        assert_eq!(r.sql, "ALTER TABLE a ADD CONSTRAINT pk_a PRIMARY KEY (id)");
+        assert!(r.is_empty());
+    }
+
+    #[test]
+    fn g_oracle_pk_using_index_not_triggered_for_column_named_primary() {
+        // PRIMARY 作为列名时不应触发（后面不跟 KEY USING INDEX）
+        let r = rewrite_for_pg_parse("SELECT primary FROM t");
+        assert_eq!(r.sql, "SELECT primary FROM t");
+        assert!(r.is_empty());
+    }
+
+    #[test]
+    fn g_oracle_pk_using_index_not_triggered_for_primary_key_without_using() {
+        // PRIMARY KEY 后不跟 USING INDEX（如 CREATE TABLE 里的列约束）不应触发
+        let r = rewrite_for_pg_parse("CREATE TABLE t (id INT PRIMARY KEY)");
+        assert_eq!(r.sql, "CREATE TABLE t (id INT PRIMARY KEY)");
+        assert!(r.is_empty());
     }
 }

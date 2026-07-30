@@ -1,5 +1,5 @@
-use std::process::Command;
 use std::path::Path;
+use std::process::Command;
 
 /// 取 sqlguard 二进制的绝对路径。
 ///
@@ -37,22 +37,26 @@ fn setup_test_project(dir: &str) {
     std::fs::write(
         format!("{}/sql/ddl/create_users.sql", dir),
         "CREATE TABLE users (id INT, name VARCHAR(100));",
-    ).unwrap();
+    )
+    .unwrap();
 
     std::fs::write(
         format!("{}/sql/ddl/drop_table.sql", dir),
         "DROP TABLE users;",
-    ).unwrap();
+    )
+    .unwrap();
 
     std::fs::write(
         format!("{}/sql/dml/select_all.sql", dir),
         "SELECT * FROM orders;",
-    ).unwrap();
+    )
+    .unwrap();
 
     std::fs::write(
         format!("{}/sql/dml/select_good.sql", dir),
         "SELECT id, name FROM orders;",
-    ).unwrap();
+    )
+    .unwrap();
 }
 
 #[test]
@@ -69,8 +73,12 @@ fn test_init_creates_config() {
     assert!(Path::new(dir).join("sqlguard.toml").exists());
     // init 现在将规则拆分到独立文件
     assert!(Path::new(dir).join("sqlguard.rules.toml").exists());
-    assert!(Path::new(dir).join("config/rules/ddl/no_drop_table.rhai").exists());
-    assert!(Path::new(dir).join("config/rules/dml/no_select_all.rhai").exists());
+    assert!(Path::new(dir)
+        .join("config/rules/ddl/no_drop_table.rhai")
+        .exists());
+    assert!(Path::new(dir)
+        .join("config/rules/dml/no_select_all.rhai")
+        .exists());
 
     // 端到端：init 生成的主配置通过 rules_file 引用 sqlguard.rules.toml，
     // check 应能基于拆分后的规则发现违规。
@@ -85,7 +93,8 @@ fn test_init_creates_config() {
     assert!(
         stdout.contains("no_drop_table") || stderr.contains("no_drop_table"),
         "init 生成的拆分配置应发现 DROP TABLE 违规\nstdout: {}\nstderr: {}",
-        stdout, stderr
+        stdout,
+        stderr
     );
 
     let _ = std::fs::remove_dir_all(dir);
@@ -320,7 +329,9 @@ fn test_check_json_output() {
     let _ = std::fs::remove_dir_all(dir);
 
     setup_test_project(dir);
-    std::fs::write(format!("{}/sqlguard.toml", dir), r#"
+    std::fs::write(
+        format!("{}/sqlguard.toml", dir),
+        r#"
 [structure]
 paths = ["sql/ddl", "sql/dml"]
 strict = false
@@ -360,7 +371,9 @@ severity = "error"
 
 [output]
 formats = ["json"]
-"#).unwrap();
+"#,
+    )
+    .unwrap();
 
     std::fs::create_dir_all(format!("{}/config/rules/ddl", dir)).unwrap();
     std::fs::create_dir_all(format!("{}/config/rules/dml", dir)).unwrap();
@@ -372,18 +385,38 @@ formats = ["json"]
     ).unwrap();
 
     let output = Command::new(&binary_abs_path())
-        .args(["check", dir, "-c", &format!("{}/sqlguard.toml", dir), "-f", "json", "-o", dir])
+        .args([
+            "check",
+            dir,
+            "-c",
+            &format!("{}/sqlguard.toml", dir),
+            "-f",
+            "json",
+            "-o",
+            dir,
+        ])
         .output()
         .expect("Failed to run sqlguard check with JSON");
 
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("JSON report saved"), "JSON report should be saved: {}", stderr);
+    assert!(
+        stderr.contains("JSON report saved"),
+        "JSON report should be saved: {}",
+        stderr
+    );
 
     let report_path = format!("{}/sqlguard-report.json", dir);
-    assert!(Path::new(&report_path).exists(), "JSON report file should exist");
+    assert!(
+        Path::new(&report_path).exists(),
+        "JSON report file should exist"
+    );
 
     let content = std::fs::read_to_string(&report_path).unwrap();
-    assert!(content.contains("no_drop_table"), "JSON should contain violation: {}", content);
+    assert!(
+        content.contains("no_drop_table"),
+        "JSON should contain violation: {}",
+        content
+    );
 
     let _ = std::fs::remove_dir_all(dir);
 }
@@ -398,7 +431,9 @@ fn test_check_sarif_output() {
     let _ = std::fs::remove_dir_all(dir);
 
     setup_test_project(dir);
-    std::fs::write(format!("{}/sqlguard.toml", dir), r#"
+    std::fs::write(
+        format!("{}/sqlguard.toml", dir),
+        r#"
 [structure]
 paths = ["sql/ddl", "sql/dml"]
 strict = false
@@ -429,7 +464,9 @@ severity = "error"
 
 [output]
 formats = ["sarif"]
-"#).unwrap();
+"#,
+    )
+    .unwrap();
 
     std::fs::create_dir_all(format!("{}/config/rules/ddl", dir)).unwrap();
     std::fs::write(format!("{}/config/rules/ddl/no_drop_table.rhai", dir),
@@ -437,30 +474,52 @@ formats = ["sarif"]
     ).unwrap();
 
     let output = Command::new(&binary_abs_path())
-        .args(["check", dir, "-c", &format!("{}/sqlguard.toml", dir), "-f", "sarif", "-o", dir])
+        .args([
+            "check",
+            dir,
+            "-c",
+            &format!("{}/sqlguard.toml", dir),
+            "-f",
+            "sarif",
+            "-o",
+            dir,
+        ])
         .output()
         .expect("Failed to run sqlguard check with SARIF");
 
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("SARIF report saved"), "SARIF report should be saved: {}", stderr);
+    assert!(
+        stderr.contains("SARIF report saved"),
+        "SARIF report should be saved: {}",
+        stderr
+    );
 
     let report_path = format!("{}/sqlguard-report.sarif", dir);
-    assert!(Path::new(&report_path).exists(), "SARIF report file should exist");
+    assert!(
+        Path::new(&report_path).exists(),
+        "SARIF report file should exist"
+    );
 
     let content = std::fs::read_to_string(&report_path).unwrap();
-    let parsed: serde_json::Value = serde_json::from_str(&content)
-        .expect("SARIF output must be valid JSON");
+    let parsed: serde_json::Value =
+        serde_json::from_str(&content).expect("SARIF output must be valid JSON");
 
     assert_eq!(parsed["version"], "2.1.0");
     assert!(parsed["$schema"].as_str().unwrap().contains("sarif"));
     assert_eq!(parsed["runs"][0]["tool"]["driver"]["name"], "SqlGuard");
-    assert_eq!(parsed["runs"][0]["tool"]["driver"]["rules"][0]["id"], "DDL001");
+    assert_eq!(
+        parsed["runs"][0]["tool"]["driver"]["rules"][0]["id"],
+        "DDL001"
+    );
 
     let results = parsed["runs"][0]["results"].as_array().unwrap();
     assert!(!results.is_empty(), "should report DROP TABLE violation");
     assert_eq!(results[0]["ruleId"], "DDL001");
     assert_eq!(results[0]["level"], "error");
-    assert!(results[0]["message"]["text"].as_str().unwrap().contains("DROP TABLE"));
+    assert!(results[0]["message"]["text"]
+        .as_str()
+        .unwrap()
+        .contains("DROP TABLE"));
 
     let _ = std::fs::remove_dir_all(dir);
 }
@@ -620,7 +679,11 @@ fn test_check_rule_audit_fixes() {
 
     // 从仓库复制三条规则脚本（集成测试在 crate 根目录运行）
     let rule_dir = std::env::current_dir().unwrap().join("config/rules/dml");
-    for r in ["column_references_qualified", "union_all_preferred", "no_select_all"] {
+    for r in [
+        "column_references_qualified",
+        "union_all_preferred",
+        "no_select_all",
+    ] {
         std::fs::write(
             format!("{}/config/rules/dml/{}.rhai", dir, r),
             std::fs::read_to_string(rule_dir.join(format!("{}.rhai", r))).unwrap(),
@@ -829,10 +892,13 @@ fn test_check_mapper_mode() {
   </insert>
 </mapper>
 "#,
-    ).unwrap();
+    )
+    .unwrap();
 
     // 3. 启用 mapper 模式的配置
-    std::fs::write(format!("{}/sqlguard.toml", dir), r#"
+    std::fs::write(
+        format!("{}/sqlguard.toml", dir),
+        r#"
 [structure]
 paths = ["sql/ddl", "sql/dml"]
 strict = false
@@ -868,21 +934,39 @@ patterns = ["**/*Mapper.xml"]
 
 [output]
 formats = ["json"]
-"#).unwrap();
+"#,
+    )
+    .unwrap();
 
     // 4. 执行 check
     let output = Command::new(&binary_abs_path())
-        .args(["check", dir, "-c", &format!("{}/sqlguard.toml", dir), "-f", "json", "-o", dir])
+        .args([
+            "check",
+            dir,
+            "-c",
+            &format!("{}/sqlguard.toml", dir),
+            "-f",
+            "json",
+            "-o",
+            dir,
+        ])
         .output()
         .expect("Failed to run sqlguard check with mapper");
 
     let stderr = String::from_utf8_lossy(&output.stderr);
 
     // 5. JSON 报告应被生成
-    assert!(stderr.contains("JSON report saved"), "JSON report should be saved: {}", stderr);
+    assert!(
+        stderr.contains("JSON report saved"),
+        "JSON report should be saved: {}",
+        stderr
+    );
 
     let report_path = format!("{}/sqlguard-report.json", dir);
-    assert!(Path::new(&report_path).exists(), "JSON report file should exist");
+    assert!(
+        Path::new(&report_path).exists(),
+        "JSON report file should exist"
+    );
 
     let content = std::fs::read_to_string(&report_path).unwrap();
 
@@ -929,16 +1013,30 @@ fn test_mapper_disabled_by_default() {
   <select id="bad">SELECT * FROM users</select>
 </mapper>
 "#,
-    ).unwrap();
+    )
+    .unwrap();
 
     // 用 init 生成的默认配置（不含 [mapper] 段）跑 check
     let output = Command::new(&binary_abs_path())
-        .args(["check", dir, "-c", &format!("{}/sqlguard.toml", dir), "-f", "json", "-o", dir])
+        .args([
+            "check",
+            dir,
+            "-c",
+            &format!("{}/sqlguard.toml", dir),
+            "-f",
+            "json",
+            "-o",
+            dir,
+        ])
         .output()
         .expect("Failed to run sqlguard check");
 
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("JSON report saved"), "JSON report should be saved: {}", stderr);
+    assert!(
+        stderr.contains("JSON report saved"),
+        "JSON report should be saved: {}",
+        stderr
+    );
 
     let report_path = format!("{}/sqlguard-report.json", dir);
     let content = std::fs::read_to_string(&report_path).unwrap();
@@ -956,7 +1054,9 @@ fn test_mapper_disabled_by_default() {
 #[test]
 fn test_check_diff_only_changed_statements() {
     // 验证 check-diff 只校验改动语句，未改动语句的违规被过滤掉
-    if !require_git() { return; }
+    if !require_git() {
+        return;
+    }
     let dir = "/tmp/sqlguard-test-diff";
     let _ = std::fs::remove_dir_all(dir);
 
@@ -987,7 +1087,8 @@ fn test_check_diff_only_changed_statements() {
     std::fs::write(
         format!("{}/sql/dml/001.sql", dir),
         "SELECT * FROM users;\nSELECT * FROM orders;\n",
-    ).unwrap();
+    )
+    .unwrap();
 
     // 4. 提交初始版本
     Command::new("git")
@@ -1005,7 +1106,8 @@ fn test_check_diff_only_changed_statements() {
     std::fs::write(
         format!("{}/sql/dml/001.sql", dir),
         "SELECT id, name FROM users;\nSELECT * FROM orders;\n",
-    ).unwrap();
+    )
+    .unwrap();
     Command::new("git")
         .current_dir(dir)
         .args(["add", "."])
@@ -1022,10 +1124,14 @@ fn test_check_diff_only_changed_statements() {
         .current_dir(dir)
         .args([
             "check-diff",
-            "--base", "HEAD~1",
-            "-c", &format!("{}/sqlguard.toml", dir),
-            "-f", "json",
-            "-o", dir,
+            "--base",
+            "HEAD~1",
+            "-c",
+            &format!("{}/sqlguard.toml", dir),
+            "-f",
+            "json",
+            "-o",
+            dir,
         ])
         .output()
         .expect("sqlguard check-diff");
@@ -1045,7 +1151,11 @@ fn test_check_diff_only_changed_statements() {
     let content = std::fs::read_to_string(&report_path).unwrap();
     let total: usize = serde_json::from_str::<serde_json::Value>(&content)
         .ok()
-        .and_then(|v| v["summary"]["total_violations"].as_u64().map(|n| n as usize))
+        .and_then(|v| {
+            v["summary"]["total_violations"]
+                .as_u64()
+                .map(|n| n as usize)
+        })
         .unwrap_or(999);
     assert_eq!(
         total, 0,
@@ -1059,53 +1169,95 @@ fn test_check_diff_only_changed_statements() {
 #[test]
 fn test_check_diff_detects_new_violation_in_changed_line() {
     // 验证 check-diff 能检测到改动行新增的违规
-    if !require_git() { return; }
+    if !require_git() {
+        return;
+    }
     let dir = "/tmp/sqlguard-test-diff-new";
     let _ = std::fs::remove_dir_all(dir);
 
-    Command::new("git").args(["init", dir]).output().expect("git init");
-    Command::new("git").current_dir(dir).args(["config", "user.email", "t@t.com"]).output().expect("git config");
-    Command::new("git").current_dir(dir).args(["config", "user.name", "T"]).output().expect("git config");
+    Command::new("git")
+        .args(["init", dir])
+        .output()
+        .expect("git init");
+    Command::new("git")
+        .current_dir(dir)
+        .args(["config", "user.email", "t@t.com"])
+        .output()
+        .expect("git config");
+    Command::new("git")
+        .current_dir(dir)
+        .args(["config", "user.name", "T"])
+        .output()
+        .expect("git config");
 
-    Command::new(&binary_abs_path()).args(["init", dir]).output().expect("sqlguard init");
+    Command::new(&binary_abs_path())
+        .args(["init", dir])
+        .output()
+        .expect("sqlguard init");
 
     // 初始：规范查询
     std::fs::create_dir_all(format!("{}/sql/dml", dir)).unwrap();
     std::fs::write(
         format!("{}/sql/dml/001.sql", dir),
         "SELECT id FROM users;\n",
-    ).unwrap();
-    Command::new("git").current_dir(dir).args(["add", "."]).output().expect("git add");
-    Command::new("git").current_dir(dir).args(["commit", "-m", "initial"]).output().expect("git commit");
+    )
+    .unwrap();
+    Command::new("git")
+        .current_dir(dir)
+        .args(["add", "."])
+        .output()
+        .expect("git add");
+    Command::new("git")
+        .current_dir(dir)
+        .args(["commit", "-m", "initial"])
+        .output()
+        .expect("git commit");
 
     // 改动：把规范查询改成 SELECT *（新增违规）
-    std::fs::write(
-        format!("{}/sql/dml/001.sql", dir),
-        "SELECT * FROM users;\n",
-    ).unwrap();
-    Command::new("git").current_dir(dir).args(["add", "."]).output().expect("git add");
-    Command::new("git").current_dir(dir).args(["commit", "-m", "add violation"]).output().expect("git commit");
+    std::fs::write(format!("{}/sql/dml/001.sql", dir), "SELECT * FROM users;\n").unwrap();
+    Command::new("git")
+        .current_dir(dir)
+        .args(["add", "."])
+        .output()
+        .expect("git add");
+    Command::new("git")
+        .current_dir(dir)
+        .args(["commit", "-m", "add violation"])
+        .output()
+        .expect("git commit");
 
     let output = Command::new(&binary_abs_path())
         .current_dir(dir)
         .args([
             "check-diff",
-            "--base", "HEAD~1",
-            "-c", &format!("{}/sqlguard.toml", dir),
-            "-f", "json",
-            "-o", dir,
+            "--base",
+            "HEAD~1",
+            "-c",
+            &format!("{}/sqlguard.toml", dir),
+            "-f",
+            "json",
+            "-o",
+            dir,
         ])
         .output()
         .expect("sqlguard check-diff");
 
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("JSON report saved"), "JSON report should be saved: {}", stderr);
+    assert!(
+        stderr.contains("JSON report saved"),
+        "JSON report should be saved: {}",
+        stderr
+    );
 
     let report_path = format!("{}/sqlguard-report.json", dir);
     let content = std::fs::read_to_string(&report_path).unwrap();
     let total: usize = serde_json::from_str::<serde_json::Value>(&content)
         .ok()
-        .and_then(|v| v["summary"]["total_violations"].as_u64().map(|n| n as usize))
+        .and_then(|v| {
+            v["summary"]["total_violations"]
+                .as_u64()
+                .map(|n| n as usize)
+        })
         .unwrap_or(0);
     assert_eq!(
         total, 1,
@@ -1119,49 +1271,94 @@ fn test_check_diff_detects_new_violation_in_changed_line() {
 #[test]
 fn test_check_diff_new_file_all_checked() {
     // 验证新增文件整体算改动，所有违规都被保留
-    if !require_git() { return; }
+    if !require_git() {
+        return;
+    }
     let dir = "/tmp/sqlguard-test-diff-newfile";
     let _ = std::fs::remove_dir_all(dir);
 
-    Command::new("git").args(["init", dir]).output().expect("git init");
-    Command::new("git").current_dir(dir).args(["config", "user.email", "t@t.com"]).output().expect("git config");
-    Command::new("git").current_dir(dir).args(["config", "user.name", "T"]).output().expect("git config");
+    Command::new("git")
+        .args(["init", dir])
+        .output()
+        .expect("git init");
+    Command::new("git")
+        .current_dir(dir)
+        .args(["config", "user.email", "t@t.com"])
+        .output()
+        .expect("git config");
+    Command::new("git")
+        .current_dir(dir)
+        .args(["config", "user.name", "T"])
+        .output()
+        .expect("git config");
 
-    Command::new(&binary_abs_path()).args(["init", dir]).output().expect("sqlguard init");
+    Command::new(&binary_abs_path())
+        .args(["init", dir])
+        .output()
+        .expect("sqlguard init");
 
     // 初始 commit（无 SQL 文件）
-    Command::new("git").current_dir(dir).args(["add", "."]).output().expect("git add");
-    Command::new("git").current_dir(dir).args(["commit", "-m", "initial"]).output().expect("git commit");
+    Command::new("git")
+        .current_dir(dir)
+        .args(["add", "."])
+        .output()
+        .expect("git add");
+    Command::new("git")
+        .current_dir(dir)
+        .args(["commit", "-m", "initial"])
+        .output()
+        .expect("git commit");
 
     // 新增 SQL 文件，含 2 条违规
     std::fs::create_dir_all(format!("{}/sql/dml", dir)).unwrap();
     std::fs::write(
         format!("{}/sql/dml/new.sql", dir),
         "SELECT * FROM users;\nSELECT * FROM orders;\n",
-    ).unwrap();
-    Command::new("git").current_dir(dir).args(["add", "."]).output().expect("git add");
-    Command::new("git").current_dir(dir).args(["commit", "-m", "add new file"]).output().expect("git commit");
+    )
+    .unwrap();
+    Command::new("git")
+        .current_dir(dir)
+        .args(["add", "."])
+        .output()
+        .expect("git add");
+    Command::new("git")
+        .current_dir(dir)
+        .args(["commit", "-m", "add new file"])
+        .output()
+        .expect("git commit");
 
     let output = Command::new(&binary_abs_path())
         .current_dir(dir)
         .args([
             "check-diff",
-            "--base", "HEAD~1",
-            "-c", &format!("{}/sqlguard.toml", dir),
-            "-f", "json",
-            "-o", dir,
+            "--base",
+            "HEAD~1",
+            "-c",
+            &format!("{}/sqlguard.toml", dir),
+            "-f",
+            "json",
+            "-o",
+            dir,
         ])
         .output()
         .expect("sqlguard check-diff");
 
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("JSON report saved"), "JSON report should be saved: {}", stderr);
+    assert!(
+        stderr.contains("JSON report saved"),
+        "JSON report should be saved: {}",
+        stderr
+    );
 
     let report_path = format!("{}/sqlguard-report.json", dir);
     let content = std::fs::read_to_string(&report_path).unwrap();
     let total: usize = serde_json::from_str::<serde_json::Value>(&content)
         .ok()
-        .and_then(|v| v["summary"]["total_violations"].as_u64().map(|n| n as usize))
+        .and_then(|v| {
+            v["summary"]["total_violations"]
+                .as_u64()
+                .map(|n| n as usize)
+        })
         .unwrap_or(0);
     assert_eq!(
         total, 2,
@@ -1179,43 +1376,81 @@ fn test_check_diff_with_diff_noprefix_config() {
     // 解析器依赖 `+++ b/` 前缀提取路径，若无前缀会返回空列表，
     // 导致 check-diff 报 "No SQL changes detected" / files_checked = 0。
     // 修复：get_diff 显式传 `--src-prefix=a/ --dst-prefix=b/` 强制前缀。
-    if !require_git() { return; }
+    if !require_git() {
+        return;
+    }
     let dir = "/tmp/sqlguard-test-diff-noprefix";
     let _ = std::fs::remove_dir_all(dir);
 
-    Command::new("git").args(["init", dir]).output().expect("git init");
-    Command::new("git").current_dir(dir).args(["config", "user.email", "t@t.com"]).output().expect("git config");
-    Command::new("git").current_dir(dir).args(["config", "user.name", "T"]).output().expect("git config");
+    Command::new("git")
+        .args(["init", dir])
+        .output()
+        .expect("git init");
+    Command::new("git")
+        .current_dir(dir)
+        .args(["config", "user.email", "t@t.com"])
+        .output()
+        .expect("git config");
+    Command::new("git")
+        .current_dir(dir)
+        .args(["config", "user.name", "T"])
+        .output()
+        .expect("git config");
     // 关键：设置 noprefix，模拟用户全局配置
-    Command::new("git").current_dir(dir).args(["config", "diff.noprefix", "true"]).output().expect("git config diff.noprefix");
+    Command::new("git")
+        .current_dir(dir)
+        .args(["config", "diff.noprefix", "true"])
+        .output()
+        .expect("git config diff.noprefix");
 
-    Command::new(&binary_abs_path()).args(["init", dir]).output().expect("sqlguard init");
+    Command::new(&binary_abs_path())
+        .args(["init", dir])
+        .output()
+        .expect("sqlguard init");
 
     // 初始：规范查询
     std::fs::create_dir_all(format!("{}/sql/dml", dir)).unwrap();
     std::fs::write(
         format!("{}/sql/dml/001.sql", dir),
         "SELECT id FROM users;\n",
-    ).unwrap();
-    Command::new("git").current_dir(dir).args(["add", "."]).output().expect("git add");
-    Command::new("git").current_dir(dir).args(["commit", "-m", "initial"]).output().expect("git commit");
+    )
+    .unwrap();
+    Command::new("git")
+        .current_dir(dir)
+        .args(["add", "."])
+        .output()
+        .expect("git add");
+    Command::new("git")
+        .current_dir(dir)
+        .args(["commit", "-m", "initial"])
+        .output()
+        .expect("git commit");
 
     // 改动：引入 SELECT * 违规
-    std::fs::write(
-        format!("{}/sql/dml/001.sql", dir),
-        "SELECT * FROM users;\n",
-    ).unwrap();
-    Command::new("git").current_dir(dir).args(["add", "."]).output().expect("git add");
-    Command::new("git").current_dir(dir).args(["commit", "-m", "add violation"]).output().expect("git commit");
+    std::fs::write(format!("{}/sql/dml/001.sql", dir), "SELECT * FROM users;\n").unwrap();
+    Command::new("git")
+        .current_dir(dir)
+        .args(["add", "."])
+        .output()
+        .expect("git add");
+    Command::new("git")
+        .current_dir(dir)
+        .args(["commit", "-m", "add violation"])
+        .output()
+        .expect("git commit");
 
     let output = Command::new(&binary_abs_path())
         .current_dir(dir)
         .args([
             "check-diff",
-            "--base", "HEAD~1",
-            "-c", &format!("{}/sqlguard.toml", dir),
-            "-f", "json",
-            "-o", dir,
+            "--base",
+            "HEAD~1",
+            "-c",
+            &format!("{}/sqlguard.toml", dir),
+            "-f",
+            "json",
+            "-o",
+            dir,
         ])
         .output()
         .expect("sqlguard check-diff");
@@ -1226,7 +1461,11 @@ fn test_check_diff_with_diff_noprefix_config() {
         "noprefix=true should not cause empty diff (fix: --src-prefix/--dst-prefix): {}",
         stderr
     );
-    assert!(stderr.contains("JSON report saved"), "JSON report should be saved: {}", stderr);
+    assert!(
+        stderr.contains("JSON report saved"),
+        "JSON report should be saved: {}",
+        stderr
+    );
 
     let report_path = format!("{}/sqlguard-report.json", dir);
     let content = std::fs::read_to_string(&report_path).unwrap();
@@ -1626,33 +1865,58 @@ formats = ["json"]
 #[test]
 fn test_check_diff_no_changes() {
     // 验证无改动时正常退出，输出空报告
-    if !require_git() { return; }
+    if !require_git() {
+        return;
+    }
     let dir = "/tmp/sqlguard-test-diff-empty";
     let _ = std::fs::remove_dir_all(dir);
 
-    Command::new("git").args(["init", dir]).output().expect("git init");
-    Command::new("git").current_dir(dir).args(["config", "user.email", "t@t.com"]).output().expect("git config");
-    Command::new("git").current_dir(dir).args(["config", "user.name", "T"]).output().expect("git config");
+    Command::new("git")
+        .args(["init", dir])
+        .output()
+        .expect("git init");
+    Command::new("git")
+        .current_dir(dir)
+        .args(["config", "user.email", "t@t.com"])
+        .output()
+        .expect("git config");
+    Command::new("git")
+        .current_dir(dir)
+        .args(["config", "user.name", "T"])
+        .output()
+        .expect("git config");
 
-    Command::new(&binary_abs_path()).args(["init", dir]).output().expect("sqlguard init");
+    Command::new(&binary_abs_path())
+        .args(["init", dir])
+        .output()
+        .expect("sqlguard init");
 
     std::fs::create_dir_all(format!("{}/sql/dml", dir)).unwrap();
-    std::fs::write(
-        format!("{}/sql/dml/001.sql", dir),
-        "SELECT * FROM users;\n",
-    ).unwrap();
-    Command::new("git").current_dir(dir).args(["add", "."]).output().expect("git add");
-    Command::new("git").current_dir(dir).args(["commit", "-m", "initial"]).output().expect("git commit");
+    std::fs::write(format!("{}/sql/dml/001.sql", dir), "SELECT * FROM users;\n").unwrap();
+    Command::new("git")
+        .current_dir(dir)
+        .args(["add", "."])
+        .output()
+        .expect("git add");
+    Command::new("git")
+        .current_dir(dir)
+        .args(["commit", "-m", "initial"])
+        .output()
+        .expect("git commit");
 
     // 无改动直接跑 check-diff
     let output = Command::new(&binary_abs_path())
         .current_dir(dir)
         .args([
             "check-diff",
-            "--base", "HEAD",
-            "-c", &format!("{}/sqlguard.toml", dir),
-            "-f", "json",
-            "-o", dir,
+            "--base",
+            "HEAD",
+            "-c",
+            &format!("{}/sqlguard.toml", dir),
+            "-f",
+            "json",
+            "-o",
+            dir,
         ])
         .output()
         .expect("sqlguard check-diff");
@@ -1679,7 +1943,10 @@ fn test_check_dml007_order_by_required_for_pagination() {
         .unwrap()
         .join("config/rules/dml/order_by_required_for_pagination.rhai");
     std::fs::write(
-        format!("{}/config/rules/dml/order_by_required_for_pagination.rhai", dir),
+        format!(
+            "{}/config/rules/dml/order_by_required_for_pagination.rhai",
+            dir
+        ),
         std::fs::read_to_string(&rule_src).unwrap(),
     )
     .unwrap();
@@ -1986,9 +2253,7 @@ formats = ["json"]
         std::collections::HashMap::new();
     if let Some(violations) = report["violations"].as_array() {
         for v in violations {
-            if let (Some(file), Some(rule_id)) =
-                (v["file"].as_str(), v["rule_id"].as_str())
-            {
+            if let (Some(file), Some(rule_id)) = (v["file"].as_str(), v["rule_id"].as_str()) {
                 rules_by_file
                     .entry(file.to_string())
                     .or_default()
@@ -2056,14 +2321,22 @@ fn test_check_dialect_override() {
     std::fs::write(
         format!("{}/sql/dml/t.sql", dir),
         "SELECT id, name FROM users LIMIT 10;",
-    ).unwrap();
+    )
+    .unwrap();
     std::fs::write(
         format!("{}/sqlguard.toml", dir),
         "[structure]\npaths = [\"sql\"]\nstrict = false\nallow_extra = [\"*\"]\n[classification]\nrules = []\ndefault_type = \"other\"\n",
     ).unwrap();
 
     let output = Command::new(&binary_abs_path())
-        .args(["check", dir, "-c", &format!("{}/sqlguard.toml", dir), "--dialect", "mysql"])
+        .args([
+            "check",
+            dir,
+            "-c",
+            &format!("{}/sqlguard.toml", dir),
+            "--dialect",
+            "mysql",
+        ])
         .output()
         .expect("Failed to run sqlguard check");
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -2086,14 +2359,24 @@ fn test_check_parse_error_reporting() {
     std::fs::write(
         format!("{}/sql/dml/bad.sql", dir),
         "INSERT INTO VALUES (1);\n",
-    ).unwrap();
+    )
+    .unwrap();
     std::fs::write(
         format!("{}/sqlguard.toml", dir),
         "[structure]\npaths = [\"sql\"]\nstrict = false\nallow_extra = [\"*\"]\n[classification]\nrules = []\ndefault_type = \"other\"\n",
     ).unwrap();
 
     let output = Command::new(&binary_abs_path())
-        .args(["check", dir, "-c", &format!("{}/sqlguard.toml", dir), "-f", "json", "-o", dir])
+        .args([
+            "check",
+            dir,
+            "-c",
+            &format!("{}/sqlguard.toml", dir),
+            "-f",
+            "json",
+            "-o",
+            dir,
+        ])
         .output()
         .expect("Failed to run sqlguard check");
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -2107,14 +2390,13 @@ fn test_check_parse_error_reporting() {
 
     // JSON 报告应包含 rule_id = PARSE 的 violation
     let report_path = format!("{}/sqlguard-report.json", dir);
-    let report_text = std::fs::read_to_string(&report_path)
-        .expect("JSON report file should exist");
-    let report: serde_json::Value = serde_json::from_str(&report_text)
-        .expect("JSON report should be valid");
+    let report_text = std::fs::read_to_string(&report_path).expect("JSON report file should exist");
+    let report: serde_json::Value =
+        serde_json::from_str(&report_text).expect("JSON report should be valid");
     if let Some(violations) = report["violations"].as_array() {
-        let has_parse = violations.iter().any(|v| {
-            v["rule_id"].as_str() == Some("PARSE")
-        });
+        let has_parse = violations
+            .iter()
+            .any(|v| v["rule_id"].as_str() == Some("PARSE"));
         assert!(
             has_parse,
             "应包含 PARSE violation，实际 violations: {}",
@@ -2140,12 +2422,15 @@ fn test_init_registers_dml007() {
     assert!(output.status.success());
 
     // 规则文件存在
-    assert!(Path::new(dir).join("config/rules/dml/order_by_required_for_pagination.rhai").exists());
+    assert!(Path::new(dir)
+        .join("config/rules/dml/order_by_required_for_pagination.rhai")
+        .exists());
 
     // sqlguard.rules.toml 包含 DML007
     let rules_content = std::fs::read_to_string(format!("{}/sqlguard.rules.toml", dir)).unwrap();
     assert!(
-        rules_content.contains("DML007") && rules_content.contains("order_by_required_for_pagination"),
+        rules_content.contains("DML007")
+            && rules_content.contains("order_by_required_for_pagination"),
         "sqlguard.rules.toml 应包含 DML007，实际:\n{}",
         rules_content
     );
@@ -2172,7 +2457,14 @@ fn test_gen_rollback_end_to_end() {
     ).unwrap();
 
     let output = Command::new(&binary_abs_path())
-        .args(["gen-rollback", dir, "-c", &format!("{}/sqlguard.toml", dir), "-o", &format!("{}/out", dir)])
+        .args([
+            "gen-rollback",
+            dir,
+            "-c",
+            &format!("{}/sqlguard.toml", dir),
+            "-o",
+            &format!("{}/out", dir),
+        ])
         .output()
         .expect("Failed to run sqlguard gen-rollback");
 
@@ -2194,12 +2486,20 @@ fn test_gen_rollback_end_to_end() {
         Path::new(&format!("{}/out/rollback/sql/dml/users.sql", dir)).exists(),
         "rollback/sql/dml/users.sql 应存在（rollback 子目录镜像输入目录结构）"
     );
-    assert!(Path::new(&format!("{}/out/cleanup.sql", dir)).exists(), "cleanup.sql 应存在");
-    assert!(Path::new(&format!("{}/out/rollback-manifest.json", dir)).exists(), "manifest 应存在");
+    assert!(
+        Path::new(&format!("{}/out/cleanup.sql", dir)).exists(),
+        "cleanup.sql 应存在"
+    );
+    assert!(
+        Path::new(&format!("{}/out/rollback-manifest.json", dir)).exists(),
+        "manifest 应存在"
+    );
 
     // manifest 内容校验
-    let manifest_text = std::fs::read_to_string(format!("{}/out/rollback-manifest.json", dir)).unwrap();
-    let manifest: serde_json::Value = serde_json::from_str(&manifest_text).expect("manifest 应为合法 JSON");
+    let manifest_text =
+        std::fs::read_to_string(format!("{}/out/rollback-manifest.json", dir)).unwrap();
+    let manifest: serde_json::Value =
+        serde_json::from_str(&manifest_text).expect("manifest 应为合法 JSON");
     assert_eq!(manifest["source_count"], 3, "source_count 应为 3");
     assert_eq!(manifest["dialect"], "mysql", "dialect 应为 mysql");
     assert_eq!(
@@ -2209,16 +2509,24 @@ fn test_gen_rollback_end_to_end() {
     );
 
     // backup/sql/dml/users.sql 应包含 bks_ 备份表（UPDATE/DELETE 需要全表备份）
-    let backup_sql = std::fs::read_to_string(format!("{}/out/backup/sql/dml/users.sql", dir)).unwrap();
+    let backup_sql =
+        std::fs::read_to_string(format!("{}/out/backup/sql/dml/users.sql", dir)).unwrap();
     assert!(
         backup_sql.contains("bks_users_") && backup_sql.contains("CREATE TABLE"),
         "backup/sql/dml/users.sql 应包含 bks_ 备份表 CREATE 语句"
     );
 
     // rollback/sql/dml/users.sql 应包含 DELETE/UPDATE/INSERT 回滚语句
-    let rollback_sql = std::fs::read_to_string(format!("{}/out/rollback/sql/dml/users.sql", dir)).unwrap();
-    assert!(rollback_sql.contains("DELETE FROM"), "rollback/sql/dml/users.sql 应包含 DELETE 回滚");
-    assert!(rollback_sql.contains("UPDATE"), "rollback/sql/dml/users.sql 应包含 UPDATE 回滚");
+    let rollback_sql =
+        std::fs::read_to_string(format!("{}/out/rollback/sql/dml/users.sql", dir)).unwrap();
+    assert!(
+        rollback_sql.contains("DELETE FROM"),
+        "rollback/sql/dml/users.sql 应包含 DELETE 回滚"
+    );
+    assert!(
+        rollback_sql.contains("UPDATE"),
+        "rollback/sql/dml/users.sql 应包含 UPDATE 回滚"
+    );
 
     let _ = std::fs::remove_dir_all(dir);
 }
@@ -2244,7 +2552,16 @@ fn test_inline_exemption() {
     ).unwrap();
 
     let output = Command::new(&binary_abs_path())
-        .args(["check", dir, "-c", &format!("{}/sqlguard.toml", dir), "-f", "json", "-o", dir])
+        .args([
+            "check",
+            dir,
+            "-c",
+            &format!("{}/sqlguard.toml", dir),
+            "-f",
+            "json",
+            "-o",
+            dir,
+        ])
         .output()
         .expect("Failed to run sqlguard check");
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -2260,7 +2577,10 @@ fn test_inline_exemption() {
     let report_text = std::fs::read_to_string(format!("{}/sqlguard-report.json", dir)).unwrap();
     let report: serde_json::Value = serde_json::from_str(&report_text).expect("JSON report");
     if let Some(violations) = report["violations"].as_array() {
-        let dml001_count = violations.iter().filter(|v| v["rule_id"].as_str() == Some("DML001")).count();
+        let dml001_count = violations
+            .iter()
+            .filter(|v| v["rule_id"].as_str() == Some("DML001"))
+            .count();
         assert_eq!(
             dml001_count, 1,
             "应只剩 1 个 DML001 violation（第 1 行未豁免），实际: {}",

@@ -16,10 +16,13 @@
 //! M1 阶段为骨架实现，M4 阶段补全 expected_schema.columns 推断、partitioned 回填、
 //! has_auto_increment_or_serial 等辅助逻辑。
 
-use crate::rule::engine::ast::StmtInfo;
 use super::dialect::AtomicStrategy;
 use super::generator::RollbackGenerator;
-use super::{BackupRollbackPair, SourceRef, SafetyClass, BackupStrategy, ExpectedSchema, extract_target_table_from_stmt};
+use super::{
+    extract_target_table_from_stmt, BackupRollbackPair, BackupStrategy, ExpectedSchema,
+    SafetyClass, SourceRef,
+};
+use crate::rule::engine::ast::StmtInfo;
 
 /// 对需要原表定义的 DDL 语句统一采用 CREATE TABLE LIKE 模式生成 backup/rollback。
 pub fn gen_with_full_backup(
@@ -56,7 +59,10 @@ pub fn gen_with_full_backup(
                 r.quote_ident(&table),
                 r.quote_ident(&bks_name)
             ),
-            SafetyClass { partial: true, ..Default::default() },
+            SafetyClass {
+                partial: true,
+                ..Default::default()
+            },
             vec![r.partial_like_warning()],
         )
     } else {
@@ -68,10 +74,9 @@ pub fn gen_with_full_backup(
                 r.render_atomic_rename_rollback(&table, &bks_name, &shadow_name),
                 false,
             ),
-            AtomicStrategy::Transactional => (
-                r.render_transactional_rollback(&table, &bks_name),
-                false,
-            ),
+            AtomicStrategy::Transactional => {
+                (r.render_transactional_rollback(&table, &bks_name), false)
+            }
             // ★ DROP TABLE 特例：原表已不存在，无法 RENAME，直接从 bks_ 重建
             // 非原子，CREATE 失败则原表无法恢复
             AtomicStrategy::RebuildFromBackup => (
@@ -145,19 +150,25 @@ pub fn gen_with_full_backup(
 ///   上下文，跨语句上下文 M4 不做），返回空 Vec，依赖 row_count + table_exists 校验
 fn extract_expected_columns(stmt: &StmtInfo) -> Vec<super::ExpectedColumn> {
     if let Some(ci) = &stmt.create_table {
-        return ci.columns.iter().map(|c| super::ExpectedColumn {
-            name: c.name.clone(),
-            data_type: c.data_type.clone(),
-        }).collect();
+        return ci
+            .columns
+            .iter()
+            .map(|c| super::ExpectedColumn {
+                name: c.name.clone(),
+                data_type: c.data_type.clone(),
+            })
+            .collect();
     }
     // ALTER TABLE：从 operations 提取被 DROP/MODIFY 的列名
     if let Some(alter) = &stmt.alter_table {
-        return alter.operations.iter()
+        return alter
+            .operations
+            .iter()
             .filter_map(|op| match op.operation_type.as_str() {
                 "DROP_COLUMN" | "ALTER_COLUMN" if !op.column_name.is_empty() => {
                     Some(super::ExpectedColumn {
                         name: op.column_name.clone(),
-                        data_type: String::new(),  // 旧类型静态不可知
+                        data_type: String::new(), // 旧类型静态不可知
                     })
                 }
                 _ => None,
@@ -176,7 +187,10 @@ fn extract_expected_columns(stmt: &StmtInfo) -> Vec<super::ExpectedColumn> {
 /// - 其余场景：返回 false，counter_unrestored 由发布平台运行期校验
 fn has_auto_increment_or_serial(stmt: &StmtInfo) -> bool {
     if let Some(ci) = &stmt.create_table {
-        return ci.columns.iter().any(|c| c.is_auto_increment || c.data_type.to_uppercase().contains("SERIAL"));
+        return ci
+            .columns
+            .iter()
+            .any(|c| c.is_auto_increment || c.data_type.to_uppercase().contains("SERIAL"));
     }
     if let Some(alter) = &stmt.alter_table {
         return alter.operations.iter().any(|op| {
@@ -194,17 +208,35 @@ fn has_auto_increment_or_serial(stmt: &StmtInfo) -> bool {
 mod tests {
     use super::*;
     use crate::config::{Config, RollbackConfig};
-    use crate::rule::engine::ast::{StmtInfo, DropInfo, TruncateInfo, AlterTableInfo, AlterOpInfo, CreateInfo, ColumnInfo};
-    use crate::rollback::{dialect::{MySqlRenderer, PostgreSqlRenderer}, RollbackGenerator};
+    use crate::rollback::{
+        dialect::{MySqlRenderer, PostgreSqlRenderer},
+        RollbackGenerator,
+    };
+    use crate::rule::engine::ast::{
+        AlterOpInfo, AlterTableInfo, ColumnInfo, CreateInfo, DropInfo, StmtInfo, TruncateInfo,
+    };
 
     fn make_drop_table_stmt() -> StmtInfo {
         StmtInfo {
             kind: "DROP_TABLE".to_string(),
-            line: 1, end_line: 1, column: 0,
+            line: 1,
+            end_line: 1,
+            column: 0,
             create_table: None,
-            drop_object: Some(DropInfo { object_type: "TABLE".to_string(), name: "users".to_string(), if_exists: false }),
-            select: None, insert: None, update: None, delete: None,
-            alter_table: None, truncate: None, create_view: None, create_index: None, transaction: None,
+            drop_object: Some(DropInfo {
+                object_type: "TABLE".to_string(),
+                name: "users".to_string(),
+                if_exists: false,
+            }),
+            select: None,
+            insert: None,
+            update: None,
+            delete: None,
+            alter_table: None,
+            truncate: None,
+            create_view: None,
+            create_index: None,
+            transaction: None,
         }
     }
 
@@ -212,25 +244,67 @@ mod tests {
     fn make_truncate_stmt() -> StmtInfo {
         StmtInfo {
             kind: "TRUNCATE".to_string(),
-            line: 1, end_line: 1, column: 0,
-            create_table: None, drop_object: None, select: None, insert: None, update: None, delete: None,
+            line: 1,
+            end_line: 1,
+            column: 0,
+            create_table: None,
+            drop_object: None,
+            select: None,
+            insert: None,
+            update: None,
+            delete: None,
             alter_table: None,
-            truncate: Some(TruncateInfo { table_name: "logs".to_string(), has_table_keyword: true }),
-            create_view: None, create_index: None, transaction: None,
+            truncate: Some(TruncateInfo {
+                table_name: "logs".to_string(),
+                has_table_keyword: true,
+            }),
+            create_view: None,
+            create_index: None,
+            transaction: None,
         }
     }
 
     fn make_cfg() -> Config {
-        Config { structure: crate::config::StructureConfig { paths: vec![], strict: false, allow_extra: vec![] }, classification: crate::config::ClassificationConfig { rules: vec![], default_type: "other".to_string() }, rules: vec![], rules_file: None, rules_dir: std::path::PathBuf::new(), output: crate::config::OutputConfig::default(), mapper: crate::config::MapperConfig::default(), scan: crate::config::ScanConfig::default(), file_check: crate::config::FileCheckConfig::default(), rollback: RollbackConfig::default(), cache: crate::config::CacheConfig::default(), dialect: crate::config::CheckDialect::default(), dialect_fallback: None }
+        Config {
+            structure: crate::config::StructureConfig {
+                paths: vec![],
+                strict: false,
+                allow_extra: vec![],
+            },
+            classification: crate::config::ClassificationConfig {
+                rules: vec![],
+                default_type: "other".to_string(),
+            },
+            rules: vec![],
+            rules_file: None,
+            rules_dir: std::path::PathBuf::new(),
+            output: crate::config::OutputConfig::default(),
+            mapper: crate::config::MapperConfig::default(),
+            scan: crate::config::ScanConfig::default(),
+            file_check: crate::config::FileCheckConfig::default(),
+            rollback: RollbackConfig::default(),
+            cache: crate::config::CacheConfig::default(),
+            dialect: crate::config::CheckDialect::default(),
+            dialect_fallback: None,
+        }
     }
 
     fn make_alter_drop_column_stmt() -> StmtInfo {
         StmtInfo {
             kind: "ALTER_TABLE".to_string(),
-            line: 1, end_line: 1, column: 0,
-            create_table: None, drop_object: None, select: None, insert: None,
-            update: None, delete: None, truncate: None, create_view: None,
-            create_index: None, transaction: None,
+            line: 1,
+            end_line: 1,
+            column: 0,
+            create_table: None,
+            drop_object: None,
+            select: None,
+            insert: None,
+            update: None,
+            delete: None,
+            truncate: None,
+            create_view: None,
+            create_index: None,
+            transaction: None,
             alter_table: Some(AlterTableInfo {
                 table_name: "users".to_string(),
                 operations: vec![AlterOpInfo {
@@ -250,7 +324,9 @@ mod tests {
     fn make_create_table_with_auto_increment_stmt() -> StmtInfo {
         StmtInfo {
             kind: "CREATE_TABLE".to_string(),
-            line: 1, end_line: 1, column: 0,
+            line: 1,
+            end_line: 1,
+            column: 0,
             create_table: Some(CreateInfo {
                 table_name: "users".to_string(),
                 columns: vec![ColumnInfo {
@@ -261,18 +337,35 @@ mod tests {
                 }],
                 ..Default::default()
             }),
-            drop_object: None, select: None, insert: None, update: None, delete: None,
-            alter_table: None, truncate: None, create_view: None, create_index: None, transaction: None,
+            drop_object: None,
+            select: None,
+            insert: None,
+            update: None,
+            delete: None,
+            alter_table: None,
+            truncate: None,
+            create_view: None,
+            create_index: None,
+            transaction: None,
         }
     }
 
     fn make_alter_add_auto_increment_column_stmt() -> StmtInfo {
         StmtInfo {
             kind: "ALTER_TABLE".to_string(),
-            line: 1, end_line: 1, column: 0,
-            create_table: None, drop_object: None, select: None, insert: None,
-            update: None, delete: None, truncate: None, create_view: None,
-            create_index: None, transaction: None,
+            line: 1,
+            end_line: 1,
+            column: 0,
+            create_table: None,
+            drop_object: None,
+            select: None,
+            insert: None,
+            update: None,
+            delete: None,
+            truncate: None,
+            create_view: None,
+            create_index: None,
+            transaction: None,
             alter_table: Some(AlterTableInfo {
                 table_name: "users".to_string(),
                 operations: vec![AlterOpInfo {
@@ -295,7 +388,13 @@ mod tests {
         let rc = RollbackConfig::default();
         let mut gen = RollbackGenerator::new(&cfg, &rc, &MySqlRenderer);
         let stmt = make_drop_table_stmt();
-        let pair = gen_with_full_backup(&stmt, 1, SourceRef::placeholder(), "DROP TABLE users", &mut gen);
+        let pair = gen_with_full_backup(
+            &stmt,
+            1,
+            SourceRef::placeholder(),
+            "DROP TABLE users",
+            &mut gen,
+        );
         assert!(pair.backup.is_some());
         assert!(pair.rollback.is_some());
         assert!(pair.safety.partial);
@@ -315,7 +414,13 @@ mod tests {
         let rc = RollbackConfig::default();
         let mut gen = RollbackGenerator::new(&cfg, &rc, &PostgreSqlRenderer);
         let stmt = make_drop_table_stmt();
-        let pair = gen_with_full_backup(&stmt, 1, SourceRef::placeholder(), "DROP TABLE users", &mut gen);
+        let pair = gen_with_full_backup(
+            &stmt,
+            1,
+            SourceRef::placeholder(),
+            "DROP TABLE users",
+            &mut gen,
+        );
         let rollback = pair.rollback.unwrap();
         assert!(rollback.contains("CREATE TABLE \"users\" (LIKE \"bks_users_"));
         assert!(rollback.contains("INSERT INTO \"users\" SELECT * FROM \"bks_users_"));
@@ -331,12 +436,23 @@ mod tests {
             let rc = RollbackConfig::default();
             let mut gen = RollbackGenerator::new(&cfg, &rc, &MySqlRenderer);
             let stmt = make_alter_drop_column_stmt();
-            gen_with_full_backup(&stmt, 1, SourceRef::placeholder(), "ALTER TABLE users DROP COLUMN age", &mut gen)
+            gen_with_full_backup(
+                &stmt,
+                1,
+                SourceRef::placeholder(),
+                "ALTER TABLE users DROP COLUMN age",
+                &mut gen,
+            )
         };
-        let schema = pair.expected_schema.expect("expected_schema should be Some");
+        let schema = pair
+            .expected_schema
+            .expect("expected_schema should be Some");
         assert_eq!(schema.columns.len(), 1);
         assert_eq!(schema.columns[0].name, "age");
-        assert!(schema.columns[0].data_type.is_empty(), "data_type should be empty (旧类型静态不可知)");
+        assert!(
+            schema.columns[0].data_type.is_empty(),
+            "data_type should be empty (旧类型静态不可知)"
+        );
     }
 
     #[test]
@@ -347,11 +463,22 @@ mod tests {
             let rc = RollbackConfig::default();
             let mut gen = RollbackGenerator::new(&cfg, &rc, &MySqlRenderer);
             let stmt = make_create_table_with_auto_increment_stmt();
-            gen_with_full_backup(&stmt, 1, SourceRef::placeholder(), "CREATE TABLE users (id BIGINT AUTO_INCREMENT, ...)", &mut gen)
+            gen_with_full_backup(
+                &stmt,
+                1,
+                SourceRef::placeholder(),
+                "CREATE TABLE users (id BIGINT AUTO_INCREMENT, ...)",
+                &mut gen,
+            )
         };
-        assert!(pair.safety.counter_unrestored, "AUTO_INCREMENT 列应触发 counter_unrestored");
+        assert!(
+            pair.safety.counter_unrestored,
+            "AUTO_INCREMENT 列应触发 counter_unrestored"
+        );
         // CREATE TABLE 上下文也应填入 expected_schema.columns
-        let schema = pair.expected_schema.expect("expected_schema should be Some");
+        let schema = pair
+            .expected_schema
+            .expect("expected_schema should be Some");
         assert_eq!(schema.columns.len(), 1);
         assert_eq!(schema.columns[0].name, "id");
         assert_eq!(schema.columns[0].data_type, "BIGINT");
@@ -366,9 +493,18 @@ mod tests {
             let rc = RollbackConfig::default();
             let mut gen = RollbackGenerator::new(&cfg, &rc, &MySqlRenderer);
             let stmt = make_alter_add_auto_increment_column_stmt();
-            gen_with_full_backup(&stmt, 1, SourceRef::placeholder(), "ALTER TABLE users ADD COLUMN seq INT AUTO_INCREMENT", &mut gen)
+            gen_with_full_backup(
+                &stmt,
+                1,
+                SourceRef::placeholder(),
+                "ALTER TABLE users ADD COLUMN seq INT AUTO_INCREMENT",
+                &mut gen,
+            )
         };
-        assert!(pair.safety.counter_unrestored, "ALTER ADD COLUMN AUTO_INCREMENT 应触发 counter_unrestored");
+        assert!(
+            pair.safety.counter_unrestored,
+            "ALTER ADD COLUMN AUTO_INCREMENT 应触发 counter_unrestored"
+        );
     }
 
     #[test]
@@ -379,9 +515,17 @@ mod tests {
             let rc = RollbackConfig::default();
             let mut gen = RollbackGenerator::new(&cfg, &rc, &MySqlRenderer);
             let stmt = make_drop_table_stmt();
-            gen_with_full_backup(&stmt, 1, SourceRef::placeholder(), "DROP TABLE users", &mut gen)
+            gen_with_full_backup(
+                &stmt,
+                1,
+                SourceRef::placeholder(),
+                "DROP TABLE users",
+                &mut gen,
+            )
         };
-        let schema = pair.expected_schema.expect("expected_schema should be Some");
+        let schema = pair
+            .expected_schema
+            .expect("expected_schema should be Some");
         assert!(schema.table_exists);
         assert!(schema.columns.is_empty(), "DROP TABLE 静态不可知列定义");
     }
@@ -394,10 +538,18 @@ mod tests {
             let rc = RollbackConfig::default();
             let mut gen = RollbackGenerator::new(&cfg, &rc, &MySqlRenderer);
             let stmt = make_alter_drop_column_stmt();
-            gen_with_full_backup(&stmt, 1, SourceRef::placeholder(), "ALTER TABLE users DROP COLUMN age", &mut gen)
+            gen_with_full_backup(
+                &stmt,
+                1,
+                SourceRef::placeholder(),
+                "ALTER TABLE users DROP COLUMN age",
+                &mut gen,
+            )
         };
-        assert!(pair.warnings.iter().any(|w| w.contains("partition check")),
-            "应有 partition check warning");
+        assert!(
+            pair.warnings.iter().any(|w| w.contains("partition check")),
+            "应有 partition check warning"
+        );
         // safety.partitioned 静态不可知，保持 false（运行期由 partition_check SELECT 判断）
         assert!(!pair.safety.partitioned);
     }

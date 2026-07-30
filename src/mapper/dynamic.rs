@@ -44,7 +44,10 @@ pub enum DynNode {
     /// 纯文本（含占位符原文）。
     Text(String),
     /// `<if test="...">...</if>`
-    If { test: String, children: Vec<DynNode> },
+    If {
+        test: String,
+        children: Vec<DynNode>,
+    },
     /// `<choose><when>...</when>...<otherwise>...</otherwise></choose>`
     Choose {
         when_clauses: Vec<(String, Vec<DynNode>)>,
@@ -86,7 +89,9 @@ pub struct Variant {
 ///
 /// 与 [`crate::mapper::parser::extract_sql_from_xml`] 的区别：保留动态标签结构，
 /// 不剥离；`<include>` 在解析阶段内联展开（同文件内，按 refid 完整匹配）。
-pub fn parse_dynamic_statements(xml_path: &std::path::Path) -> Result<Vec<DynamicStatement>, SqlGuardError> {
+pub fn parse_dynamic_statements(
+    xml_path: &std::path::Path,
+) -> Result<Vec<DynamicStatement>, SqlGuardError> {
     let content = std::fs::read_to_string(xml_path).map_err(|e| {
         SqlGuardError::MapperError(format!(
             "Failed to read mapper XML '{}': {}",
@@ -115,7 +120,10 @@ pub fn expand_variants(stmt: &DynamicStatement, max_independent_ifs: usize) -> V
 
     let mut all = Vec::new();
     if matches!(policy, Policy::Full) {
-        let mut ctx = ExpansionCtx { policy, if_counter: 0 };
+        let mut ctx = ExpansionCtx {
+            policy,
+            if_counter: 0,
+        };
         all.extend(expand_seq(&stmt.root_nodes, &mut ctx));
     } else {
         // 单分支激活：基线（全 false）+ 每个 if 单独 true
@@ -166,7 +174,10 @@ fn count_independent_ifs(nodes: &[DynNode]) -> usize {
                 n += 1;
                 n += count_independent_ifs(children);
             }
-            DynNode::Choose { when_clauses, otherwise } => {
+            DynNode::Choose {
+                when_clauses,
+                otherwise,
+            } => {
                 for (_, ch) in when_clauses {
                     n += count_independent_ifs(ch);
                 }
@@ -186,7 +197,10 @@ fn count_independent_ifs(nodes: &[DynNode]) -> usize {
 
 /// 展开节点序列为变体列表（笛卡尔积）。
 fn expand_seq(nodes: &[DynNode], ctx: &mut ExpansionCtx) -> Vec<Variant> {
-    let mut acc = vec![Variant { sql: String::new(), label: String::new() }];
+    let mut acc = vec![Variant {
+        sql: String::new(),
+        label: String::new(),
+    }];
     for node in nodes {
         let node_variants = expand_node(node, ctx);
         let mut next = Vec::with_capacity(acc.len() * node_variants.len().max(1));
@@ -209,8 +223,14 @@ fn expand_seq(nodes: &[DynNode], ctx: &mut ExpansionCtx) -> Vec<Variant> {
 
 fn expand_node(node: &DynNode, ctx: &mut ExpansionCtx) -> Vec<Variant> {
     match node {
-        DynNode::Text(s) => vec![Variant { sql: s.clone(), label: String::new() }],
-        DynNode::Bind => vec![Variant { sql: String::new(), label: String::new() }],
+        DynNode::Text(s) => vec![Variant {
+            sql: s.clone(),
+            label: String::new(),
+        }],
+        DynNode::Bind => vec![Variant {
+            sql: String::new(),
+            label: String::new(),
+        }],
 
         DynNode::If { test, children } => {
             let this_index = ctx.if_counter;
@@ -263,7 +283,10 @@ fn expand_node(node: &DynNode, ctx: &mut ExpansionCtx) -> Vec<Variant> {
             }
         }
 
-        DynNode::Choose { when_clauses, otherwise } => {
+        DynNode::Choose {
+            when_clauses,
+            otherwise,
+        } => {
             let mut out = Vec::new();
             for (i, (test, children)) in when_clauses.iter().enumerate() {
                 let test_label = sanitize_test(test);
@@ -291,7 +314,12 @@ fn expand_node(node: &DynNode, ctx: &mut ExpansionCtx) -> Vec<Variant> {
             out
         }
 
-        DynNode::ForEach { open, close, separator, children } => {
+        DynNode::ForEach {
+            open,
+            close,
+            separator,
+            children,
+        } => {
             let inner_variants = expand_seq(children, ctx);
             vec![
                 for_each_variant(open, close, separator, &inner_variants, 0, "foreach:0elem"),
@@ -302,26 +330,42 @@ fn expand_node(node: &DynNode, ctx: &mut ExpansionCtx) -> Vec<Variant> {
 
         DynNode::Where(children) => {
             let inner = expand_seq(children, ctx);
-            inner.into_iter().map(|mut v| {
-                v.sql = process_where(&v.sql);
-                v
-            }).collect()
+            inner
+                .into_iter()
+                .map(|mut v| {
+                    v.sql = process_where(&v.sql);
+                    v
+                })
+                .collect()
         }
 
         DynNode::Set(children) => {
             let inner = expand_seq(children, ctx);
-            inner.into_iter().map(|mut v| {
-                v.sql = process_set(&v.sql);
-                v
-            }).collect()
+            inner
+                .into_iter()
+                .map(|mut v| {
+                    v.sql = process_set(&v.sql);
+                    v
+                })
+                .collect()
         }
 
-        DynNode::Trim { prefix, suffix, prefix_overrides, suffix_overrides, children } => {
+        DynNode::Trim {
+            prefix,
+            suffix,
+            prefix_overrides,
+            suffix_overrides,
+            children,
+        } => {
             let inner = expand_seq(children, ctx);
-            inner.into_iter().map(|mut v| {
-                v.sql = process_trim(&v.sql, prefix, suffix, prefix_overrides, suffix_overrides);
-                v
-            }).collect()
+            inner
+                .into_iter()
+                .map(|mut v| {
+                    v.sql =
+                        process_trim(&v.sql, prefix, suffix, prefix_overrides, suffix_overrides);
+                    v
+                })
+                .collect()
         }
     }
 }
@@ -395,7 +439,10 @@ fn process_trim(
             let ov = ov.trim();
             if !ov.is_empty() {
                 let stripped = s.trim_start();
-                if stripped.to_ascii_uppercase().starts_with(&ov.to_ascii_uppercase()) {
+                if stripped
+                    .to_ascii_uppercase()
+                    .starts_with(&ov.to_ascii_uppercase())
+                {
                     s = stripped[ov.len()..].to_string();
                     break;
                 }
@@ -407,7 +454,10 @@ fn process_trim(
             let ov = ov.trim();
             if !ov.is_empty() {
                 let trimmed = s.trim_end();
-                if trimmed.to_ascii_uppercase().ends_with(&ov.to_ascii_uppercase()) {
+                if trimmed
+                    .to_ascii_uppercase()
+                    .ends_with(&ov.to_ascii_uppercase())
+                {
                     s = trimmed[..trimmed.len() - ov.len()].to_string();
                     break;
                 }
@@ -459,7 +509,9 @@ fn sanitize_test(test: &str) -> String {
 // ==================== XML 解析（保留结构）====================
 
 /// 第一遍：收集 `<sql id="...">` 片段为 DynNode 树。
-fn collect_sql_fragments_dynamic(content: &str) -> Result<HashMap<String, Vec<DynNode>>, SqlGuardError> {
+fn collect_sql_fragments_dynamic(
+    content: &str,
+) -> Result<HashMap<String, Vec<DynNode>>, SqlGuardError> {
     let mut scanner = XmlScanner::new(content);
     let mut fragments = HashMap::new();
 
@@ -495,7 +547,10 @@ fn parse_statements_dynamic(
                 let mut nodes = scanner.collect_nodes_until_end(&name)?;
                 // 内联展开 <include>（递归同文件内片段）
                 nodes = inline_includes(nodes, fragments)?;
-                if !nodes.iter().any(|n| matches!(n, DynNode::Text(t) if !t.trim().is_empty())) {
+                if !nodes
+                    .iter()
+                    .any(|n| matches!(n, DynNode::Text(t) if !t.trim().is_empty()))
+                {
                     continue;
                 }
                 results.push(DynamicStatement {
@@ -537,7 +592,10 @@ fn inline_includes(
                     children: inline_includes(children, fragments)?,
                 });
             }
-            DynNode::Choose { when_clauses, otherwise } => {
+            DynNode::Choose {
+                when_clauses,
+                otherwise,
+            } => {
                 let mut new_when = Vec::with_capacity(when_clauses.len());
                 for (test, ch) in when_clauses {
                     new_when.push((test, inline_includes(ch, fragments)?));
@@ -546,11 +604,21 @@ fn inline_includes(
                     Some(ch) => Some(inline_includes(ch, fragments)?),
                     None => None,
                 };
-                out.push(DynNode::Choose { when_clauses: new_when, otherwise: new_oth });
+                out.push(DynNode::Choose {
+                    when_clauses: new_when,
+                    otherwise: new_oth,
+                });
             }
-            DynNode::ForEach { open, close, separator, children } => {
+            DynNode::ForEach {
+                open,
+                close,
+                separator,
+                children,
+            } => {
                 out.push(DynNode::ForEach {
-                    open, close, separator,
+                    open,
+                    close,
+                    separator,
                     children: inline_includes(children, fragments)?,
                 });
             }
@@ -560,9 +628,18 @@ fn inline_includes(
             DynNode::Set(ch) => {
                 out.push(DynNode::Set(inline_includes(ch, fragments)?));
             }
-            DynNode::Trim { prefix, suffix, prefix_overrides, suffix_overrides, children } => {
+            DynNode::Trim {
+                prefix,
+                suffix,
+                prefix_overrides,
+                suffix_overrides,
+                children,
+            } => {
                 out.push(DynNode::Trim {
-                    prefix, suffix, prefix_overrides, suffix_overrides,
+                    prefix,
+                    suffix,
+                    prefix_overrides,
+                    suffix_overrides,
                     children: inline_includes(children, fragments)?,
                 });
             }
@@ -586,7 +663,10 @@ fn expand_include_in_text(
     let mut buf = String::new();
     let mut i = 0;
     while i < chars.len() {
-        if chars[i] == '<' && i + 7 < chars.len() && chars[i + 1..i + 8].iter().collect::<String>() == "include" {
+        if chars[i] == '<'
+            && i + 7 < chars.len()
+            && chars[i + 1..i + 8].iter().collect::<String>() == "include"
+        {
             // 找到标签结束 >
             let mut j = i + 7;
             while j < chars.len() && chars[j] != '>' {
@@ -629,7 +709,9 @@ fn extract_refid_from_tag(tag: &str) -> Option<String> {
     let idx = tag.find(key)?;
     let mut j = idx + key.len();
     let bytes = tag.as_bytes();
-    while j < bytes.len() && (bytes[j] == b' ' || bytes[j] == b'\t' || bytes[j] == b'\n' || bytes[j] == b'=') {
+    while j < bytes.len()
+        && (bytes[j] == b' ' || bytes[j] == b'\t' || bytes[j] == b'\n' || bytes[j] == b'=')
+    {
         j += 1;
     }
     if j >= bytes.len() {
@@ -666,7 +748,9 @@ impl<'a> XmlScanner<'a> {
         }
     }
 
-    fn next_event(&mut self) -> Option<Result<(quick_xml::events::Event<'static>, usize), SqlGuardError>> {
+    fn next_event(
+        &mut self,
+    ) -> Option<Result<(quick_xml::events::Event<'static>, usize), SqlGuardError>> {
         let line_before = self.current_line;
         let event = self.reader.read_event_into(&mut self.buf);
         let cur_pos = self.reader.buffer_position().min(self.content.len());
@@ -701,9 +785,9 @@ impl<'a> XmlScanner<'a> {
             let (event, _line) = result?;
             match event {
                 Event::Text(t) => {
-                    let unescaped = t
-                        .unescape()
-                        .map_err(|e| SqlGuardError::MapperError(format!("XML text unescape error: {}", e)))?;
+                    let unescaped = t.unescape().map_err(|e| {
+                        SqlGuardError::MapperError(format!("XML text unescape error: {}", e))
+                    })?;
                     text_buf.push_str(&unescaped);
                 }
                 Event::Empty(e) => {
@@ -778,7 +862,8 @@ impl<'a> XmlScanner<'a> {
                             let n = lowercased_name(&e);
                             match n.as_str() {
                                 "when" => {
-                                    let test = extract_attr(e.attributes(), "test")?.unwrap_or_default();
+                                    let test =
+                                        extract_attr(e.attributes(), "test")?.unwrap_or_default();
                                     let ch = self.collect_nodes_until_end("when")?;
                                     when_clauses.push((test, ch));
                                 }
@@ -803,10 +888,14 @@ impl<'a> XmlScanner<'a> {
                         _ => {}
                     }
                 }
-                Ok(DynNode::Choose { when_clauses, otherwise })
+                Ok(DynNode::Choose {
+                    when_clauses,
+                    otherwise,
+                })
             }
             "foreach" => {
-                let collection = extract_attr(start.attributes(), "collection")?.unwrap_or_default();
+                let collection =
+                    extract_attr(start.attributes(), "collection")?.unwrap_or_default();
                 let item = extract_attr(start.attributes(), "item")?.unwrap_or_default();
                 let index = extract_attr(start.attributes(), "index")?.unwrap_or_default();
                 let open = extract_attr(start.attributes(), "open")?.unwrap_or_default();
@@ -815,7 +904,12 @@ impl<'a> XmlScanner<'a> {
                 let children = self.collect_nodes_until_end("foreach")?;
                 // children 中的 #{item} 占位符在文本里，foreach 变体展开时按 count 复制
                 let _ = (collection, item, index); // 暂未使用，保留以备将来按 collection 名生成 fixture 提示
-                Ok(DynNode::ForEach { open, close, separator, children })
+                Ok(DynNode::ForEach {
+                    open,
+                    close,
+                    separator,
+                    children,
+                })
             }
             "where" => {
                 let children = self.collect_nodes_until_end("where")?;
@@ -828,10 +922,18 @@ impl<'a> XmlScanner<'a> {
             "trim" => {
                 let prefix = extract_attr(start.attributes(), "prefix")?.unwrap_or_default();
                 let suffix = extract_attr(start.attributes(), "suffix")?.unwrap_or_default();
-                let prefix_overrides = extract_attr(start.attributes(), "prefixOverrides")?.unwrap_or_default();
-                let suffix_overrides = extract_attr(start.attributes(), "suffixOverrides")?.unwrap_or_default();
+                let prefix_overrides =
+                    extract_attr(start.attributes(), "prefixOverrides")?.unwrap_or_default();
+                let suffix_overrides =
+                    extract_attr(start.attributes(), "suffixOverrides")?.unwrap_or_default();
                 let children = self.collect_nodes_until_end("trim")?;
-                Ok(DynNode::Trim { prefix, suffix, prefix_overrides, suffix_overrides, children })
+                Ok(DynNode::Trim {
+                    prefix,
+                    suffix,
+                    prefix_overrides,
+                    suffix_overrides,
+                    children,
+                })
             }
             _ => {
                 // 未知动态标签：当作透明容器，收集至匹配 End
@@ -861,13 +963,12 @@ fn extract_attr(
     key: &str,
 ) -> Result<Option<String>, SqlGuardError> {
     for attr in attrs {
-        let attr = attr.map_err(|e| {
-            SqlGuardError::MapperError(format!("XML attribute parse error: {}", e))
-        })?;
+        let attr = attr
+            .map_err(|e| SqlGuardError::MapperError(format!("XML attribute parse error: {}", e)))?;
         if attr.key.as_ref().eq_ignore_ascii_case(key.as_bytes()) {
-            let v = attr
-                .unescape_value()
-                .map_err(|e| SqlGuardError::MapperError(format!("XML attribute unescape error: {}", e)))?;
+            let v = attr.unescape_value().map_err(|e| {
+                SqlGuardError::MapperError(format!("XML attribute unescape error: {}", e))
+            })?;
             return Ok(Some(v.into_owned()));
         }
     }
@@ -909,15 +1010,36 @@ mod tests {
         assert_eq!(stmts.len(), 1);
         let vs = expand_variants(&stmts[0], DEFAULT_MAX_INDEPENDENT_IFS);
         // 1 个 if → 2 变体（true / false）
-        assert_eq!(vs.len(), 2, "should have 2 variants: {:?}", variant_tuples(&vs));
+        assert_eq!(
+            vs.len(),
+            2,
+            "should have 2 variants: {:?}",
+            variant_tuples(&vs)
+        );
         // true 变体含 WHERE name = ?
         let true_v = vs.iter().find(|v| v.label.contains("=true")).unwrap();
-        assert!(true_v.sql.contains("WHERE"), "true variant sql: {}", true_v.sql);
-        assert!(true_v.sql.contains("name = ?"), "true variant sql: {}", true_v.sql);
-        assert!(!true_v.sql.contains("AND name"), "leading AND should be stripped: {}", true_v.sql);
+        assert!(
+            true_v.sql.contains("WHERE"),
+            "true variant sql: {}",
+            true_v.sql
+        );
+        assert!(
+            true_v.sql.contains("name = ?"),
+            "true variant sql: {}",
+            true_v.sql
+        );
+        assert!(
+            !true_v.sql.contains("AND name"),
+            "leading AND should be stripped: {}",
+            true_v.sql
+        );
         // false 变体不含 WHERE（where 内部为空）
         let false_v = vs.iter().find(|v| v.label.contains("=false")).unwrap();
-        assert!(!false_v.sql.contains("WHERE"), "false variant sql: {}", false_v.sql);
+        assert!(
+            !false_v.sql.contains("WHERE"),
+            "false variant sql: {}",
+            false_v.sql
+        );
     }
 
     #[test]
@@ -934,7 +1056,12 @@ mod tests {
         let path = write_tmp("two_ifs", xml);
         let stmts = parse_dynamic_statements(&path).unwrap();
         let vs = expand_variants(&stmts[0], DEFAULT_MAX_INDEPENDENT_IFS);
-        assert_eq!(vs.len(), 4, "2 ifs → 4 variants, got: {:?}", variant_tuples(&vs));
+        assert_eq!(
+            vs.len(),
+            4,
+            "2 ifs → 4 variants, got: {:?}",
+            variant_tuples(&vs)
+        );
     }
 
     #[test]
@@ -952,10 +1079,21 @@ mod tests {
         let path = write_tmp("choose", xml);
         let stmts = parse_dynamic_statements(&path).unwrap();
         let vs = expand_variants(&stmts[0], DEFAULT_MAX_INDEPENDENT_IFS);
-        assert_eq!(vs.len(), 3, "2 when + 1 otherwise → 3 variants: {:?}", variant_tuples(&vs));
-        assert!(vs.iter().any(|v| v.label.contains("when0") && v.sql.contains("id = ?")));
-        assert!(vs.iter().any(|v| v.label.contains("when1") && v.sql.contains("name = ?")));
-        assert!(vs.iter().any(|v| v.label.contains("otherwise") && v.sql.contains("1 = 1")));
+        assert_eq!(
+            vs.len(),
+            3,
+            "2 when + 1 otherwise → 3 variants: {:?}",
+            variant_tuples(&vs)
+        );
+        assert!(vs
+            .iter()
+            .any(|v| v.label.contains("when0") && v.sql.contains("id = ?")));
+        assert!(vs
+            .iter()
+            .any(|v| v.label.contains("when1") && v.sql.contains("name = ?")));
+        assert!(vs
+            .iter()
+            .any(|v| v.label.contains("otherwise") && v.sql.contains("1 = 1")));
     }
 
     #[test]
@@ -971,15 +1109,27 @@ mod tests {
         let path = write_tmp("foreach", xml);
         let stmts = parse_dynamic_statements(&path).unwrap();
         let vs = expand_variants(&stmts[0], DEFAULT_MAX_INDEPENDENT_IFS);
-        assert_eq!(vs.len(), 3, "foreach → 3 size variants: {:?}", variant_tuples(&vs));
+        assert_eq!(
+            vs.len(),
+            3,
+            "foreach → 3 size variants: {:?}",
+            variant_tuples(&vs)
+        );
         // 0 元素：IN 后为空
         let zero = vs.iter().find(|v| v.label.contains("0elem")).unwrap();
-        assert!(!zero.sql.contains("()"), "0 elem should not produce (): {}", zero.sql);
+        assert!(
+            !zero.sql.contains("()"),
+            "0 elem should not produce (): {}",
+            zero.sql
+        );
         // 1 元素：含 ( 和 ? 和 )
         let one = vs.iter().find(|v| v.label.contains("1elem")).unwrap();
         let one_trim = one.sql.trim();
-        assert!(one_trim.contains("(") && one_trim.contains("?") && one_trim.contains(")"),
-            "1 elem should contain ( ? ): [{}]", one_trim);
+        assert!(
+            one_trim.contains("(") && one_trim.contains("?") && one_trim.contains(")"),
+            "1 elem should contain ( ? ): [{}]",
+            one_trim
+        );
         // 3 元素：含 3 个 ?
         let three = vs.iter().find(|v| v.label.contains("3elem")).unwrap();
         let q_count = three.sql.matches('?').count();
@@ -1004,11 +1154,20 @@ mod tests {
         // 2 ifs → 4 variants
         assert_eq!(vs.len(), 4);
         // 找一个 name!=null=true, age!=null=false 的变体
-        let name_only = vs.iter()
+        let name_only = vs
+            .iter()
             .find(|v| v.label.contains("name!=null=true") && v.label.contains("age!=null=false"))
             .expect("should find name=true,age=false variant");
-        assert!(name_only.sql.contains("SET name = ?"), "sql: {}", name_only.sql);
-        assert!(!name_only.sql.contains("name = ?,"), "trailing comma should be stripped: {}", name_only.sql);
+        assert!(
+            name_only.sql.contains("SET name = ?"),
+            "sql: {}",
+            name_only.sql
+        );
+        assert!(
+            !name_only.sql.contains("name = ?,"),
+            "trailing comma should be stripped: {}",
+            name_only.sql
+        );
     }
 
     #[test]
@@ -1016,23 +1175,38 @@ mod tests {
         // 10 个 if > 阈值 8 → 降级为单分支激活：基线 + 10 个 = 11 变体
         let mut ifs = String::new();
         for i in 0..10 {
-            ifs.push_str(&format!("<if test=\"c{} != null\">AND c{} = #{{c{}}}</if>\n", i, i, i));
+            ifs.push_str(&format!(
+                "<if test=\"c{} != null\">AND c{} = #{{c{}}}</if>\n",
+                i, i, i
+            ));
         }
-        let xml = format!(r#"<mapper>
+        let xml = format!(
+            r#"<mapper>
   <select id="find">
     SELECT * FROM users
     <where>
       {}
     </where>
   </select>
-</mapper>"#, ifs);
+</mapper>"#,
+            ifs
+        );
         let path = write_tmp("threshold", &xml);
         let stmts = parse_dynamic_statements(&path).unwrap();
         let vs = expand_variants(&stmts[0], 8);
-        assert_eq!(vs.len(), 11, "10 ifs with threshold 8 → 11 variants (baseline + 10): {:?}", variant_tuples(&vs));
+        assert_eq!(
+            vs.len(),
+            11,
+            "10 ifs with threshold 8 → 11 variants (baseline + 10): {:?}",
+            variant_tuples(&vs)
+        );
         // 基线变体：所有 if=false，无 WHERE
         let baseline = vs.iter().find(|v| !v.label.contains("=true")).unwrap();
-        assert!(!baseline.sql.contains("WHERE"), "baseline should have no WHERE: {}", baseline.sql);
+        assert!(
+            !baseline.sql.contains("WHERE"),
+            "baseline should have no WHERE: {}",
+            baseline.sql
+        );
     }
 
     #[test]
@@ -1046,7 +1220,11 @@ mod tests {
         let stmts = parse_dynamic_statements(&path).unwrap();
         let vs = expand_variants(&stmts[0], DEFAULT_MAX_INDEPENDENT_IFS);
         assert_eq!(vs.len(), 1);
-        assert!(vs[0].label.is_empty(), "no dynamic → empty label: {:?}", vs[0]);
+        assert!(
+            vs[0].label.is_empty(),
+            "no dynamic → empty label: {:?}",
+            vs[0]
+        );
         assert!(vs[0].sql.contains("SELECT"));
     }
 
@@ -1067,9 +1245,18 @@ mod tests {
         let stmts = parse_dynamic_statements(&path).unwrap();
         let vs = expand_variants(&stmts[0], DEFAULT_MAX_INDEPENDENT_IFS);
         // include 内联后含 1 个 if → 2 变体
-        assert_eq!(vs.len(), 2, "include with 1 if → 2 variants: {:?}", variant_tuples(&vs));
+        assert_eq!(
+            vs.len(),
+            2,
+            "include with 1 if → 2 variants: {:?}",
+            variant_tuples(&vs)
+        );
         let true_v = vs.iter().find(|v| v.label.contains("=true")).unwrap();
-        assert!(true_v.sql.contains("status = ?"), "include should be inlined: {}", true_v.sql);
+        assert!(
+            true_v.sql.contains("status = ?"),
+            "include should be inlined: {}",
+            true_v.sql
+        );
     }
 
     #[test]
@@ -1086,7 +1273,15 @@ mod tests {
         let stmts = parse_dynamic_statements(&path).unwrap();
         let vs = expand_variants(&stmts[0], DEFAULT_MAX_INDEPENDENT_IFS);
         let true_v = vs.iter().find(|v| v.label.contains("=true")).unwrap();
-        assert!(true_v.sql.contains("WHERE name = ?"), "trim should add WHERE and strip AND: {}", true_v.sql);
-        assert!(!true_v.sql.contains("WHERE AND"), "AND should be stripped: {}", true_v.sql);
+        assert!(
+            true_v.sql.contains("WHERE name = ?"),
+            "trim should add WHERE and strip AND: {}",
+            true_v.sql
+        );
+        assert!(
+            !true_v.sql.contains("WHERE AND"),
+            "AND should be stripped: {}",
+            true_v.sql
+        );
     }
 }

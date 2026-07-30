@@ -1,5 +1,5 @@
-use std::path::Path;
 use std::collections::HashSet;
+use std::path::Path;
 
 use crate::config::StructureConfig;
 use crate::error::DirectoryIssue;
@@ -50,7 +50,8 @@ pub fn check_directory_structure(
         for found in &found_all {
             if !required_set_owned.contains(found) {
                 let is_prefix_of_required = structure.paths.iter().any(|r| {
-                    r.starts_with(found) && (r.len() == found.len() || r.as_bytes().get(found.len()) == Some(&b'/'))
+                    r.starts_with(found)
+                        && (r.len() == found.len() || r.as_bytes().get(found.len()) == Some(&b'/'))
                 });
                 let should_skip = is_prefix_of_required
                     || allow_extra_set.contains(found)
@@ -114,7 +115,10 @@ fn collect_relative_paths(
 /// ★ D2：directory 模块对外格式化 API。当前 main.rs 用内部格式化逻辑，
 /// 此函数保留作为库 API 供外部调用方（如 IDE 插件）使用。
 #[allow(dead_code)]
-pub fn format_directory_issues(missing: &[DirectoryIssue], unexpected: &[DirectoryIssue]) -> String {
+pub fn format_directory_issues(
+    missing: &[DirectoryIssue],
+    unexpected: &[DirectoryIssue],
+) -> String {
     use colored::Colorize;
     let mut output = String::new();
 
@@ -133,4 +137,132 @@ pub fn format_directory_issues(missing: &[DirectoryIssue], unexpected: &[Directo
     }
 
     output
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+    use std::path::{Path, PathBuf};
+
+    use crate::config::StructureConfig;
+    use crate::error::{DirectoryIssue, DirectoryIssueType};
+
+    use super::{check_directory_structure, format_directory_issues};
+
+    fn make_structure(paths: Vec<&str>, strict: bool, allow_extra: Vec<&str>) -> StructureConfig {
+        StructureConfig {
+            paths: paths.iter().map(|s| s.to_string()).collect(),
+            strict,
+            allow_extra: allow_extra.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    // ===== check_directory_structure =====
+
+    #[test]
+    fn check_directory_structure_required_exists_no_missing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        fs::create_dir_all(root.join("sql")).expect("mkdir");
+
+        let structure = make_structure(vec!["sql"], false, vec![]);
+        let (missing, _unexpected) = check_directory_structure(root, &structure, &[]);
+        assert!(missing.is_empty());
+    }
+
+    #[test]
+    fn check_directory_structure_required_missing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+
+        let structure = make_structure(vec!["sql"], false, vec![]);
+        let (missing, _unexpected) = check_directory_structure(root, &structure, &[]);
+        assert_eq!(missing.len(), 1);
+        assert_eq!(missing[0].path, Path::new("sql"));
+        assert!(matches!(missing[0].issue_type, DirectoryIssueType::Missing));
+    }
+
+    #[test]
+    fn check_directory_structure_strict_reports_unexpected() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        fs::create_dir_all(root.join("sql")).expect("mkdir");
+        fs::create_dir_all(root.join("extra")).expect("mkdir");
+
+        let structure = make_structure(vec!["sql"], true, vec![]);
+        let (_missing, unexpected) = check_directory_structure(root, &structure, &[]);
+        assert_eq!(unexpected.len(), 1);
+        assert_eq!(unexpected[0].path, Path::new("extra"));
+        assert!(matches!(
+            unexpected[0].issue_type,
+            DirectoryIssueType::Unexpected
+        ));
+    }
+
+    #[test]
+    fn check_directory_structure_non_strict_no_unexpected() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        fs::create_dir_all(root.join("sql")).expect("mkdir");
+        fs::create_dir_all(root.join("extra")).expect("mkdir");
+
+        let structure = make_structure(vec!["sql"], false, vec![]);
+        let (_missing, unexpected) = check_directory_structure(root, &structure, &[]);
+        assert!(unexpected.is_empty());
+    }
+
+    #[test]
+    fn check_directory_structure_allow_extra_prefix_suppresses_unexpected() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        fs::create_dir_all(root.join("sql")).expect("mkdir");
+        fs::create_dir_all(root.join("migrations/sub")).expect("mkdir");
+
+        // allow_extra entry ending with '/' matches as a prefix → suppresses
+        // unexpected issues for "migrations" and everything beneath it
+        let structure = make_structure(vec!["sql"], true, vec!["migrations/"]);
+        let (_missing, unexpected) = check_directory_structure(root, &structure, &[]);
+        assert!(unexpected.is_empty());
+    }
+
+    #[test]
+    fn check_directory_structure_excludes_dirs_during_scan() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        fs::create_dir_all(root.join("sql")).expect("mkdir");
+        fs::create_dir_all(root.join("target/sub")).expect("mkdir");
+
+        let structure = make_structure(vec!["sql"], true, vec![]);
+        let (_missing, unexpected) =
+            check_directory_structure(root, &structure, &["target".to_string()]);
+        assert!(unexpected.is_empty());
+    }
+
+    // ===== format_directory_issues =====
+
+    #[test]
+    fn format_directory_issues_with_missing() {
+        let missing = vec![DirectoryIssue {
+            path: PathBuf::from("sql"),
+            issue_type: DirectoryIssueType::Missing,
+        }];
+        let output = format_directory_issues(&missing, &[]);
+        assert!(output.contains("Missing Required Paths"));
+    }
+
+    #[test]
+    fn format_directory_issues_with_unexpected() {
+        let unexpected = vec![DirectoryIssue {
+            path: PathBuf::from("extra"),
+            issue_type: DirectoryIssueType::Unexpected,
+        }];
+        let output = format_directory_issues(&[], &unexpected);
+        assert!(output.contains("Unexpected Paths"));
+    }
+
+    #[test]
+    fn format_directory_issues_empty() {
+        let output = format_directory_issues(&[], &[]);
+        assert!(output.is_empty());
+    }
 }

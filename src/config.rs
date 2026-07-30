@@ -1,6 +1,6 @@
 use serde::Deserialize;
-use std::path::{Path, PathBuf};
 use std::fs;
+use std::path::{Path, PathBuf};
 
 use crate::error::SqlGuardError;
 
@@ -403,10 +403,20 @@ fn default_line_ending_severity() -> String {
 
 impl Config {
     pub fn load(path: &Path) -> Result<Self, SqlGuardError> {
-        let content = fs::read_to_string(path)
-            .map_err(|e| SqlGuardError::ConfigError(format!("Failed to read config file '{}': {}", path.display(), e)))?;
-        let mut config: Config = toml::from_str(&content)
-            .map_err(|e| SqlGuardError::ConfigError(format!("Failed to parse config file '{}': {}", path.display(), e)))?;
+        let content = fs::read_to_string(path).map_err(|e| {
+            SqlGuardError::ConfigError(format!(
+                "Failed to read config file '{}': {}",
+                path.display(),
+                e
+            ))
+        })?;
+        let mut config: Config = toml::from_str(&content).map_err(|e| {
+            SqlGuardError::ConfigError(format!(
+                "Failed to parse config file '{}': {}",
+                path.display(),
+                e
+            ))
+        })?;
 
         let config_dir = path
             .parent()
@@ -425,19 +435,13 @@ impl Config {
             };
             let loaded = Self::load_rules_file(&rules_path)?;
             config.rules = loaded;
-            config.rules_dir = rules_path
-                .parent()
-                .unwrap_or(&config_dir)
-                .to_path_buf();
+            config.rules_dir = rules_path.parent().unwrap_or(&config_dir).to_path_buf();
         } else {
             let sibling = config_dir.join("sqlguard.rules.toml");
             if sibling.exists() {
                 let loaded = Self::load_rules_file(&sibling)?;
                 config.rules = loaded;
-                config.rules_dir = sibling
-                    .parent()
-                    .unwrap_or(&config_dir)
-                    .to_path_buf();
+                config.rules_dir = sibling.parent().unwrap_or(&config_dir).to_path_buf();
             }
             // 否则沿用内联 rules，rules_dir 保持空（回退到主配置目录）
         }
@@ -649,25 +653,61 @@ pub struct PrimaryKeyDecl {
     pub columns: Vec<String>,
 }
 
-fn default_dialect() -> String { "mysql".to_string() }
-fn default_backup_mode() -> String { "auto".to_string() }
-fn default_date_fmt() -> String { "%Y%m%d".to_string() }
-fn default_cleanup_file() -> String { "cleanup.sql".to_string() }
-fn default_assert_strategy() -> String { "abort".to_string() }
-fn default_partitioned_strategy() -> String { "abort".to_string() }
-fn default_lock_scope() -> String { "auto".to_string() }
-fn default_lock_timeout() -> u64 { 30 }
-fn default_long_tx_strategy() -> String { "abort".to_string() }
-fn default_long_tx_threshold() -> u64 { 5 }
-fn default_binlog_strategy() -> String { "auto".to_string() }
-fn default_retention_days() -> u64 { 7 }
-fn default_coalesce_mode() -> String { "conservative".to_string() }
-fn default_false() -> bool { false }
+fn default_dialect() -> String {
+    "mysql".to_string()
+}
+fn default_backup_mode() -> String {
+    "auto".to_string()
+}
+fn default_date_fmt() -> String {
+    "%Y%m%d".to_string()
+}
+fn default_cleanup_file() -> String {
+    "cleanup.sql".to_string()
+}
+fn default_assert_strategy() -> String {
+    "abort".to_string()
+}
+fn default_partitioned_strategy() -> String {
+    "abort".to_string()
+}
+fn default_lock_scope() -> String {
+    "auto".to_string()
+}
+fn default_lock_timeout() -> u64 {
+    30
+}
+fn default_long_tx_strategy() -> String {
+    "abort".to_string()
+}
+fn default_long_tx_threshold() -> u64 {
+    5
+}
+fn default_binlog_strategy() -> String {
+    "auto".to_string()
+}
+fn default_retention_days() -> u64 {
+    7
+}
+fn default_coalesce_mode() -> String {
+    "conservative".to_string()
+}
+fn default_false() -> bool {
+    false
+}
 
-fn default_backup_file() -> String { "backup.sql".to_string() }
-fn default_rollback_file() -> String { "rollback.sql".to_string() }
-fn default_manifest_file() -> String { "rollback-manifest.json".to_string() }
-fn default_bks_prefix() -> String { "bks_".to_string() }
+fn default_backup_file() -> String {
+    "backup.sql".to_string()
+}
+fn default_rollback_file() -> String {
+    "rollback.sql".to_string()
+}
+fn default_manifest_file() -> String {
+    "rollback-manifest.json".to_string()
+}
+fn default_bks_prefix() -> String {
+    "bks_".to_string()
+}
 
 #[cfg(test)]
 mod dialect_config_tests {
@@ -690,8 +730,16 @@ pattern = "*.sql"
 type = "sql"
 "#;
         let cfg: Config = toml::from_str(toml).expect("parse");
-        eprintln!("parsed dialect = {:?} (as_str={})", cfg.dialect, cfg.dialect.as_str());
-        assert_eq!(cfg.dialect, CheckDialect::PostgreSql, "config dialect should be PostgreSql");
+        eprintln!(
+            "parsed dialect = {:?} (as_str={})",
+            cfg.dialect,
+            cfg.dialect.as_str()
+        );
+        assert_eq!(
+            cfg.dialect,
+            CheckDialect::PostgreSql,
+            "config dialect should be PostgreSql"
+        );
     }
 
     #[test]
@@ -734,7 +782,11 @@ type = "sql"
         assert_eq!(cfg.dialect.as_str(), "gaussdb");
         // ★ 关键：GaussDB 默认回退 Oracle，PostgreSql 不再默认回退（污染消除）
         assert_eq!(cfg.dialect.default_fallback(), Some(CheckDialect::Oracle));
-        assert_eq!(CheckDialect::PostgreSql.default_fallback(), None, "PG must NOT default to Oracle anymore");
+        assert_eq!(
+            CheckDialect::PostgreSql.default_fallback(),
+            None,
+            "PG must NOT default to Oracle anymore"
+        );
     }
 
     #[test]

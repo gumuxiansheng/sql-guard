@@ -1,0 +1,42 @@
+# 测试固件：SqlGuard 配置
+[structure]
+paths = ["sql/ddl", "sql/dml"]
+strict = false
+
+[classification]
+default_type = "sql"
+
+[[classification.rules]]
+name = "ddl-by-dir"
+pattern = "**/ddl/**"
+type = "ddl"
+priority = 10
+
+[[classification.rules]]
+name = "dml-by-dir"
+pattern = "**/dml/**"
+type = "dml"
+priority = 10
+
+[[rules]]
+id = "DDL001"
+name = "no_drop_table"
+group = "ddl-safety"
+enabled = true
+script_path = "config/rules/ddl/no_drop_table.rhai"
+applies_to = ["ddl"]
+severity = "error"
+
+[[rules]]
+id = "DML001"
+name = "no_select_all"
+group = "dml-safety"
+enabled = true
+script_path = "config/rules/dml/no_select_all.rhai"
+applies_to = ["dml"]
+severity = "error"
+
+[mapper]
+enabled = true
+paths = ["mapper"]
+patterns = ["**/*Mapper.xml"]

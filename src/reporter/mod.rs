@@ -1,6 +1,6 @@
+pub mod html;
 pub mod json;
 pub mod plain;
-pub mod html;
 pub mod sarif;
 
 use std::path::Path;
@@ -60,7 +60,8 @@ pub fn output_reports(
         .filter_map(|f| get_reporter(f))
         .any(|r| r.needs_file_output());
     if needs_dir && !output_dir.exists() {
-        std::fs::create_dir_all(output_dir).map_err(|e| format!("Failed to create output dir: {}", e))?;
+        std::fs::create_dir_all(output_dir)
+            .map_err(|e| format!("Failed to create output dir: {}", e))?;
     }
 
     for fmt in formats {
@@ -79,7 +80,11 @@ pub fn output_reports(
             let report_path = output_dir.join(format!("sqlguard-report.{}", ext));
             std::fs::write(&report_path, &content)
                 .map_err(|e| format!("Failed to write {} report: {}", ext, e))?;
-            eprintln!("{} report saved: {}", ext.to_uppercase(), report_path.display());
+            eprintln!(
+                "{} report saved: {}",
+                ext.to_uppercase(),
+                report_path.display()
+            );
         } else {
             println!("{}", content);
         }

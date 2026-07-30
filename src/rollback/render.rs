@@ -24,8 +24,8 @@
 //! - **R2**：lock_scope=table 模式要求 accept_table_lock_risk=true，否则报错退出
 //! - **R4**：v1 静态 + binlog_strategy=auto + 含 DDL → 报错退出（M5 简化：auto + 含 DDL → 视为 never）
 
-use super::BackupRollbackPair;
 use super::dialect::DialectRenderer;
+use super::BackupRollbackPair;
 use crate::config::RollbackConfig;
 
 /// 渲染 backup.sql。
@@ -48,7 +48,10 @@ pub fn render_backup(
     out.push_str("-- sqlguard backup.sql (auto-generated)\n");
     out.push_str(&format!("-- dialect: {}\n", dialect_name));
     out.push_str(&format!("-- lock_scope: {}\n", rc.lock_scope));
-    out.push_str(&format!("-- coalesce_locks: {} (mode: {})\n", rc.coalesce_locks, rc.coalesce_locks_mode));
+    out.push_str(&format!(
+        "-- coalesce_locks: {} (mode: {})\n",
+        rc.coalesce_locks, rc.coalesce_locks_mode
+    ));
     out.push_str(&format!("-- statements: {}\n", pairs.len()));
     out.push_str("\n");
 
@@ -97,7 +100,10 @@ pub fn render_backup(
     } else {
         for pair in pairs {
             if let Some(backup) = &pair.backup {
-                out.push_str(&format!("-- seq={} source={}:{}\n", pair.seq, pair.source.file, pair.source.line));
+                out.push_str(&format!(
+                    "-- seq={} source={}:{}\n",
+                    pair.seq, pair.source.file, pair.source.line
+                ));
                 if strip_locks {
                     out.push_str(&renderer.strip_lock_statements(backup));
                 } else {
@@ -163,8 +169,14 @@ pub fn render_rollback(
 
     for pair in sorted {
         if let Some(rollback) = &pair.rollback {
-            out.push_str(&format!("-- seq={} (LIFO) source={}:{}\n", pair.seq, pair.source.file, pair.source.line));
-            let is_dml = matches!(pair.stmt_kind.as_str(), "INSERT" | "UPDATE" | "DELETE" | "REPLACE");
+            out.push_str(&format!(
+                "-- seq={} (LIFO) source={}:{}\n",
+                pair.seq, pair.source.file, pair.source.line
+            ));
+            let is_dml = matches!(
+                pair.stmt_kind.as_str(),
+                "INSERT" | "UPDATE" | "DELETE" | "REPLACE"
+            );
             if mysql_dml_wrap && is_dml {
                 out.push_str("START TRANSACTION;\n");
             }
@@ -198,8 +210,14 @@ pub fn render_cleanup(
     let mut out = String::new();
     out.push_str("-- sqlguard cleanup.sql (auto-generated)\n");
     out.push_str(&format!("-- dialect: {}\n", renderer.name()));
-    out.push_str(&format!("-- retention_days: {}\n", rc.backup_table_retention_days));
-    out.push_str(&format!("-- cleanup_backup_tables_after_rollback: {}\n", rc.cleanup_backup_tables_after_rollback));
+    out.push_str(&format!(
+        "-- retention_days: {}\n",
+        rc.backup_table_retention_days
+    ));
+    out.push_str(&format!(
+        "-- cleanup_backup_tables_after_rollback: {}\n",
+        rc.cleanup_backup_tables_after_rollback
+    ));
     out.push_str("\n");
 
     if !rc.cleanup_backup_tables_after_rollback {
@@ -217,7 +235,10 @@ pub fn render_cleanup(
 
     out.push_str("-- 按保留天数清理过期备份表\n");
     for name in &bks_tables {
-        out.push_str(&format!("DROP TABLE IF EXISTS {};\n", renderer.quote_ident(name)));
+        out.push_str(&format!(
+            "DROP TABLE IF EXISTS {};\n",
+            renderer.quote_ident(name)
+        ));
     }
 
     out
@@ -243,7 +264,7 @@ pub fn resolve_lock_type(lock_scope: &str, has_ddl: bool) -> &'static str {
         "snapshot" => "SNAPSHOT",
         "table" => "TABLE_UNSAFE",
         "none" => "NONE",
-        _ => "FTWRL",  // 兜底用最安全策略
+        _ => "FTWRL", // 兜底用最安全策略
     }
 }
 
@@ -253,10 +274,15 @@ pub fn has_ddl_in_pairs(pairs: &[BackupRollbackPair]) -> bool {
         // ★ P1-3：通过 stmt_kind 结构化判断，避免文本嗅探
         matches!(
             p.stmt_kind.as_str(),
-            "CREATE_TABLE" | "DROP_TABLE" | "ALTER_TABLE"
-            | "CREATE_INDEX" | "DROP_INDEX"
-            | "CREATE_VIEW" | "DROP_VIEW"
-            | "RENAME_TABLE" | "TRUNCATE"
+            "CREATE_TABLE"
+                | "DROP_TABLE"
+                | "ALTER_TABLE"
+                | "CREATE_INDEX"
+                | "DROP_INDEX"
+                | "CREATE_VIEW"
+                | "DROP_VIEW"
+                | "RENAME_TABLE"
+                | "TRUNCATE"
         )
     })
 }
@@ -317,7 +343,8 @@ pub fn group_for_coalesce<'a>(
         if can_coalesce {
             // 尝试合并到上一组（同表）
             if let Some(last_group) = groups.last_mut() {
-                let last_target = last_group.last()
+                let last_target = last_group
+                    .last()
                     .and_then(|p| p.backup.as_ref())
                     .and_then(|b| extract_target_table_from_backup(b));
                 if last_target == target {
@@ -419,7 +446,7 @@ fn render_binlog_control(pairs: &[BackupRollbackPair], rc: &RollbackConfig) -> O
     let enable = match rc.binlog_strategy.as_str() {
         "always" => true,
         "never" => false,
-        "auto" => !has_ddl,  // 含 DDL 不设 sql_log_bin=0
+        "auto" => !has_ddl, // 含 DDL 不设 sql_log_bin=0
         _ => !has_ddl,
     };
     if enable {
@@ -441,7 +468,11 @@ fn render_backup_coalesced(
     let groups = group_for_coalesce(pairs, &rc.coalesce_locks_mode);
 
     for (i, group) in groups.iter().enumerate() {
-        out.push_str(&format!("-- ===== coalesce group {} ({} segments) =====\n", i + 1, group.len()));
+        out.push_str(&format!(
+            "-- ===== coalesce group {} ({} segments) =====\n",
+            i + 1,
+            group.len()
+        ));
 
         // 组内统一发射锁（仅多段组才需要，单段组保留段内锁）
         let is_multi = group.len() > 1;
@@ -455,7 +486,10 @@ fn render_backup_coalesced(
                 for p in group {
                     if let Some(b) = &p.backup {
                         if let Some(t) = extract_target_table_from_backup(b) {
-                            out.push_str(&format!("LOCK TABLE {} IN ACCESS SHARE MODE;\n", renderer.quote_ident(&t)));
+                            out.push_str(&format!(
+                                "LOCK TABLE {} IN ACCESS SHARE MODE;\n",
+                                renderer.quote_ident(&t)
+                            ));
                         }
                     }
                 }
@@ -500,7 +534,9 @@ fn extract_target_table_from_backup(backup: &str) -> Option<String> {
     // 跳过前导空白
     let rest = rest.trim_start();
     // 取到下一个空白/分号/换行
-    let end = rest.find(|c: char| c.is_whitespace() || c == ';').unwrap_or(rest.len());
+    let end = rest
+        .find(|c: char| c.is_whitespace() || c == ';')
+        .unwrap_or(rest.len());
     let raw = &rest[..end];
     Some(super::strip_ident_quotes(raw))
 }
@@ -533,7 +569,9 @@ fn extract_bks_table_name(backup: &str) -> Option<String> {
     } else {
         rest
     };
-    let end = rest.find(|c: char| c.is_whitespace() || c == ';').unwrap_or(rest.len());
+    let end = rest
+        .find(|c: char| c.is_whitespace() || c == ';')
+        .unwrap_or(rest.len());
     let raw = &rest[..end];
     Some(super::strip_ident_quotes(raw))
 }
@@ -541,14 +579,19 @@ fn extract_bks_table_name(backup: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::rollback::{SourceRef, SafetyClass, BackupStrategy};
     use crate::rollback::dialect::{MySqlRenderer, PostgreSqlRenderer};
+    use crate::rollback::{BackupStrategy, SafetyClass, SourceRef};
 
     fn make_pair(seq: u64, backup: Option<&str>, rollback: Option<&str>) -> BackupRollbackPair {
         make_pair_with_kind(seq, backup, rollback, "")
     }
 
-    fn make_pair_with_kind(seq: u64, backup: Option<&str>, rollback: Option<&str>, kind: &str) -> BackupRollbackPair {
+    fn make_pair_with_kind(
+        seq: u64,
+        backup: Option<&str>,
+        rollback: Option<&str>,
+        kind: &str,
+    ) -> BackupRollbackPair {
         BackupRollbackPair {
             seq,
             stmt_kind: kind.to_string(),
@@ -563,7 +606,13 @@ mod tests {
         }
     }
 
-    fn make_pair_with_mode(seq: u64, backup: Option<&str>, rollback: Option<&str>, kind: &str, backup_mode: &str) -> BackupRollbackPair {
+    fn make_pair_with_mode(
+        seq: u64,
+        backup: Option<&str>,
+        rollback: Option<&str>,
+        kind: &str,
+        backup_mode: &str,
+    ) -> BackupRollbackPair {
         let mut pair = make_pair_with_kind(seq, backup, rollback, kind);
         pair.strategy.backup_mode = backup_mode.to_string();
         pair
@@ -603,12 +652,20 @@ mod tests {
         // P1-2 + P2-2：lock_scope=global → lock_type=FTWRL, lock_timeout_best_effort=true
         let mut rc = rc();
         rc.lock_scope = "global".to_string();
-        let mut pairs = vec![make_pair_with_kind(1, Some("FLUSH TABLES WITH READ LOCK;\nCREATE TABLE `bks_t` LIKE `t`;\nUNLOCK TABLES;"), None, "DROP_TABLE")];
+        let mut pairs = vec![make_pair_with_kind(
+            1,
+            Some("FLUSH TABLES WITH READ LOCK;\nCREATE TABLE `bks_t` LIKE `t`;\nUNLOCK TABLES;"),
+            None,
+            "DROP_TABLE",
+        )];
         // requires_lock defaults to false; set it true to simulate backup segments
         pairs[0].safety.requires_lock = true;
         finalize_safety(&mut pairs, &rc);
         assert_eq!(pairs[0].safety.lock_type.as_deref(), Some("FTWRL"));
-        assert!(pairs[0].safety.lock_timeout_best_effort, "FTWRL → best_effort=true");
+        assert!(
+            pairs[0].safety.lock_timeout_best_effort,
+            "FTWRL → best_effort=true"
+        );
         assert!(!pairs[0].safety.snapshot_window_unprotected);
     }
 
@@ -617,11 +674,19 @@ mod tests {
         // P2-2：lock_scope=snapshot → snapshot_window_unprotected=true
         let mut rc = rc();
         rc.lock_scope = "snapshot".to_string();
-        let mut pairs = vec![make_pair_with_kind(1, Some("LOCK TABLE \"t\" IN ACCESS SHARE MODE;\nCREATE TABLE \"bks_t\" (LIKE \"t\");"), None, "DELETE")];
+        let mut pairs = vec![make_pair_with_kind(
+            1,
+            Some("LOCK TABLE \"t\" IN ACCESS SHARE MODE;\nCREATE TABLE \"bks_t\" (LIKE \"t\");"),
+            None,
+            "DELETE",
+        )];
         pairs[0].safety.requires_lock = true;
         finalize_safety(&mut pairs, &rc);
         assert_eq!(pairs[0].safety.lock_type.as_deref(), Some("SNAPSHOT"));
-        assert!(pairs[0].safety.snapshot_window_unprotected, "SNAPSHOT → unprotected=true");
+        assert!(
+            pairs[0].safety.snapshot_window_unprotected,
+            "SNAPSHOT → unprotected=true"
+        );
         assert!(!pairs[0].safety.lock_timeout_best_effort);
     }
 
@@ -629,7 +694,12 @@ mod tests {
     fn finalize_safety_none_sets_none() {
         let mut rc = rc();
         rc.lock_scope = "none".to_string();
-        let mut pairs = vec![make_pair_with_kind(1, Some("FLUSH TABLES WITH READ LOCK;\nCREATE TABLE `bks_t` LIKE `t`;"), None, "DELETE")];
+        let mut pairs = vec![make_pair_with_kind(
+            1,
+            Some("FLUSH TABLES WITH READ LOCK;\nCREATE TABLE `bks_t` LIKE `t`;"),
+            None,
+            "DELETE",
+        )];
         pairs[0].safety.requires_lock = true;
         finalize_safety(&mut pairs, &rc);
         assert_eq!(pairs[0].safety.lock_type.as_deref(), Some("NONE"));
@@ -649,20 +719,39 @@ mod tests {
             "DELETE",
         )];
         let out = render_backup(&pairs, &rc, &MySqlRenderer);
-        assert!(!out.contains("FLUSH TABLES WITH READ LOCK"), "lock_scope=none should strip FTWRL");
-        assert!(!out.contains("UNLOCK TABLES"), "lock_scope=none should strip UNLOCK");
-        assert!(out.contains("CREATE TABLE `bks_t` LIKE `t`;"), "non-lock statements should remain");
+        assert!(
+            !out.contains("FLUSH TABLES WITH READ LOCK"),
+            "lock_scope=none should strip FTWRL"
+        );
+        assert!(
+            !out.contains("UNLOCK TABLES"),
+            "lock_scope=none should strip UNLOCK"
+        );
+        assert!(
+            out.contains("CREATE TABLE `bks_t` LIKE `t`;"),
+            "non-lock statements should remain"
+        );
     }
 
     #[test]
     fn has_ddl_in_pairs_detects_create_table() {
-        let pairs = vec![make_pair_with_kind(1, None, Some("DROP TABLE IF EXISTS `users`;"), "DROP_TABLE")];
+        let pairs = vec![make_pair_with_kind(
+            1,
+            None,
+            Some("DROP TABLE IF EXISTS `users`;"),
+            "DROP_TABLE",
+        )];
         assert!(has_ddl_in_pairs(&pairs));
     }
 
     #[test]
     fn has_ddl_in_pairs_pure_dml_returns_false() {
-        let pairs = vec![make_pair_with_kind(1, None, Some("DELETE FROM `users` WHERE `id` = 1;"), "DELETE")];
+        let pairs = vec![make_pair_with_kind(
+            1,
+            None,
+            Some("DELETE FROM `users` WHERE `id` = 1;"),
+            "DELETE",
+        )];
         assert!(!has_ddl_in_pairs(&pairs));
     }
 
@@ -725,9 +814,17 @@ mod tests {
     #[test]
     fn render_backup_mysql_includes_binlog_control_for_pure_dml() {
         let rc = rc();
-        let pairs = vec![make_pair_with_kind(1, None, Some("DELETE FROM `users` WHERE `id` = 1;"), "DELETE")];
+        let pairs = vec![make_pair_with_kind(
+            1,
+            None,
+            Some("DELETE FROM `users` WHERE `id` = 1;"),
+            "DELETE",
+        )];
         let out = render_backup(&pairs, &rc, &MySqlRenderer);
-        assert!(out.contains("sql_log_bin=0"), "纯 DML auto 模式应设 sql_log_bin=0");
+        assert!(
+            out.contains("sql_log_bin=0"),
+            "纯 DML auto 模式应设 sql_log_bin=0"
+        );
     }
 
     #[test]
@@ -735,16 +832,29 @@ mod tests {
         // 含 DDL → R4 要求显式 binlog_strategy，设 never 跳过 R4 检查
         let mut rc = rc();
         rc.binlog_strategy = "never".to_string();
-        let pairs = vec![make_pair_with_kind(1, None, Some("DROP TABLE IF EXISTS `users`;"), "DROP_TABLE")];
+        let pairs = vec![make_pair_with_kind(
+            1,
+            None,
+            Some("DROP TABLE IF EXISTS `users`;"),
+            "DROP_TABLE",
+        )];
         let out = render_backup(&pairs, &rc, &MySqlRenderer);
-        assert!(!out.contains("sql_log_bin=0"), "含 DDL never 模式不设 sql_log_bin=0");
+        assert!(
+            !out.contains("sql_log_bin=0"),
+            "含 DDL never 模式不设 sql_log_bin=0"
+        );
     }
 
     #[test]
     fn render_backup_binlog_always_includes_control() {
         let mut rc = rc();
         rc.binlog_strategy = "always".to_string();
-        let pairs = vec![make_pair_with_kind(1, None, Some("DROP TABLE IF EXISTS `users`;"), "DROP_TABLE")];
+        let pairs = vec![make_pair_with_kind(
+            1,
+            None,
+            Some("DROP TABLE IF EXISTS `users`;"),
+            "DROP_TABLE",
+        )];
         let out = render_backup(&pairs, &rc, &MySqlRenderer);
         assert!(out.contains("sql_log_bin=0"));
     }
@@ -753,7 +863,12 @@ mod tests {
     fn render_backup_binlog_never_omits_control() {
         let mut rc = rc();
         rc.binlog_strategy = "never".to_string();
-        let pairs = vec![make_pair_with_kind(1, None, Some("DELETE FROM `users` WHERE `id` = 1;"), "DELETE")];
+        let pairs = vec![make_pair_with_kind(
+            1,
+            None,
+            Some("DELETE FROM `users` WHERE `id` = 1;"),
+            "DELETE",
+        )];
         let out = render_backup(&pairs, &rc, &MySqlRenderer);
         assert!(!out.contains("sql_log_bin=0"));
     }
@@ -776,7 +891,11 @@ mod tests {
     #[test]
     fn render_rollback_pg_wraps_in_transaction() {
         let rc = rc();
-        let pairs = vec![make_pair(1, None, Some("DELETE FROM \"t\" WHERE \"id\" = 1;"))];
+        let pairs = vec![make_pair(
+            1,
+            None,
+            Some("DELETE FROM \"t\" WHERE \"id\" = 1;"),
+        )];
         let out = render_rollback(&pairs, &rc, &PostgreSqlRenderer);
         assert!(out.contains("BEGIN;"));
         assert!(out.contains("COMMIT;"));
@@ -816,27 +935,51 @@ mod tests {
     fn render_rollback_mysql_dml_wraps_statement_level_transaction() {
         // P1-4/F5：MySQL DML rollback 包 START TRANSACTION / COMMIT，DDL 不包
         let mut rc = rc();
-        rc.binlog_strategy = "never".to_string();  // 含 DDL，需显式 binlog_strategy
+        rc.binlog_strategy = "never".to_string(); // 含 DDL，需显式 binlog_strategy
         let pairs = vec![
             make_pair_with_kind(1, None, Some("DELETE FROM `t` WHERE `id` = 1;"), "DELETE"),
-            make_pair_with_kind(2, None, Some("CREATE TABLE `t` LIKE `bks_t`;"), "DROP_TABLE"),
+            make_pair_with_kind(
+                2,
+                None,
+                Some("CREATE TABLE `t` LIKE `bks_t`;"),
+                "DROP_TABLE",
+            ),
         ];
         let out = render_rollback(&pairs, &rc, &MySqlRenderer);
         // LIFO: seq=2 (DDL) 先输出，seq=1 (DML) 后输出
         // DDL 段不应有 START TRANSACTION
-        let ddl_section = out.split("seq=2").nth(1).unwrap().split("seq=1").next().unwrap();
-        assert!(!ddl_section.contains("START TRANSACTION;"), "MySQL DDL rollback 不包事务");
+        let ddl_section = out
+            .split("seq=2")
+            .nth(1)
+            .unwrap()
+            .split("seq=1")
+            .next()
+            .unwrap();
+        assert!(
+            !ddl_section.contains("START TRANSACTION;"),
+            "MySQL DDL rollback 不包事务"
+        );
         // DML 段应有 START TRANSACTION / COMMIT
         let dml_section = out.split("seq=1").nth(1).unwrap();
-        assert!(dml_section.contains("START TRANSACTION;"), "MySQL DML rollback 应包 START TRANSACTION");
-        assert!(dml_section.contains("COMMIT;"), "MySQL DML rollback 应包 COMMIT");
+        assert!(
+            dml_section.contains("START TRANSACTION;"),
+            "MySQL DML rollback 应包 START TRANSACTION"
+        );
+        assert!(
+            dml_section.contains("COMMIT;"),
+            "MySQL DML rollback 应包 COMMIT"
+        );
     }
 
     #[test]
     fn render_rollback_pg_wrap_disabled() {
         let mut rc = rc();
         rc.wrap_transaction = false;
-        let pairs = vec![make_pair(1, None, Some("DELETE FROM \"t\" WHERE \"id\" = 1;"))];
+        let pairs = vec![make_pair(
+            1,
+            None,
+            Some("DELETE FROM \"t\" WHERE \"id\" = 1;"),
+        )];
         let out = render_rollback(&pairs, &rc, &PostgreSqlRenderer);
         assert!(!out.contains("BEGIN;"));
         assert!(!out.contains("COMMIT;"));
@@ -844,7 +987,7 @@ mod tests {
 
     #[test]
     fn render_cleanup_disabled_returns_notice() {
-        let rc = rc();  // cleanup_backup_tables_after_rollback=false (default)
+        let rc = rc(); // cleanup_backup_tables_after_rollback=false (default)
         let pairs = vec![make_pair(1, Some("CREATE TABLE `bks_users_20260726_0001` LIKE `users`;\nINSERT INTO `bks_users_20260726_0001` SELECT * FROM `users`;"), None)];
         let out = render_cleanup(&pairs, &rc, &MySqlRenderer);
         assert!(out.contains("cleanup_backup_tables_after_rollback=false"));
@@ -869,19 +1012,43 @@ mod tests {
         let mut rc = rc();
         rc.cleanup_backup_tables_after_rollback = true;
         let pairs = vec![
-            make_pair(1, Some("CREATE TABLE `bks_users_20260726_0001` LIKE `users`;"), None),
-            make_pair(2, Some("CREATE TABLE `bks_users_20260726_0001` LIKE `users`;"), None),  // 同名重复
+            make_pair(
+                1,
+                Some("CREATE TABLE `bks_users_20260726_0001` LIKE `users`;"),
+                None,
+            ),
+            make_pair(
+                2,
+                Some("CREATE TABLE `bks_users_20260726_0001` LIKE `users`;"),
+                None,
+            ), // 同名重复
         ];
         let out = render_cleanup(&pairs, &rc, &MySqlRenderer);
         // 去重后只出现一次
-        assert_eq!(out.matches("DROP TABLE IF EXISTS `bks_users_20260726_0001`;").count(), 1);
+        assert_eq!(
+            out.matches("DROP TABLE IF EXISTS `bks_users_20260726_0001`;")
+                .count(),
+            1
+        );
     }
 
     #[test]
     fn group_for_coalesce_conservative_merges_full_table_backups() {
         let pairs = vec![
-            make_pair_with_mode(1, Some("CREATE TABLE `bks_t_1` LIKE `t`;\nINSERT INTO `bks_t_1` SELECT * FROM `t`;"), None, "DROP_TABLE", "full"),
-            make_pair_with_mode(2, Some("CREATE TABLE `bks_t_2` LIKE `t`;\nINSERT INTO `bks_t_2` SELECT * FROM `t`;"), None, "DROP_TABLE", "full"),
+            make_pair_with_mode(
+                1,
+                Some("CREATE TABLE `bks_t_1` LIKE `t`;\nINSERT INTO `bks_t_1` SELECT * FROM `t`;"),
+                None,
+                "DROP_TABLE",
+                "full",
+            ),
+            make_pair_with_mode(
+                2,
+                Some("CREATE TABLE `bks_t_2` LIKE `t`;\nINSERT INTO `bks_t_2` SELECT * FROM `t`;"),
+                None,
+                "DROP_TABLE",
+                "full",
+            ),
         ];
         let groups = group_for_coalesce(&pairs, "conservative");
         assert_eq!(groups.len(), 1, "同表全表备份应合并为一组");
@@ -911,8 +1078,20 @@ mod tests {
     #[test]
     fn group_for_coalesce_different_tables_not_merged() {
         let pairs = vec![
-            make_pair_with_mode(1, Some("CREATE TABLE `bks_t_1` LIKE `t`;\nINSERT INTO `bks_t_1` SELECT * FROM `t`;"), None, "DROP_TABLE", "full"),
-            make_pair_with_mode(2, Some("CREATE TABLE `bks_u_1` LIKE `u`;\nINSERT INTO `bks_u_1` SELECT * FROM `u`;"), None, "DROP_TABLE", "full"),
+            make_pair_with_mode(
+                1,
+                Some("CREATE TABLE `bks_t_1` LIKE `t`;\nINSERT INTO `bks_t_1` SELECT * FROM `t`;"),
+                None,
+                "DROP_TABLE",
+                "full",
+            ),
+            make_pair_with_mode(
+                2,
+                Some("CREATE TABLE `bks_u_1` LIKE `u`;\nINSERT INTO `bks_u_1` SELECT * FROM `u`;"),
+                None,
+                "DROP_TABLE",
+                "full",
+            ),
         ];
         let groups = group_for_coalesce(&pairs, "conservative");
         assert_eq!(groups.len(), 2, "不同表不合并");
@@ -922,7 +1101,7 @@ mod tests {
     fn render_backup_coalesced_strips_inner_locks() {
         let mut rc = rc();
         rc.coalesce_locks = true;
-        rc.binlog_strategy = "never".to_string();  // 含 DDL → 需显式 binlog_strategy
+        rc.binlog_strategy = "never".to_string(); // 含 DDL → 需显式 binlog_strategy
         let pairs = vec![
             make_pair_with_mode(1, Some("FLUSH TABLES WITH READ LOCK;\nCREATE TABLE `bks_t_1` LIKE `t`;\nINSERT INTO `bks_t_1` SELECT * FROM `t`;\nUNLOCK TABLES;"), None, "DROP_TABLE", "full"),
             make_pair_with_mode(2, Some("FLUSH TABLES WITH READ LOCK;\nCREATE TABLE `bks_t_2` LIKE `t`;\nINSERT INTO `bks_t_2` SELECT * FROM `t`;\nUNLOCK TABLES;"), None, "DROP_TABLE", "full"),
@@ -938,25 +1117,37 @@ mod tests {
     #[test]
     fn extract_target_table_from_backup_basic() {
         let backup = "FLUSH TABLES WITH READ LOCK;\nCREATE TABLE `bks_users_1` LIKE `users`;\nINSERT INTO `bks_users_1` SELECT * FROM `users`;\nUNLOCK TABLES;";
-        assert_eq!(extract_target_table_from_backup(backup), Some("users".to_string()));
+        assert_eq!(
+            extract_target_table_from_backup(backup),
+            Some("users".to_string())
+        );
     }
 
     #[test]
     fn extract_target_table_from_backup_pg() {
         let backup = "LOCK TABLE \"users\" IN ACCESS SHARE MODE;\nCREATE TABLE \"bks_users_1\" (LIKE \"users\" INCLUDING ...);\nINSERT INTO \"bks_users_1\" SELECT * FROM \"users\";";
-        assert_eq!(extract_target_table_from_backup(backup), Some("users".to_string()));
+        assert_eq!(
+            extract_target_table_from_backup(backup),
+            Some("users".to_string())
+        );
     }
 
     #[test]
     fn extract_bks_table_name_basic() {
         let backup = "CREATE TABLE `bks_users_20260726_0001` LIKE `users`;";
-        assert_eq!(extract_bks_table_name(backup), Some("bks_users_20260726_0001".to_string()));
+        assert_eq!(
+            extract_bks_table_name(backup),
+            Some("bks_users_20260726_0001".to_string())
+        );
     }
 
     #[test]
     fn extract_bks_table_name_pg() {
         let backup = "CREATE TABLE \"bks_users_20260726_0001\" (LIKE \"users\" INCLUDING ...);";
-        assert_eq!(extract_bks_table_name(backup), Some("bks_users_20260726_0001".to_string()));
+        assert_eq!(
+            extract_bks_table_name(backup),
+            Some("bks_users_20260726_0001".to_string())
+        );
     }
 
     #[test]
@@ -972,12 +1163,20 @@ mod tests {
     #[test]
     fn validate_r4_auto_ddl_returns_error() {
         // P0-3/R4：binlog_strategy=auto + 含 DDL → 必须报错
-        let rc = rc();  // dialect=mysql, binlog_strategy=auto by default
-        let pairs = vec![make_pair_with_kind(1, None, Some("DROP TABLE IF EXISTS `users`;"), "DROP_TABLE")];
+        let rc = rc(); // dialect=mysql, binlog_strategy=auto by default
+        let pairs = vec![make_pair_with_kind(
+            1,
+            None,
+            Some("DROP TABLE IF EXISTS `users`;"),
+            "DROP_TABLE",
+        )];
         let errors = validate_render_prerequisites(&pairs, &rc);
         assert!(
-            errors.iter().any(|e| e.contains("binlog_strategy=auto") && e.contains("DDL")),
-            "auto + DDL should produce an error, got: {:?}", errors
+            errors
+                .iter()
+                .any(|e| e.contains("binlog_strategy=auto") && e.contains("DDL")),
+            "auto + DDL should produce an error, got: {:?}",
+            errors
         );
     }
 
@@ -985,9 +1184,18 @@ mod tests {
     fn validate_r4_auto_pure_dml_passes() {
         // binlog_strategy=auto + 纯 DML → 不报错
         let rc = rc();
-        let pairs = vec![make_pair_with_kind(1, None, Some("DELETE FROM `users` WHERE `id` = 1;"), "DELETE")];
+        let pairs = vec![make_pair_with_kind(
+            1,
+            None,
+            Some("DELETE FROM `users` WHERE `id` = 1;"),
+            "DELETE",
+        )];
         let errors = validate_render_prerequisites(&pairs, &rc);
-        assert!(errors.is_empty(), "auto + pure DML should pass, got: {:?}", errors);
+        assert!(
+            errors.is_empty(),
+            "auto + pure DML should pass, got: {:?}",
+            errors
+        );
     }
 
     #[test]
@@ -995,9 +1203,18 @@ mod tests {
         // binlog_strategy=never + 含 DDL → 不报错（用户已显式选择）
         let mut rc = rc();
         rc.binlog_strategy = "never".to_string();
-        let pairs = vec![make_pair_with_kind(1, None, Some("DROP TABLE IF EXISTS `users`;"), "DROP_TABLE")];
+        let pairs = vec![make_pair_with_kind(
+            1,
+            None,
+            Some("DROP TABLE IF EXISTS `users`;"),
+            "DROP_TABLE",
+        )];
         let errors = validate_render_prerequisites(&pairs, &rc);
-        assert!(errors.is_empty(), "never + DDL should pass, got: {:?}", errors);
+        assert!(
+            errors.is_empty(),
+            "never + DDL should pass, got: {:?}",
+            errors
+        );
     }
 
     // ===== 端到端集成测试：generate → render =====
@@ -1006,22 +1223,31 @@ mod tests {
     fn end_to_end_dml_mixed_with_ddl_renders_full_lifecycle() {
         use crate::rollback::RollbackGenerator;
         use crate::rule::engine::ast::{
-            StmtInfo, DropInfo, InsertInfo, DeleteInfo, ColumnInfo,
-            CreateInfo,
+            ColumnInfo, CreateInfo, DeleteInfo, DropInfo, InsertInfo, StmtInfo,
         };
 
         fn make_cfg() -> crate::config::Config {
             crate::config::Config {
-                structure: crate::config::StructureConfig { paths: vec![], strict: false, allow_extra: vec![] },
-                classification: crate::config::ClassificationConfig { rules: vec![], default_type: "other".to_string() },
-                rules: vec![], rules_file: None, rules_dir: std::path::PathBuf::new(),
+                structure: crate::config::StructureConfig {
+                    paths: vec![],
+                    strict: false,
+                    allow_extra: vec![],
+                },
+                classification: crate::config::ClassificationConfig {
+                    rules: vec![],
+                    default_type: "other".to_string(),
+                },
+                rules: vec![],
+                rules_file: None,
+                rules_dir: std::path::PathBuf::new(),
                 output: crate::config::OutputConfig::default(),
                 mapper: crate::config::MapperConfig::default(),
                 scan: crate::config::ScanConfig::default(),
                 file_check: crate::config::FileCheckConfig::default(),
                 rollback: RollbackConfig::default(),
                 cache: crate::config::CacheConfig::default(),
-                dialect: crate::config::CheckDialect::default(), dialect_fallback: None,
+                dialect: crate::config::CheckDialect::default(),
+                dialect_fallback: None,
             }
         }
 
@@ -1034,54 +1260,118 @@ mod tests {
         // 构造混合语句：CREATE TABLE → INSERT → DELETE → DROP TABLE
         let stmts: Vec<(StmtInfo, &str)> = vec![
             // 1. CREATE TABLE users (id BIGINT AUTO_INCREMENT PRIMARY KEY, name VARCHAR(32))
-            (StmtInfo {
-                kind: "CREATE_TABLE".to_string(),
-                line: 1, end_line: 5, column: 0,
-                create_table: Some(CreateInfo {
-                    table_name: "users".to_string(),
-                    columns: vec![
-                        ColumnInfo { name: "id".to_string(), data_type: "BIGINT".to_string(), is_auto_increment: true, is_primary_key: true, ..Default::default() },
-                        ColumnInfo { name: "name".to_string(), data_type: "VARCHAR(32)".to_string(), ..Default::default() },
-                    ],
-                    has_primary_key: true,
-                    primary_key_columns: vec!["id".to_string()],
-                    ..Default::default()
-                }),
-                drop_object: None, select: None, insert: None, update: None, delete: None,
-                alter_table: None, truncate: None, create_view: None, create_index: None, transaction: None,
-            }, "CREATE TABLE users (id BIGINT AUTO_INCREMENT PRIMARY KEY, name VARCHAR(32))"),
+            (
+                StmtInfo {
+                    kind: "CREATE_TABLE".to_string(),
+                    line: 1,
+                    end_line: 5,
+                    column: 0,
+                    create_table: Some(CreateInfo {
+                        table_name: "users".to_string(),
+                        columns: vec![
+                            ColumnInfo {
+                                name: "id".to_string(),
+                                data_type: "BIGINT".to_string(),
+                                is_auto_increment: true,
+                                is_primary_key: true,
+                                ..Default::default()
+                            },
+                            ColumnInfo {
+                                name: "name".to_string(),
+                                data_type: "VARCHAR(32)".to_string(),
+                                ..Default::default()
+                            },
+                        ],
+                        has_primary_key: true,
+                        primary_key_columns: vec!["id".to_string()],
+                        ..Default::default()
+                    }),
+                    drop_object: None,
+                    select: None,
+                    insert: None,
+                    update: None,
+                    delete: None,
+                    alter_table: None,
+                    truncate: None,
+                    create_view: None,
+                    create_index: None,
+                    transaction: None,
+                },
+                "CREATE TABLE users (id BIGINT AUTO_INCREMENT PRIMARY KEY, name VARCHAR(32))",
+            ),
             // 2. INSERT INTO users (id, name) VALUES (1, 'alice')
-            (StmtInfo {
-                kind: "INSERT".to_string(),
-                line: 6, end_line: 6, column: 0,
-                create_table: None, drop_object: None, select: None,
-                insert: Some(InsertInfo {
-                    table_name: "users".to_string(),
-                    columns: vec!["id".to_string(), "name".to_string()],
-                }),
-                update: None, delete: None, alter_table: None, truncate: None,
-                create_view: None, create_index: None, transaction: None,
-            }, "INSERT INTO users (id, name) VALUES (1, 'alice')"),
+            (
+                StmtInfo {
+                    kind: "INSERT".to_string(),
+                    line: 6,
+                    end_line: 6,
+                    column: 0,
+                    create_table: None,
+                    drop_object: None,
+                    select: None,
+                    insert: Some(InsertInfo {
+                        table_name: "users".to_string(),
+                        columns: vec!["id".to_string(), "name".to_string()],
+                    }),
+                    update: None,
+                    delete: None,
+                    alter_table: None,
+                    truncate: None,
+                    create_view: None,
+                    create_index: None,
+                    transaction: None,
+                },
+                "INSERT INTO users (id, name) VALUES (1, 'alice')",
+            ),
             // 3. DELETE FROM users WHERE id = 1
-            (StmtInfo {
-                kind: "DELETE".to_string(),
-                line: 7, end_line: 7, column: 0,
-                create_table: None, drop_object: None, select: None, insert: None,
-                update: None, delete: Some(DeleteInfo {
-                    table_name: "users".to_string(),
-                    where_clause: Some("id = 1".to_string()),
-                }),
-                alter_table: None, truncate: None, create_view: None, create_index: None, transaction: None,
-            }, "DELETE FROM users WHERE id = 1"),
+            (
+                StmtInfo {
+                    kind: "DELETE".to_string(),
+                    line: 7,
+                    end_line: 7,
+                    column: 0,
+                    create_table: None,
+                    drop_object: None,
+                    select: None,
+                    insert: None,
+                    update: None,
+                    delete: Some(DeleteInfo {
+                        table_name: "users".to_string(),
+                        where_clause: Some("id = 1".to_string()),
+                    }),
+                    alter_table: None,
+                    truncate: None,
+                    create_view: None,
+                    create_index: None,
+                    transaction: None,
+                },
+                "DELETE FROM users WHERE id = 1",
+            ),
             // 4. DROP TABLE users
-            (StmtInfo {
-                kind: "DROP_TABLE".to_string(),
-                line: 8, end_line: 8, column: 0,
-                create_table: None,
-                drop_object: Some(DropInfo { object_type: "TABLE".to_string(), name: "users".to_string(), if_exists: false }),
-                select: None, insert: None, update: None, delete: None,
-                alter_table: None, truncate: None, create_view: None, create_index: None, transaction: None,
-            }, "DROP TABLE users"),
+            (
+                StmtInfo {
+                    kind: "DROP_TABLE".to_string(),
+                    line: 8,
+                    end_line: 8,
+                    column: 0,
+                    create_table: None,
+                    drop_object: Some(DropInfo {
+                        object_type: "TABLE".to_string(),
+                        name: "users".to_string(),
+                        if_exists: false,
+                    }),
+                    select: None,
+                    insert: None,
+                    update: None,
+                    delete: None,
+                    alter_table: None,
+                    truncate: None,
+                    create_view: None,
+                    create_index: None,
+                    transaction: None,
+                },
+                "DROP TABLE users",
+            ),
         ];
 
         let mut pairs = Vec::new();
@@ -1118,8 +1408,17 @@ mod tests {
         assert!(rollback_sql.contains("START TRANSACTION;"));
         // DDL 段（seq=4 DROP_TABLE 回滚）不应有 START TRANSACTION
         // LIFO: seq=4 最先输出，到 seq=3 之前是 seq=4 的回滚段
-        let seq4_section = rollback_sql.split("seq=4").nth(1).unwrap().split("seq=3").next().unwrap();
-        assert!(!seq4_section.contains("START TRANSACTION;"), "DDL rollback 不应包事务");
+        let seq4_section = rollback_sql
+            .split("seq=4")
+            .nth(1)
+            .unwrap()
+            .split("seq=3")
+            .next()
+            .unwrap();
+        assert!(
+            !seq4_section.contains("START TRANSACTION;"),
+            "DDL rollback 不应包事务"
+        );
 
         // ===== 渲染 cleanup.sql =====
         let mut rc_cleanup = rc.clone();
@@ -1132,7 +1431,10 @@ mod tests {
         let manifest = Manifest::from_pairs(&pairs, "mysql", &rc, vec![]);
         assert_eq!(manifest.items.len(), 4);
         // DROP TABLE 应标 irreversible_if_backup_missing
-        assert!(manifest.items.iter().any(|m| m.seq == 4 && m.safety.irreversible_if_backup_missing));
+        assert!(manifest
+            .items
+            .iter()
+            .any(|m| m.seq == 4 && m.safety.irreversible_if_backup_missing));
     }
 
     #[test]
@@ -1142,16 +1444,26 @@ mod tests {
 
         fn make_cfg() -> crate::config::Config {
             crate::config::Config {
-                structure: crate::config::StructureConfig { paths: vec![], strict: false, allow_extra: vec![] },
-                classification: crate::config::ClassificationConfig { rules: vec![], default_type: "other".to_string() },
-                rules: vec![], rules_file: None, rules_dir: std::path::PathBuf::new(),
+                structure: crate::config::StructureConfig {
+                    paths: vec![],
+                    strict: false,
+                    allow_extra: vec![],
+                },
+                classification: crate::config::ClassificationConfig {
+                    rules: vec![],
+                    default_type: "other".to_string(),
+                },
+                rules: vec![],
+                rules_file: None,
+                rules_dir: std::path::PathBuf::new(),
                 output: crate::config::OutputConfig::default(),
                 mapper: crate::config::MapperConfig::default(),
                 scan: crate::config::ScanConfig::default(),
                 file_check: crate::config::FileCheckConfig::default(),
                 rollback: RollbackConfig::default(),
                 cache: crate::config::CacheConfig::default(),
-                dialect: crate::config::CheckDialect::default(), dialect_fallback: None,
+                dialect: crate::config::CheckDialect::default(),
+                dialect_fallback: None,
             }
         }
 
@@ -1161,16 +1473,29 @@ mod tests {
 
         let stmt = StmtInfo {
             kind: "UPDATE".to_string(),
-            line: 1, end_line: 1, column: 0,
-            create_table: None, drop_object: None, select: None, insert: None,
+            line: 1,
+            end_line: 1,
+            column: 0,
+            create_table: None,
+            drop_object: None,
+            select: None,
+            insert: None,
             update: Some(UpdateInfo {
                 table_name: "users".to_string(),
                 where_clause: Some("id = 1".to_string()),
             }),
-            delete: None, alter_table: None, truncate: None,
-            create_view: None, create_index: None, transaction: None,
+            delete: None,
+            alter_table: None,
+            truncate: None,
+            create_view: None,
+            create_index: None,
+            transaction: None,
         };
-        let pair = gen.generate(&stmt, SourceRef::placeholder(), "UPDATE users SET name = 'bob' WHERE id = 1");
+        let pair = gen.generate(
+            &stmt,
+            SourceRef::placeholder(),
+            "UPDATE users SET name = 'bob' WHERE id = 1",
+        );
         let pairs = vec![pair];
 
         // PG rollback 应整体包裹 BEGIN/COMMIT
