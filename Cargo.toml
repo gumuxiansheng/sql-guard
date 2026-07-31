@@ -40,3 +40,12 @@ lto = "fat"
 codegen-units = 1
 strip = true
 panic = "abort"
+
+# ===== 多二进制：主 linter 与独立挖掘工具共享 lib，互不链入对方代码 =====
+[[bin]]
+name = "sqlguard"
+path = "src/main.rs"
+
+[[bin]]
+name = "sqlguard-mine"
+path = "src/bin/sqlguard-mine.rs"
