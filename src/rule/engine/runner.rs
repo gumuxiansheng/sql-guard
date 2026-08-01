@@ -35,6 +35,7 @@ pub fn run_rules_for_file(
     config_dir: &Path,
     filter: &RuleFilter,
     line_offset: usize,
+    has_dynamic: bool,
 ) -> Result<Vec<Violation>, SqlGuardError> {
     let mut violations = Vec::new();
 
@@ -45,7 +46,40 @@ pub fn run_rules_for_file(
     //   1) 顶层 tokenize 失败 → ast.parse_error = Some(...)
     //   2) 单条语句 parse_statement 失败 → 该语句 kind = "PARSE_ERROR"
     let has_parse_error_stmt = ast.statements.iter().any(|s| s.kind == "PARSE_ERROR");
-    if let Some(err) = &ast.parse_error {
+    let has_parse_error = ast.parse_error.is_some() || has_parse_error_stmt;
+
+    // 信任跳过：含 MyBatis `${}` 动态替换的语句，解析失败是预期内的（运行时才确定内容，
+    // 静态期不可解析）。不再报误导性的 `PARSE` 错误，改报诚实的 `DYN` 警告——
+    // 仍出现在报告里、可过滤，且明确标注"动态 substitution 未静态校验"。
+    // 关闭 `trust_dynamic_substitution` 时回退到旧行为（报 `PARSE` 警告）。
+    if config.trust_dynamic_substitution && has_dynamic && has_parse_error {
+        eprintln!(
+            "Note: {} contains ${{}} runtime substitution; statically unchecked with {} dialect",
+            file_path.display(),
+            config.dialect.as_str()
+        );
+        violations.push(Violation {
+            rule_id: "DYN".to_string(),
+            rule_name: "dynamic_unchecked".to_string(),
+            rule_group: Some("engine".to_string()),
+            severity: "warning".to_string(),
+            message: format!(
+                "contains ${{}} runtime substitution ({} dialect); statically unchecked",
+                config.dialect.as_str()
+            ),
+            file_path: file_path.to_path_buf(),
+            script_type: script_type.to_string(),
+            // 指向 mapper 方法起始行（line_offset+1），非语句内精确位置——
+            // 动态片段跨多结构位置，精确行号无意义。
+            line: if line_offset > 0 {
+                Some(line_offset + 1)
+            } else {
+                None
+            },
+            end_line: None,
+            column: None,
+        });
+    } else if let Some(err) = &ast.parse_error {
         eprintln!(
             "Warning: {} failed to tokenize with {} dialect ({}); AST rules will be skipped",
             file_path.display(),

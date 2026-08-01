@@ -62,6 +62,13 @@ pub struct Config {
     ///   （链退化为「主方言 → Generic」）。
     #[serde(default)]
     pub dialect_fallback: Option<CheckDialect>,
+    /// 信任跳过 MyBatis `${}` 动态替换（默认开启）。
+    ///
+    /// `${}` 的内容在运行时才确定，静态期无法解析。开启时，含 `${}` 的语句若解析失败，
+    /// 不报误导性的 `PARSE` 错误，改报诚实的 `DYN`（动态 substitution 未静态校验）警告，
+    /// 避免报告里出现一批"假"解析错误。关闭时回退到旧行为（报 `PARSE` 警告）。
+    #[serde(default = "default_true")]
+    pub trust_dynamic_substitution: bool,
 }
 
 /// check 流程的 SQL 方言选择。

@@ -53,6 +53,13 @@ pub struct ExtractedSql {
     /// 被 AllTrue 全拼导致条件间缺 AND」的写法（如 `ibkcdeflg==0` 与 `ibkcdeflg==1`、
     /// `orgLv==0` 与 `orgLv!='0'`）。与主 SQL 相同时为 `None`。
     pub processed_sql_alt2: Option<String>,
+    /// 是否包含 MyBatis `${}` 动态替换（运行时才确定内容，静态期不可解析）。
+    ///
+    /// 用于「信任跳过」：含此标志的语句解析失败时，不报误导性的 `PARSE` 错误，
+    /// 改报诚实的 `DYN`（动态 substitution 未静态校验）警告，避免报告里出现一批
+    /// "假"解析错误。检测基于渲染后的原文 `raw_sql` 是否含 `${`（与
+    /// [`crate::mapper::placeholder::normalize_placeholders`] 的占位符判定一致）。
+    pub has_dynamic: bool,
 }
 
 /// 把一条动态语句渲染为 [`ExtractedSql`]；渲染结果为空白时返回 `None`。
@@ -76,6 +83,9 @@ fn render_extracted(stmt: &DynamicStatement) -> Option<ExtractedSql> {
     } else {
         Some(alt2)
     };
+    // `${}` 动态替换在 `raw_sql` 中仍以字面 `${...}` 存在（占位符标准化尚未执行），
+    // 与 `normalize_placeholders` 的判定口径一致。
+    let has_dynamic = raw_sql.contains("${");
     Some(ExtractedSql {
         statement_id: stmt.statement_id.clone(),
         statement_type: stmt.statement_type.clone(),
@@ -84,6 +94,7 @@ fn render_extracted(stmt: &DynamicStatement) -> Option<ExtractedSql> {
         processed_sql,
         processed_sql_alt,
         processed_sql_alt2,
+        has_dynamic,
     })
 }
 
@@ -622,6 +633,27 @@ mod tests {
         assert_eq!(result.len(), 1);
         assert!(result[0].processed_sql.contains("_var_tableName"));
         assert!(result[0].processed_sql.contains("?"));
+    }
+
+    #[test]
+    fn has_dynamic_flag_set_for_dollar_substitution() {
+        // 含 `${}` 动态替换的语句应被标记 `has_dynamic = true`（信任跳过依据）。
+        let xml = r#"<mapper>
+  <select id="dynamicTable">
+    SELECT * FROM ${tableName} WHERE id = #{id}
+  </select>
+  <select id="staticSql">
+    SELECT id, name FROM users WHERE id = #{id}
+  </select>
+</mapper>"#;
+        let path = std::env::temp_dir().join("sqlguard_parser_test_6.xml");
+        std::fs::write(&path, xml).unwrap();
+        let result = extract_sql_from_xml(&path).unwrap();
+        assert_eq!(result.len(), 2);
+        let dynamic = result.iter().find(|s| s.statement_id == "dynamicTable").unwrap();
+        let static_sql = result.iter().find(|s| s.statement_id == "staticSql").unwrap();
+        assert!(dynamic.has_dynamic, "statement with ${{}} must be flagged dynamic");
+        assert!(!static_sql.has_dynamic, "static statement must not be flagged dynamic");
     }
 
     #[test]
