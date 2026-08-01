@@ -190,5 +190,10 @@ pub enum Commands {
         /// Allow partial rollback plans (do not exit 2 on safety.partial=true).
         #[clap(long)]
         allow_partial: bool,
+
+        /// Generate `rollback-review-report.html` alongside the manifest,
+        /// highlighting statements that require manual review (by risk level).
+        #[clap(long)]
+        review_report: bool,
     },
 }

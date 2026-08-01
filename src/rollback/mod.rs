@@ -24,6 +24,7 @@ pub mod manifest;
 pub mod naming;
 pub mod pk;
 pub mod render;
+pub mod review_report;
 pub mod util;
 
 use crate::rule::engine::ast::StmtInfo;
@@ -36,6 +37,7 @@ use serde::Serialize;
 pub use dialect::{renderer_for, Dialect};
 pub use generator::RollbackGenerator;
 pub use manifest::{serialize_manifest, Manifest};
+pub use review_report::generate_review_report;
 
 /// ★ C2 架构修正：聚合所有"安全分类"标志，避免 flag 散装。
 /// 生成器填充，渲染器/manifest 序列化统一读取，CI 按 class 决策退出码（见 §4.14 决策表）。
@@ -63,6 +65,30 @@ pub struct SafetyClass {
     pub partitioned: bool,
     /// DROP TABLE 回滚特例：CREATE 失败则原表无法恢复，强依赖 bks_ 表存在
     pub irreversible_if_backup_missing: bool,
+}
+
+/// Review 强度等级（由 [`SafetyClass`] 自动推导，见设计文档 §review 契约）。
+///
+/// 返回静态字符串以便直接序列化到 manifest，无需分配。
+///
+/// - `"none"`：reliable 且无任何风险 flag → 免审，发布平台自动放行
+/// - `"optional"`：仅 `requires_lock` 或 `counter_unrestored` → 提示性，不阻断
+/// - `"required"`：`irreversible` / `irreversible_if_backup_missing` /
+///   `unreliable`(`!reliable`) / `partial` → 强制阻断，等待 review-manifest 覆盖
+///
+/// 与 `Manifest::exit_code` 语义自洽：退出码 2 ⇒ `review_required=true`。
+pub fn review_level_for(safety: &SafetyClass) -> &'static str {
+    if safety.irreversible
+        || safety.irreversible_if_backup_missing
+        || !safety.reliable
+        || safety.partial
+    {
+        "required"
+    } else if safety.requires_lock || safety.counter_unrestored {
+        "optional"
+    } else {
+        "none"
+    }
 }
 
 /// 备份策略元数据（与 SafetyClass 正交，记录"怎么备份的"而非"安不安全"）

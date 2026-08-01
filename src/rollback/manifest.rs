@@ -5,7 +5,9 @@
 //! 兼容旧发布平台按字段名读取。
 
 use super::util::current_iso8601_utc;
-use super::{BackupRollbackPair, BackupStrategy, ExpectedSchema, SafetyClass, SourceRef};
+use super::{
+    review_level_for, BackupRollbackPair, BackupStrategy, ExpectedSchema, SafetyClass, SourceRef,
+};
 use crate::config::RollbackConfig;
 use serde::Serialize;
 
@@ -31,6 +33,15 @@ pub struct Manifest {
     pub assert_on_schema_mismatch: String,
     /// F15 分区表处理策略：abort / warn / fallback
     pub on_partitioned_table: String,
+    /// ★ Review 契约：是否含强制复核项（`review_level=required` 的 item 数 > 0）。
+    /// 发布平台据此做最小 gate 判断，无需遍历 items。
+    pub review_required: bool,
+    /// 强制复核项数（`review_level=required`）
+    pub required_review_count: usize,
+    /// 提示性复核项数（`review_level=optional`）
+    pub optional_review_count: usize,
+    /// 自动放行项数（`review_level=none`）
+    pub auto_approved_count: usize,
     pub items: Vec<ManifestItem>,
     pub warnings: Vec<String>,
 }
@@ -41,8 +52,14 @@ pub struct ManifestItem {
     pub seq: u64,
     pub source: SourceRef,
     pub original_sql: String,
+    /// 语句类型（StmtInfo.kind），如 "INSERT" / "DROP_TABLE" / "ALTER_TABLE"。
+    /// 供发布平台按类型过滤、HTML 报告按类型展示。
+    pub stmt_kind: String,
     pub backup: Option<String>,
     pub rollback: Option<String>,
+    /// ★ Review 契约：由 [`super::review_level_for`] 从 safety 推导，无需用户配置。
+    /// `"none"`（免审）/ `"optional"`（提示）/ `"required"`（强制阻断）
+    pub review_level: &'static str,
     /// ★ 嵌入聚合结构（取代散装 flag），序列化后字段平铺到 item 下
     #[serde(flatten)]
     pub safety: SafetyClass,
@@ -71,6 +88,10 @@ impl Manifest {
         let mut irreversible_if_missing = 0usize;
         let mut backup_count = 0usize;
         let mut rollback_count = 0usize;
+        // ★ Review 契约汇总
+        let mut required_review = 0usize;
+        let mut optional_review = 0usize;
+        let mut auto_approved = 0usize;
 
         for p in pairs {
             if p.backup.is_some() {
@@ -100,6 +121,11 @@ impl Manifest {
             if p.safety.irreversible_if_backup_missing {
                 irreversible_if_missing += 1;
             }
+            match review_level_for(&p.safety) {
+                "required" => required_review += 1,
+                "optional" => optional_review += 1,
+                _ => auto_approved += 1,
+            }
         }
 
         let items = pairs
@@ -108,8 +134,10 @@ impl Manifest {
                 seq: p.seq,
                 source: p.source.clone(),
                 original_sql: p.original_sql.clone(),
+                stmt_kind: p.stmt_kind.clone(),
                 backup: p.backup.clone(),
                 rollback: p.rollback.clone(),
+                review_level: review_level_for(&p.safety),
                 safety: p.safety.clone(),
                 strategy: p.strategy.clone(),
                 expected_schema: p.expected_schema.clone(),
@@ -135,6 +163,11 @@ impl Manifest {
             // ★ P1-2：透出执行期策略供发布平台读取
             assert_on_schema_mismatch: rc.assert_on_schema_mismatch.clone(),
             on_partitioned_table: rc.on_partitioned_table.clone(),
+            // ★ Review 契约：汇总字段供发布平台 O(1) gate
+            review_required: required_review > 0,
+            required_review_count: required_review,
+            optional_review_count: optional_review,
+            auto_approved_count: auto_approved,
             items,
             warnings,
         }
@@ -290,5 +323,187 @@ mod tests {
         let json = serialize_manifest(&m).unwrap();
         assert!(json.contains("\"assert_on_schema_mismatch\": \"warn\""));
         assert!(json.contains("\"on_partitioned_table\": \"fallback\""));
+    }
+
+    // ===== Review 契约:review_level 推导与汇总计数测试 =====
+
+    /// 构造指定 SafetyClass 的 pair（弥补 make_pair 不支持 counter_unrestored /
+    /// irreversible_if_backup_missing 的不足）。
+    fn make_pair_with_safety(seq: u64, safety: SafetyClass) -> BackupRollbackPair {
+        BackupRollbackPair {
+            seq,
+            stmt_kind: String::new(),
+            source: SourceRef::placeholder(),
+            original_sql: format!("-- stmt {}", seq),
+            backup: Some(format!("-- backup {}", seq)),
+            rollback: Some(format!("-- rollback {}", seq)),
+            safety,
+            strategy: BackupStrategy::default(),
+            expected_schema: None,
+            warnings: vec![],
+        }
+    }
+
+    fn safety(reliable: bool) -> SafetyClass {
+        SafetyClass {
+            reliable,
+            ..SafetyClass::default()
+        }
+    }
+
+    #[test]
+    fn review_level_none_for_clean_reliable() {
+        // reliable=true 且无任何 flag → "none"
+        let s = safety(true);
+        assert_eq!(review_level_for(&s), "none");
+    }
+
+    #[test]
+    fn review_level_optional_for_requires_lock_only() {
+        // 仅 requires_lock → "optional"
+        let s = SafetyClass {
+            reliable: true,
+            requires_lock: true,
+            ..SafetyClass::default()
+        };
+        assert_eq!(review_level_for(&s), "optional");
+    }
+
+    #[test]
+    fn review_level_optional_for_counter_unrestored_only() {
+        // 仅 counter_unrestored → "optional"
+        let s = SafetyClass {
+            reliable: true,
+            counter_unrestored: true,
+            ..SafetyClass::default()
+        };
+        assert_eq!(review_level_for(&s), "optional");
+    }
+
+    #[test]
+    fn review_level_required_for_irreversible() {
+        let s = SafetyClass {
+            reliable: true,
+            irreversible: true,
+            ..SafetyClass::default()
+        };
+        assert_eq!(review_level_for(&s), "required");
+    }
+
+    #[test]
+    fn review_level_required_for_unreliable() {
+        // !reliable（主键缺失）→ "required"
+        let s = safety(false);
+        assert_eq!(review_level_for(&s), "required");
+    }
+
+    #[test]
+    fn review_level_required_for_partial() {
+        let s = SafetyClass {
+            reliable: true,
+            partial: true,
+            ..SafetyClass::default()
+        };
+        assert_eq!(review_level_for(&s), "required");
+    }
+
+    #[test]
+    fn review_level_required_for_irreversible_if_backup_missing() {
+        let s = SafetyClass {
+            reliable: true,
+            irreversible_if_backup_missing: true,
+            ..SafetyClass::default()
+        };
+        assert_eq!(review_level_for(&s), "required");
+    }
+
+    #[test]
+    fn review_level_required_dominates_optional() {
+        // required flag 与 optional flag 同时存在 → "required"（强审优先级更高）
+        let s = SafetyClass {
+            reliable: true,
+            irreversible: true,
+            requires_lock: true,
+            counter_unrestored: true,
+            ..SafetyClass::default()
+        };
+        assert_eq!(review_level_for(&s), "required");
+    }
+
+    #[test]
+    fn manifest_review_summary_counts_correctly() {
+        // 混合批次：1 none + 1 optional + 2 required
+        let pairs = vec![
+            make_pair_with_safety(1, safety(true)), // none
+            make_pair_with_safety(
+                2,
+                SafetyClass {
+                    reliable: true,
+                    requires_lock: true,
+                    ..SafetyClass::default()
+                },
+            ), // optional
+            make_pair_with_safety(
+                3,
+                SafetyClass {
+                    reliable: true,
+                    irreversible: true,
+                    ..SafetyClass::default()
+                },
+            ), // required
+            make_pair_with_safety(4, safety(false)), // required (unreliable)
+        ];
+        let m = Manifest::from_pairs(&pairs, "mysql", &default_rc(), vec![]);
+        assert!(m.review_required);
+        assert_eq!(m.required_review_count, 2);
+        assert_eq!(m.optional_review_count, 1);
+        assert_eq!(m.auto_approved_count, 1);
+    }
+
+    #[test]
+    fn manifest_review_required_false_when_all_clean() {
+        let pairs = vec![make_pair_with_safety(1, safety(true))];
+        let m = Manifest::from_pairs(&pairs, "mysql", &default_rc(), vec![]);
+        assert!(!m.review_required);
+        assert_eq!(m.required_review_count, 0);
+        assert_eq!(m.auto_approved_count, 1);
+    }
+
+    #[test]
+    fn manifest_item_review_level_serialized() {
+        // per-item review_level 应出现在序列化 JSON 中
+        let pairs = vec![
+            make_pair_with_safety(1, safety(true)),  // none
+            make_pair_with_safety(2, safety(false)), // required
+        ];
+        let m = Manifest::from_pairs(&pairs, "mysql", &default_rc(), vec![]);
+        let json = serialize_manifest(&m).unwrap();
+        assert!(json.contains("\"review_level\": \"none\""));
+        assert!(json.contains("\"review_level\": \"required\""));
+        assert!(json.contains("\"review_required\": true"));
+        assert!(json.contains("\"required_review_count\": 1"));
+    }
+
+    #[test]
+    fn review_required_aligned_with_exit_code_2() {
+        // 不变式：exit_code=2 ⇒ review_required=true
+        // 场景 1: irreversible → exit_code=2, review_required=true
+        let pairs = vec![make_pair_with_safety(
+            1,
+            SafetyClass {
+                reliable: true,
+                irreversible: true,
+                ..SafetyClass::default()
+            },
+        )];
+        let m = Manifest::from_pairs(&pairs, "mysql", &default_rc(), vec![]);
+        assert_eq!(m.exit_code(false, false), 2);
+        assert!(m.review_required);
+
+        // 场景 2: 全 clean → exit_code=0, review_required=false
+        let pairs = vec![make_pair_with_safety(1, safety(true))];
+        let m = Manifest::from_pairs(&pairs, "mysql", &default_rc(), vec![]);
+        assert_eq!(m.exit_code(false, false), 0);
+        assert!(!m.review_required);
     }
 }

@@ -1,6 +1,6 @@
 # SqlGuard
 
-一个面向 CI/CD 流水线的 SQL 脚本检查工具，支持**传统 SQL 脚本**和 **MyBatis Mapper XML** 两种模式，使用 [Rhai](https://rhai.rs/) 脚本编写自定义规则，提供目录结构校验、文件分类、多格式报告输出、**语句级增量校验**、**备份回滚脚本自动生成**。
+一个面向 CI/CD 流水线的 SQL 脚本检查工具，支持**传统 SQL 脚本**和 **MyBatis Mapper XML** 两种模式，使用 [Rhai](https://rhai.rs/) 脚本编写自定义规则，提供目录结构校验、文件分类、多格式报告输出、**语句级增量校验**、**备份回滚脚本自动生成**、**GaussDB 混合方言解析**、**逻辑外键关系挖掘**。
 
 ## 两种检查模式
 
@@ -24,12 +24,14 @@
 - **SQL 解析保障**：基于 [sqlparser](https://crates.io/crates/sqlparser) 解析 SQL AST，通过简化包装类型暴露给 Rhai 脚本，避免字符串匹配误判注释和字面量
 - **规则筛选**：支持按规则编号（`id`）和分组（`group`）筛选，前缀通配（`DDL*`），黑白名单组合
 - **目录结构校验**：强制要求的目录结构，支持严格模式和允许列表
-- **三种报告格式**：终端彩色输出（plain）、结构化 JSON、深色主题 HTML 网页报告
+- **四种报告格式**：终端彩色输出（plain）、结构化 JSON、深色主题 HTML 网页报告、SARIF v2.1.0（GitHub/Azure/GitLab Code Scanning）
 - **增量校验**：`check-diff` 子命令通过 `git diff` 获取改动语句，按语句级 `[line, end_line] ∩ hunk` 过滤，CI 中只校验本次提交改动的 SQL
-- **备份回滚生成**：对每条 DDL/DML 自动生成 `backup.sql` / `rollback.sql` / `rollback-manifest.json` / `cleanup.sql`，支持 MySQL / PostgreSQL 双方言、多模式锁策略、长事务预检查、binlog 控制、锁合并、schema 漂移校验、分区表检测，配合发布平台在变更失败时回滚（详见 [docs/backup-rollback-design.md](docs/backup-rollback-design.md)）
+- **GaussDB 混合方言解析**：`dialect = "gaussdb"` 通过词法重写层把 Oracle/MySQL 兼容构造（`MINUS` / `SYSDATE` / `NVL` / `DUAL` / 反引号标识符等）归一化为 PG 等价语法，再用纯 PostgreSQL 方言解析，避免「PG→Oracle 回退」对标识符大小写等 PG 语义的污染（详见 [docs/dialect-fallback.md](docs/dialect-fallback.md)）
+- **备份回滚生成**：对每条 DDL/DML 自动生成 `backup.sql` / `rollback.sql` / `rollback-manifest.json` / `cleanup.sql`，支持 MySQL / PostgreSQL 双方言、多模式锁策略、长事务预检查、binlog 控制、锁合并、schema 漂移校验、分区表检测、**review 契约（风险分级 + HTML 复核报告）**，配合发布平台在变更失败时回滚（详见 [docs/backup-rollback-design.md](docs/backup-rollback-design.md)）
 - **动态重放清单导出**：`replay-export` 子命令把 SQL 脚本与 Mapper 语句导出为 `sql-manifest.json`，供分离的 Java 工程 [`replay/`](replay/) 在镜像库上做 EXPLAIN 重放、识别慢 SQL。**注意：SqlGuard 二进制本身只导出清单，不执行重放**；重放由 `sqlguard-replay`（Java/Maven，仅面向 GaussDB/openGauss）完成，需自备 JDBC 驱动
+- **逻辑外键关系挖掘**：独立二进制 `sqlguard-mine` 从 Mapper XML 的 JOIN/WHERE 等值条件中提取表间连接关系，聚合为 `relations.json`，用于团队禁用物理外键时的关系补全与数据字典生成
 - **文件级缓存**（P2-8）：`[cache].enabled = true` 或 CLI `--cache` 启用后，对未修改的文件（mtime + size 不变）复用上次检查的 violations，大仓库重复 `check` 时显著提速；运行签名（配置 + 规则脚本 + 方言 + filter + 版本）变化时整体失效
-- **CI 友好**：`error` 级违规返回非零退出码，`warning` 级仅提示不阻断
+- **CI 友好**：`error` 级违规返回非零退出码，`warning` 级仅提示不阻断；内置 CI 工作流（`ci.yml`）跑 fmt + clippy + 全量测试
 
 ## 架构
 
@@ -52,6 +54,9 @@
 │     ├── mod.rs        模块入口                                │
 │     ├── ast.rs        SqlAst / StmtInfo / SelectInfo 等包装类型│
 │     ├── parser.rs     parse_sql_to_ast() → SqlAst             │
+│     │                  └─ GaussDB 方言：先 gaussdb_rewrite    │
+│     │                    词法重写，再 PG 方言解析 + 回退链     │
+│     ├── gaussdb_rewrite.rs  Oracle/MySQL → PG 词法归一化       │
 │     ├── analyzer.rs   analyze_expr() / collect_comments() 等   │
 │     ├── scanner.rs    字符串扫描工具                          │
 │     └── runner.rs     构建 Rhai 引擎，prepend helpers，执行规则│
@@ -61,6 +66,24 @@
 │     ├── json.rs     结构化 JSON 报告                            │
 │     ├── html.rs     深色主题网页报告                            │
 │     └── sarif.rs    SARIF v2.1.0（GitHub/Azure/GitLab 扫描）   │
+└─────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────┐
+│                     sqlguard gen-rollback                     │
+├─────────────────────────────────────────────────────────────┤
+│  rollback/                                                   │
+│   ├── generator.rs  按 StmtInfo.kind 分发 DDL/DML            │
+│   ├── ddl.rs / ddl_like.rs / dml.rs  反向操作生成            │
+│   ├── render.rs     事务包裹、锁合并、预检查                  │
+│   ├── manifest.rs   rollback-manifest.json（含 review 契约）  │
+│   └── review_report.rs  rollback-review-report.html          │
+└─────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────┐
+│                     sqlguard-mine（独立二进制）               │
+├─────────────────────────────────────────────────────────────┤
+│  relation.rs  从 AST 提取 JOIN ON / WHERE 等值连接边         │
+│             → 聚合为无向关系 → relations.json                │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -123,7 +146,7 @@ cargo build --release
 sqlguard init .
 ```
 
-生成 `sqlguard.toml`（主配置）+ `sqlguard.rules.toml`（规则配置）+ 21 条内置规则脚本（6 DDL + 15 DML）+ 示例 SQL 目录结构。规则配置单独拆分到 `sqlguard.rules.toml`，避免主配置文件随规则增多而过长。
+生成 `sqlguard.toml`（主配置）+ `sqlguard.rules.toml`（规则配置）+ 22 条内置规则脚本（7 DDL + 15 DML）+ 示例 SQL 目录结构。规则配置单独拆分到 `sqlguard.rules.toml`，避免主配置文件随规则增多而过长。
 
 ### 编写 SQL 脚本
 
@@ -173,6 +196,12 @@ sqlguard gen-rollback ./sql -o rollback_out/
 
 为每条 DDL/DML 生成 `backup.sql` / `rollback.sql` / `rollback-manifest.json` / `cleanup.sql`，配合发布平台在变更失败时回滚。退出码遵循 manifest：`0`=全部可靠，`1`=仅 warning，`2`=error（irreversible/unreliable/partial）。
 
+加 `--review-report` 额外生成 `rollback-review-report.html`，DBA 可一眼定位需重点复核的高风险语句：
+
+```bash
+sqlguard gen-rollback ./sql -o rollback_out/ --review-report
+```
+
 支持 CLI 覆盖配置：
 
 ```bash
@@ -180,7 +209,8 @@ sqlguard gen-rollback ./sql -o rollback_out/ \
     --dialect mysql \
     --lock-scope global \
     --lock-timeout 60 \
-    --accept-table-lock-risk
+    --accept-table-lock-risk \
+    --review-report
 ```
 
 详见 [docs/backup-rollback-design.md](docs/backup-rollback-design.md)。
@@ -220,24 +250,39 @@ sqlguard replay-export ./sql -o manifest_out/ \
 ```
 SqlGuard/
 ├── src/
-│   ├── main.rs              # 入口，调度 check / init 流程
+│   ├── lib.rs               # ★ 库 crate 入口（供 benches/tests/sqlguard-mine 共享）
+│   ├── main.rs              # 二进制入口，调度 check / init / gen-rollback
 │   ├── cli.rs               # CLI 命令定义（clap）
-│   ├── config.rs            # 配置加载与校验（toml 反序列化）
+│   ├── config.rs            # 配置加载与校验（含 GaussDB 方言注册）
 │   ├── error.rs             # 错误类型、Violation 结构体
+│   ├── relation.rs          # ★ 逻辑外键挖掘（仅 sqlguard-mine 引用，不进主二进制）
+│   ├── replay_export.rs     # replay-export 子命令：导出 sql-manifest.json
+│   ├── cache.rs             # 文件级 mtime/size 缓存（P2-8，默认关闭）
+│   ├── bin/
+│   │   └── sqlguard-mine.rs # ★ 独立二进制：从 Mapper 挖掘逻辑外键关系
 │   ├── checker/
 │   │   ├── mod.rs
 │   │   ├── directory.rs     # 目录结构校验
-│   │   └── classification.rs # 文件分类（glob 匹配）
+│   │   ├── classification.rs # 文件分类（glob 匹配）
+│   │   └── encoding.rs      # UTF-8 BOM / 换行符检查（FILE001/FILE002）
 │   ├── rule/
 │   │   ├── mod.rs
-│   │   └── engine.rs        # 规则引擎：AST 包装、Rhai 注册、规则执行
+│   │   └── engine/
+│   │       ├── mod.rs           # 模块入口
+│   │       ├── ast.rs           # SqlAst / StmtInfo / SelectInfo 等包装类型
+│   │       ├── parser.rs        # parse_sql_to_ast() + 方言回退链
+│   │       ├── gaussdb_rewrite.rs # ★ GaussDB 词法重写层（Oracle/MySQL → PG）
+│   │       ├── analyzer.rs      # 表达式分析、注释收集
+│   │       ├── scanner.rs       # 字符串扫描工具
+│   │       └── runner.rs        # Rhai 引擎构建与规则执行
 │   ├── mapper/
 │   │   ├── mod.rs           # Mapper 模式入口：文件收集、类型映射
 │   │   ├── parser.rs        # XML 解析与 SQL 提取（quick-xml）
 │   │   ├── include.rs       # <include refid="..."/> 引用解析
-│   │   └── placeholder.rs   # #{} / ${} 占位符标准化
+│   │   ├── placeholder.rs   # #{} / ${} 占位符标准化
+│   │   └── dynamic.rs       # 动态标签剥离（<if>/<where>/<foreach>）
 │   ├── rollback/            # 备份回滚生成（gen-rollback）
-│   │   ├── mod.rs           # 模块入口、SafetyClass / BackupRollbackPair
+│   │   ├── mod.rs           # 模块入口、SafetyClass / review_level_for()
 │   │   ├── dialect.rs       # 方言适配（MySQL / PostgreSQL）
 │   │   ├── naming.rs        # 备份表命名 bks_xxx_YYYYMMDD_NNNN
 │   │   ├── generator.rs     # 主调度，按 StmtInfo.kind 分发
@@ -246,14 +291,23 @@ SqlGuard/
 │   │   ├── dml.rs           # DML 增量备份（INSERT/UPDATE/DELETE/TRUNCATE/REPLACE）
 │   │   ├── pk.rs            # 主键解析（配置 → StmtInfo → bks_ JOIN 推断）
 │   │   ├── render.rs        # SQL 文本渲染（事务包裹、锁合并、预检查）
-│   │   └── manifest.rs      # rollback-manifest.json 序列化
-│   ├── replay_export.rs     # replay-export 子命令：导出 sql-manifest.json（只导出不重放）
-│   ├── cache.rs             # 文件级 mtime/size 缓存（P2-8，默认关闭）
+│   │   ├── manifest.rs      # rollback-manifest.json（含 review 契约字段）
+│   │   ├── review_report.rs # ★ rollback-review-report.html 生成器
+│   │   └── util.rs          # ISO8601 时间戳等工具
 │   └── reporter/
 │       ├── mod.rs
 │       ├── plain.rs         # 终端彩色报告
 │       ├── json.rs          # JSON 报告
-│       └── html.rs          # HTML 报告
+│       ├── html.rs          # HTML 报告
+│       └── sarif.rs         # SARIF v2.1.0 报告
+├── benches/
+│   └── rule_engine.rs       # ★ criterion 基准测试（规则引擎性能）
+├── tests/
+│   ├── integration_test.rs  # 集成测试（含 Mapper / gen-rollback / review-report）
+│   ├── proptest_parser.rs   # ★ proptest 模糊测试（SQL 解析器鲁棒性）
+│   └── fixtures/            # ★ 测试固件（示例 SQL / Mapper XML / 配置）
+├── scripts/
+│   └── coverage.sh          # ★ cargo-llvm-cov 覆率脚本
 ├── replay/                  # ★ 分离的 Java/Maven 工程（sqlguard-replay），不随二进制分发
 │   ├── pom.xml              # 仅 GaussDB/openGauss；JDBC 驱动运行期动态加载
 │   └── src/main/java/com/sqlguard/replay/
@@ -266,7 +320,12 @@ SqlGuard/
 │       │   └── helpers.rhai      # 公共辅助函数（编译时嵌入，用户无需关心）
 │       ├── ddl/
 │       │   ├── no_drop_table.rhai
-│       │   └── primary_key_required.rhai
+│       │   ├── primary_key_required.rhai
+│       │   ├── backup_table_naming.rhai
+│       │   ├── index_naming_convention.rhai
+│       │   ├── no_redundant_index.rhai
+│       │   ├── no_reserved_keyword_naming.rhai
+│       │   └── table_name_naming.rhai      # ★ DDL007
 │       └── dml/
 │           ├── no_select_all.rhai
 │           ├── no_delete_update_without_where.rhai
@@ -283,18 +342,20 @@ SqlGuard/
 │           ├── no_nested_case.rhai
 │           ├── no_constant_where.rhai
 │           └── order_by_required_for_pagination.rhai
-├── tests/
-│   └── integration_test.rs  # 集成测试（含 Mapper 模式）
+├── .github/workflows/
+│   ├── ci.yml               # ★ CI：fmt + clippy + 全量测试（Rust + Java）
+│   └── release.yml          # Release：tag 触发跨平台二进制构建
 ├── sqlguard.toml.example    # 主配置示例（不含规则）
 ├── sqlguard.rules.toml.example  # 规则配置示例（[[rules]]）
 ├── docs/
 │   ├── rule-scripting.md    # 规则脚本编写手册
-│   ├── default-rules.md     # 默认规则手册（21 条内置规则）
-│   └── backup-rollback-design.md  # 备份回滚设计文档
+│   ├── default-rules.md     # 默认规则手册（22 条内置规则）
+│   ├── backup-rollback-design.md  # 备份回滚设计文档（含 review 契约）
+│   ├── dialect-fallback.md  # ★ 逐语句方言回退链 + GaussDB 词法重写设计
+│   ├── architecture-review.md    # 架构评审记录
+│   ├── usability-review-dba.md   # DBA 可用性评审
+│   └── p0-refactor-2026-07-23.md # P0 重构记录
 ├── deploy/
-│   ├── sqlguard-x86_64-apple-darwin
-│   ├── sqlguard-x86_64-linux-musl
-│   ├── sqlguard-aarch64-linux-musl
 │   └── USAGE.md             # 使用手册
 ├── Cargo.toml
 └── README.md
@@ -303,6 +364,24 @@ SqlGuard/
 ## 配置
 
 完整配置见 [sqlguard.toml.example](sqlguard.toml.example) 与 [sqlguard.rules.toml.example](sqlguard.rules.toml.example)。主配置（结构 / 分类 / 输出 / Mapper / 扫描 / 文件检查）与规则配置（`[[rules]]`，拆到 `sqlguard.rules.toml`）分开维护；主配置通过 `rules_file = "sqlguard.rules.toml"` 引用规则文件，不写该字段时工具会自动在同目录查找 `sqlguard.rules.toml`。
+
+### `dialect` SQL 方言
+
+```toml
+dialect = "mysql"            # generic / mysql / postgresql / gaussdb / oracle / ansi
+dialect_fallback = "oracle"  # 可选，逐语句回退方言（generic 关闭回退）
+```
+
+| 方言 | 说明 |
+|------|------|
+| `generic` | 通用方言（默认），兼容大部分标准 SQL |
+| `mysql` | MySQL 方言 |
+| `postgresql` | PostgreSQL 方言 |
+| `gaussdb` | ★ GaussDB/openGauss：先做 Oracle/MySQL → PG 词法重写（`MINUS`→`EXCEPT` / `SYSDATE`→`CURRENT_TIMESTAMP` / `NVL`→`COALESCE` / `DUAL`→子查询 / 反引号→双引号等），再用纯 PG 方言解析，默认回退 `oracle` 处理重写层未覆盖的复杂构造（如 `CONNECT BY`） |
+| `oracle` | Oracle 方言（也作为 gaussdb 的默认回退） |
+| `ansi` | ANSI 标准 SQL |
+
+CLI 可用 `--dialect` / `--dialect-fallback` 覆盖。详见 [docs/dialect-fallback.md](docs/dialect-fallback.md)。
 
 ### `[structure]` 目录结构约束
 
@@ -586,7 +665,34 @@ sqlguard gen-rollback [OPTIONS] [PATH]
       --accept-table-lock-risk   lock_scope=table 时必填（接受隐式提交释放风险）
       --fail-on-warning          warning 也按 error 处理（退出 2 而非 1）
       --allow-partial            允许 partial 回滚计划（safety.partial=true 不退出 2）
+      --review-report            额外生成 rollback-review-report.html（风险分级复核报告）
 ```
+
+`--review-report` 产出的 HTML 报告按 review_level 三区分组：
+
+| 区 | review_level | 触发条件 | 视觉 |
+|----|-------------|---------|------|
+| 强制复核 | `required` | `irreversible` / `unreliable` / `partial` | 红色置顶 |
+| 提示性复核 | `optional` | `requires_lock` / `counter_unrestored` | 黄色 |
+| 自动放行 | `none` | reliable 且无风险 flag | 绿色（默认折叠） |
+
+### `sqlguard-mine`（独立二进制）
+
+从 Mapper XML 或 SQL 脚本的 JOIN ON / WHERE 等值条件中挖掘表间逻辑外键关系，聚合为 `relations.json`。用于团队禁用物理外键时的关系补全与数据字典生成。不随主二进制分发，需单独构建：
+
+```bash
+cargo build --release --bin sqlguard-mine
+# 产物在 target/release/sqlguard-mine
+
+sqlguard-mine -p src/main/resources/mapper -o relations.json --dialect gaussdb
+```
+
+| 选项 | 说明 |
+|------|------|
+| `-p, --path <DIR>` | Mapper XML / SQL 路径，默认 `.` |
+| `--dialect <D>` | SQL 方言，默认 `generic` |
+| `--dialect-fallback <D>` | 回退方言 |
+| `-o, --output <FILE>` | 输出文件，默认 `relations.json` |
 
 ### `sqlguard replay-export`
 
@@ -751,8 +857,34 @@ SQL 脚本 → rollback::RollbackGenerator::generate()
 |------|------|----------|
 | `backup.sql` | 备份变更前数据/结构（建备份表、`INSERT INTO bks_ SELECT * FROM t`） | 变更前 |
 | `rollback.sql` | 失败时回滚（按 LIFO 序：DELETE → 还原 → RENAME 切换 → DROP 临时对象） | 变更失败 |
-| `rollback-manifest.json` | 元数据清单（语句序号、安全分类、期望 schema、警告） | 发布平台读取 |
+| `rollback-manifest.json` | 元数据清单（语句序号、安全分类、review_level、期望 schema、警告） | 发布平台读取 |
+| `rollback-review-report.html` | ★ DBA 复核报告（`--review-report` 生成，按风险分级高亮需重点检查的语句） | DBA 人工复核 |
 | `cleanup.sql` | 回滚成功后清理备份表（默认不自动执行，保留便于审计） | 回滚后（可选） |
+
+### Review 契约（风险分级 + 人工复核关卡）
+
+manifest 中每条 `ManifestItem` 自动标注 `review_level`，由 `SafetyClass` 推导，无需用户配置。发布平台据此做最小 gate 判断，无需遍历 items。
+
+| review_level | 触发条件 | 发布平台行为 |
+|---|---|---|
+| `none` | reliable 且无任何风险 flag | 自动放行，免审 |
+| `optional` | 仅 `requires_lock` 或 `counter_unrestored` | 提示性，不阻断 |
+| `required` | `irreversible` / `irreversible_if_backup_missing` / `!reliable` / `partial` | **强制阻断**，等待 review-manifest 覆盖 |
+
+manifest 顶层汇总字段：
+
+```json
+{
+  "review_required": true,
+  "required_review_count": 3,
+  "optional_review_count": 1,
+  "auto_approved_count": 12
+}
+```
+
+不变式：**退出码 2 ⇒ `review_required=true`**，与现有退出码决策表自洽。
+
+`--review-report` 生成的 HTML 报告按三区分组：强制复核（红色置顶，含 IRREVERSIBLE/UNRELIABLE 等风险 badges + original/backup/rollback 三栏 SQL 折叠）→ 提示性复核（黄色）→ 自动放行（绿色，默认折叠）。
 
 ### 关键特性
 
@@ -766,6 +898,7 @@ SQL 脚本 → rollback::RollbackGenerator::generate()
 - **schema 漂移校验**（F13）：manifest 记录 `expected_schema`，发布平台执行期比对实际 schema，漂移按 `abort` / `warn` / `ignore` 处理
 - **分区表检测**（F15）：`CREATE TABLE LIKE` 生成非分区表，按 `abort` / `warn` / `fallback` 处理
 - **安全分类聚合**（C2）：`SafetyClass` 聚合 `reliable` / `partial` / `irreversible` / `counter_unrestored` / `requires_lock` 等标志，CI 按分类决策退出码
+- **★ Review 契约**：每条语句自动标注 `review_level`（none/optional/required），manifest 顶层汇总 `review_required` + 计数，发布平台据此 gate；`--review-report` 生成 HTML 复核报告
 - **幂等执行**（F9）：`backup.sql` 多次执行结果一致，`CREATE TABLE IF NOT EXISTS bks_` + `INSERT IGNORE`（MySQL）/ `ON CONFLICT DO NOTHING`（PG）
 
 ### 已支持语句
@@ -934,8 +1067,30 @@ cargo build --release --target x86_64-pc-windows-gnu
 ### 运行测试
 
 ```bash
+# 全量测试（单元 + 集成 + proptest）
 cargo test --release
+
+# 仅集成测试
+cargo test --test integration_test
+
+# 基准测试（criterion）
+cargo bench
+
+# 覆盖率（cargo-llvm-cov）
+./scripts/coverage.sh
+# 或手动：cargo llvm-cov --html --output-dir coverage/
 ```
+
+测试矩阵：
+
+| 类型 | 数量 | 说明 |
+|------|------|------|
+| 单元测试 | 495+ | `src/` 各模块内 `#[cfg(test)]` |
+| 集成测试 | 25+ | `tests/integration_test.rs`，覆盖 check/init/gen-rollback/replay-export/mapper |
+| proptest | 10 | `tests/proptest_parser.rs`，SQL 解析器模糊测试 |
+| 基准测试 | - | `benches/rule_engine.rs`，criterion 规则引擎性能 |
+
+CI（`.github/workflows/ci.yml`）在 PR 合入主干时自动运行：`cargo fmt --check` + `cargo clippy -D warnings` + `cargo test --all-targets` + Java replay 工程的 `mvn test`。
 
 ## 技术栈
 
@@ -948,6 +1103,8 @@ cargo test --release
 | [globset](https://crates.io/crates/globset) | 文件匹配与分类 |
 | [colored](https://crates.io/crates/colored) | 终端彩色输出 |
 | [serde](https://crates.io/crates/serde) / [toml](https://crates.io/crates/toml) | 配置序列化 |
+| [criterion](https://crates.io/crates/criterion) | 基准测试（benches/） |
+| [proptest](https://crates.io/crates/proptest) | 模糊测试（SQL 解析器鲁棒性） |
 
 ## License
 

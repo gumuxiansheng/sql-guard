@@ -2185,6 +2185,82 @@ for stmt in &dyn_stmts {
 
 ---
 
+### 4.15 Review 契约（风险分级 + 人工复核关卡）
+
+> 日期：2026-07-31
+> 背景：`gen-rollback` 产出高危 DDL/DML，接入发布平台前需保留 review 关卡，避免不可逆/不可靠语句被直接执行。
+
+#### 4.15.1 设计目标
+
+把「是否需要复核 / 是否已复核通过」从脚本里的被动注释，提升为 **manifest 契约的一等公民**，使发布平台能 gate、且不易被悄悄绕过。原则：
+
+1. **复用现有 SafetyClass**，不新增配置负担——review 强度由风险分类自动推导
+2. **职责分离**——SqlGuard 负责「标注需求 + 提供可校验的产物」，发布平台负责「流程编排 + 执行阻断」
+3. **默认安全**——高风险项默认阻断，而非默认放行
+
+#### 4.15.2 review_level 推导
+
+每条 `ManifestItem` 自动标注 `review_level`，由 `rollback::review_level_for(&safety)` 推导，无需用户配置：
+
+| review_level | 触发条件（任一 safety flag） | 发布平台行为 |
+|---|---|---|
+| `none` | reliable 且无任何 flag | 自动放行，免审 |
+| `optional` | 仅 `requires_lock` 或 `counter_unrestored` | 提示性，不阻断 |
+| `required` | `irreversible` / `irreversible_if_backup_missing` / `!reliable` / `partial` | **强制阻断**，等待 review-manifest 覆盖 |
+
+优先级：`required` > `optional` > `none`（任一 required flag 命中即为 required）。
+
+#### 4.15.3 manifest 汇总字段
+
+manifest 顶层增加 4 个字段，供发布平台 O(1) gate：
+
+```json
+{
+  "review_required": true,
+  "required_review_count": 3,
+  "optional_review_count": 1,
+  "auto_approved_count": 12
+}
+```
+
+**不变式**：退出码 2 ⇒ `review_required=true`，与 4.14 决策表自洽。
+
+#### 4.15.4 HTML 复核报告（`--review-report`）
+
+`gen-rollback --review-report` 额外产出 `rollback-review-report.html`，DBA 可一眼定位需重点复核的语句：
+
+- **按 review_level 三区分组**：强制复核（红色置顶）→ 提示性复核（黄色）→ 自动放行（绿色，默认折叠）
+- **风险 badges**：从 SafetyClass 渲染 IRREVERSIBLE / UNRELIABLE / PARTIAL / REQUIRES_LOCK / COUNTER_UNRESTORED / PARTITIONED
+- **SQL 三栏折叠**：original / backup / rollback 用 `<details>` 原生折叠
+- **纯静态 HTML**：无外部依赖，离线可用（DBA 环境常无外网）
+
+#### 4.15.5 端到端流程
+
+```
+[gen-rollback]                       [发布平台 / DBA]
+     │                                     │
+     ├─ 产出 rollback-manifest.json        │
+     │  (含 review_level + 汇总)           │
+     ├─ 产出 rollback-review-report.html   │
+     │  (--review-report)                  │
+     ├─ 退出码 0/1/2                       │
+     │  (2=含 required,默认阻断)          │
+     │                                     │
+     └────────────────────────────────────►│
+                                           ├─ 读 manifest,展示 required 项
+                                           ├─ DBA 逐条 review
+                                           ├─ 写 review-manifest.json (M2)
+                                           ├─ 对三产物签名 (M2)
+                                           └─ 全覆盖 → 执行 / 有缺口 → 阻断
+```
+
+#### 4.15.6 实施分期
+
+- **M1（已实现）**：标注侧——`review_level` 推导 + manifest 汇总字段 + HTML 复核报告
+- **M2（规划中）**：校验侧——独立 `review-manifest.json` + HMAC-SHA256 签名 + `sqlguard review verify` 子命令
+
+---
+
 ## 五、风险与缓解（★ 已对照 DBA 评审意见全面修正）
 
 | 风险 | 缓解 |

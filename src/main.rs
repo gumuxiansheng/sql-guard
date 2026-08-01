@@ -111,6 +111,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             accept_table_lock_risk,
             fail_on_warning,
             allow_partial,
+            review_report,
         } => {
             let config_path = config
                 .clone()
@@ -127,6 +128,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 accept_table_lock_risk,
                 fail_on_warning,
                 allow_partial,
+                review_report,
             )?;
             std::process::exit(code);
         }
@@ -749,6 +751,7 @@ fn run_gen_rollback(
     accept_table_lock_risk: bool,
     fail_on_warning: bool,
     allow_partial: bool,
+    review_report: bool,
 ) -> Result<i32, SqlGuardError> {
     let (mut config, _config_dir) = load_config(config_path, explicit_config)?;
 
@@ -1018,6 +1021,14 @@ fn run_gen_rollback(
 
     eprintln!("Wrote {}", cleanup_path.display());
     eprintln!("Wrote {}", manifest_path.display());
+
+    // ★ Review 契约:可选生成 rollback-review-report.html
+    if review_report {
+        let html = sqlguard::rollback::generate_review_report(&manifest);
+        let report_path = absolute_output.join("rollback-review-report.html");
+        fs::write(&report_path, &html).map_err(SqlGuardError::IoError)?;
+        eprintln!("Wrote {}", report_path.display());
+    }
 
     let exit_code = manifest.exit_code(fail_on_warning, allow_partial);
     eprintln!(

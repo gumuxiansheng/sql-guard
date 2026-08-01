@@ -2532,6 +2532,87 @@ fn test_gen_rollback_end_to_end() {
 }
 
 #[test]
+fn test_gen_rollback_review_report() {
+    // 端到端验证 --review-report flag:产出 rollback-review-report.html
+    let dir = "/tmp/sqlguard-test-gen-rollback-review-report";
+    let _ = std::fs::remove_dir_all(dir);
+    std::fs::create_dir_all(format!("{}/sql/dml", dir)).unwrap();
+    std::fs::create_dir_all(format!("{}/out", dir)).unwrap();
+
+    // INSERT + DROP TABLE(触发 required review)
+    std::fs::write(
+        format!("{}/sql/dml/users.sql", dir),
+        "INSERT INTO users (id, name) VALUES (1, 'alice');\nDROP TABLE orders;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        format!("{}/sqlguard.toml", dir),
+        "[structure]\npaths = [\"sql\"]\nstrict = false\nallow_extra = [\"*\"]\n[classification]\nrules = []\ndefault_type = \"other\"\n[rollback]\nenabled = true\ndialect = \"mysql\"\nbinlog_strategy = \"never\"\n",
+    )
+    .unwrap();
+
+    let output = Command::new(&binary_abs_path())
+        .args([
+            "gen-rollback",
+            dir,
+            "-c",
+            &format!("{}/sqlguard.toml", dir),
+            "-o",
+            &format!("{}/out", dir),
+            "--review-report",
+        ])
+        .output()
+        .expect("Failed to run sqlguard gen-rollback --review-report");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("rollback-review-report.html"),
+        "stderr 应提及 HTML 报告路径，stderr: {}",
+        stderr
+    );
+
+    let report_path = format!("{}/out/rollback-review-report.html", dir);
+    assert!(
+        Path::new(&report_path).exists(),
+        "rollback-review-report.html 应存在"
+    );
+
+    let html = std::fs::read_to_string(&report_path).unwrap();
+    // DROP TABLE 触发 required review → 状态应为 NEEDS REVIEW
+    assert!(
+        html.contains("NEEDS REVIEW"),
+        "含 DROP TABLE 的批次应显示 NEEDS REVIEW"
+    );
+    // 应包含 DROP_TABLE 语句类型
+    assert!(
+        html.contains("DROP_TABLE"),
+        "HTML 应包含 DROP_TABLE 语句类型"
+    );
+    // 应包含 IRREVERSIBLE 风险 badge
+    assert!(
+        html.contains("IRREVERSIBLE"),
+        "HTML 应包含 IRREVERSIBLE 风险 badge"
+    );
+    // 应包含汇总计数
+    assert!(html.contains("Required Review"));
+    assert!(html.contains("Auto Approved"));
+
+    // manifest 中应包含 review_level 字段
+    let manifest_text =
+        std::fs::read_to_string(format!("{}/out/rollback-manifest.json", dir)).unwrap();
+    assert!(
+        manifest_text.contains("\"review_level\""),
+        "manifest 应包含 review_level 字段"
+    );
+    assert!(
+        manifest_text.contains("\"review_required\": true"),
+        "manifest 应包含 review_required: true"
+    );
+
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn test_inline_exemption() {
     // 验证行内豁免：-- sqlguard-disable-next-line / -- sqlguard-disable-line 过滤 violation
     let dir = "/tmp/sqlguard-test-exemption";
