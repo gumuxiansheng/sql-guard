@@ -90,6 +90,15 @@ pub enum Commands {
         /// select,insert,update,delete,merge,ddl,other). Empty = all.
         #[clap(long)]
         types: Option<String>,
+
+        /// Export only statements changed since a git baseline (incremental mode).
+        ///
+        /// Runs `git diff --unified=0 <base>...HEAD` and exports only statements
+        /// whose line range intersects a hunk (new files are fully exported).
+        /// Deleted statements are written to `sql-manifest-removed.json`.
+        /// Omit for a full export (current behavior).
+        #[clap(long)]
+        base: Option<String>,
     },
     /// Initialize default configuration in the current directory
     Init {

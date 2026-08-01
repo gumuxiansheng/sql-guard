@@ -2673,3 +2673,213 @@ fn test_inline_exemption() {
 
     let _ = std::fs::remove_dir_all(dir);
 }
+
+#[test]
+fn test_replay_export_incremental() {
+    // 端到端：replay-export --base 增量导出。改动文件仅导出命中 hunk 的语句，
+    // 被删语句写入 sql-manifest-removed.json。
+    if !require_git() {
+        return;
+    }
+    let dir = "/tmp/sqlguard-test-replay-inc";
+    let _ = std::fs::remove_dir_all(dir);
+
+    Command::new("git")
+        .args(["init", dir])
+        .output()
+        .expect("git init");
+    Command::new("git")
+        .current_dir(dir)
+        .args(["config", "user.email", "t@t.com"])
+        .output()
+        .expect("git config");
+    Command::new("git")
+        .current_dir(dir)
+        .args(["config", "user.name", "T"])
+        .output()
+        .expect("git config");
+
+    Command::new(&binary_abs_path())
+        .args(["init", dir])
+        .output()
+        .expect("sqlguard init");
+
+    // 初始版本：3 条语句
+    std::fs::create_dir_all(format!("{}/sql/dml", dir)).unwrap();
+    std::fs::write(
+        format!("{}/sql/dml/001.sql", dir),
+        "SELECT 1;\nSELECT 2;\nSELECT 3;\n",
+    )
+    .unwrap();
+    Command::new("git")
+        .current_dir(dir)
+        .args(["add", "."])
+        .output()
+        .expect("git add");
+    Command::new("git")
+        .current_dir(dir)
+        .args(["commit", "-m", "initial"])
+        .output()
+        .expect("git commit");
+
+    // 第二次提交：第 2 条修改、第 3 条删除、新增 002.sql
+    std::fs::write(
+        format!("{}/sql/dml/001.sql", dir),
+        "SELECT 1;\nSELECT 20;\n",
+    )
+    .unwrap();
+    std::fs::write(format!("{}/sql/dml/002.sql", dir), "SELECT 9;\n").unwrap();
+    Command::new("git")
+        .current_dir(dir)
+        .args(["add", "."])
+        .output()
+        .expect("git add");
+    Command::new("git")
+        .current_dir(dir)
+        .args(["commit", "-m", "modify, delete, add"])
+        .output()
+        .expect("git commit");
+
+    // 增量导出
+    let out_dir = format!("{}/out", dir);
+    let output = Command::new(&binary_abs_path())
+        .current_dir(dir)
+        .args([
+            "replay-export",
+            ".",
+            "-o",
+            &out_dir,
+            "--base",
+            "HEAD~1",
+            "-c",
+            &format!("{}/sqlguard.toml", dir),
+        ])
+        .output()
+        .expect("sqlguard replay-export --base");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("incremental"),
+        "应提示增量导出，stderr: {}",
+        stderr
+    );
+
+    // 主清单：仅 001.sql#2（modified）与 002.sql#1（added）
+    let manifest_text =
+        std::fs::read_to_string(format!("{}/sql-manifest.json", out_dir)).unwrap();
+    let manifest: serde_json::Value = serde_json::from_str(&manifest_text).expect("manifest json");
+    assert_eq!(manifest["version"], 1);
+    assert_eq!(manifest["incremental"], true);
+    assert_eq!(manifest["base"], "HEAD~1");
+    assert_eq!(manifest["statement_count"], 2);
+    let statements = manifest["statements"].as_array().unwrap();
+    let ids: Vec<(&str, &str)> = statements
+        .iter()
+        .map(|s| (s["id"].as_str().unwrap(), s["change"].as_str().unwrap()))
+        .collect();
+    assert!(
+        ids.contains(&("sql/dml/001.sql#2", "modified")),
+        "应包含修改语句，实际: {:?}",
+        ids
+    );
+    assert!(
+        ids.contains(&("sql/dml/002.sql#1", "added")),
+        "应包含新增文件语句，实际: {:?}",
+        ids
+    );
+    assert!(
+        !ids.iter().any(|(id, _)| *id == "sql/dml/001.sql#3"),
+        "被删语句不应出现在主清单，实际: {:?}",
+        ids
+    );
+
+    // removed 清单：仅 001.sql#3
+    let removed_text =
+        std::fs::read_to_string(format!("{}/sql-manifest-removed.json", out_dir)).unwrap();
+    let removed: serde_json::Value = serde_json::from_str(&removed_text).expect("removed json");
+    assert_eq!(removed["base"], "HEAD~1");
+    assert_eq!(removed["removed_count"], 1);
+    let removed_ids: Vec<&str> = removed["removed"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(removed_ids, vec!["sql/dml/001.sql#3"]);
+
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn test_replay_export_incremental_no_changes() {
+    // 无改动：主清单为空 + removed 文件生成且为空
+    if !require_git() {
+        return;
+    }
+    let dir = "/tmp/sqlguard-test-replay-none";
+    let _ = std::fs::remove_dir_all(dir);
+
+    Command::new("git")
+        .args(["init", dir])
+        .output()
+        .expect("git init");
+    Command::new("git")
+        .current_dir(dir)
+        .args(["config", "user.email", "t@t.com"])
+        .output()
+        .expect("git config");
+    Command::new("git")
+        .current_dir(dir)
+        .args(["config", "user.name", "T"])
+        .output()
+        .expect("git config");
+    Command::new(&binary_abs_path())
+        .args(["init", dir])
+        .output()
+        .expect("sqlguard init");
+    std::fs::create_dir_all(format!("{}/sql/dml", dir)).unwrap();
+    std::fs::write(format!("{}/sql/dml/001.sql", dir), "SELECT 1;\n").unwrap();
+    Command::new("git")
+        .current_dir(dir)
+        .args(["add", "."])
+        .output()
+        .expect("git add");
+    Command::new("git")
+        .current_dir(dir)
+        .args(["commit", "-m", "initial"])
+        .output()
+        .expect("git commit");
+
+    let out_dir = format!("{}/out", dir);
+    let output = Command::new(&binary_abs_path())
+        .current_dir(dir)
+        .args([
+            "replay-export",
+            ".",
+            "-o",
+            &out_dir,
+            "--base",
+            "HEAD",
+            "-c",
+            &format!("{}/sqlguard.toml", dir),
+        ])
+        .output()
+        .expect("sqlguard replay-export --base");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("No SQL changes detected"),
+        "应提示无改动，stderr: {}",
+        stderr
+    );
+    let manifest_text =
+        std::fs::read_to_string(format!("{}/sql-manifest.json", out_dir)).unwrap();
+    let manifest: serde_json::Value = serde_json::from_str(&manifest_text).expect("manifest json");
+    assert_eq!(manifest["statement_count"], 0);
+    let removed_text =
+        std::fs::read_to_string(format!("{}/sql-manifest-removed.json", out_dir)).unwrap();
+    let removed: serde_json::Value = serde_json::from_str(&removed_text).expect("removed json");
+    assert_eq!(removed["removed_count"], 0);
+
+    let _ = std::fs::remove_dir_all(dir);
+}

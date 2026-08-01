@@ -385,6 +385,7 @@ mod tests {
             cache: crate::config::CacheConfig::default(),
             dialect: crate::config::CheckDialect::default(),
             dialect_fallback: None,
+            trust_dynamic_substitution: true,
         };
         let rc = cfg.rollback.clone();
         (cfg, rc)

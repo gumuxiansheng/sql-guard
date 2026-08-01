@@ -708,6 +708,24 @@ sqlguard replay-export [OPTIONS] [PATH]
   -c, --config <FILE>   配置文件路径，默认 sqlguard.toml
   -o, --output-dir <D>  输出目录（生成 sql-manifest.json）
       --types <T>       仅导出指定类型，逗号分隔：select,insert,update,delete,merge,ddl,other。空 = 全部
+      --base <GIT-REF>  增量导出：只导出自该 git 基线以来新增/修改的语句，
+                        被删语句写入 sql-manifest-removed.json。缺省 = 全量导出
+```
+
+**增量导出（`--base`，CI 推荐）**：复用 `check-diff` 的 git diff 机制
+（`git diff --unified=0 <base>...HEAD`），只导出改动语句：
+
+- 新增文件整文件导出（`change: "added"`）；改动文件内语句 `[line, end_line]` 与
+  hunk 有交集才导出（`change: "modified"`），Mapper 按标签起始行命中，变体全量展开。
+- 被删语句通过旧侧 hunk + `git show <base>:<path>` 识别，写入
+  `sql-manifest-removed.json`（仅元信息，供 CI 从历史报告剔除）。
+- 增量清单顶层增加可选字段 `base` / `incremental`，语句级增加可选 `change`；
+  清单 `version` 保持 1，旧版 `sqlguard-replay` 直接可用（忽略未知字段）。
+- 无改动时清单 `statement_count: 0`，removed 文件照常生成。
+
+```bash
+# CI：只导出本次 PR 改动，重放成本与改动量成正比
+sqlguard replay-export ./sql -o manifest_out/ --base origin/main
 ```
 
 重放由 `replay/` Java 工程完成，详见上方「导出动态重放清单」小节。

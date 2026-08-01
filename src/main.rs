@@ -1,5 +1,6 @@
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use clap::Parser;
 
@@ -107,12 +108,20 @@ fn main_inner() -> Result<(), Box<dyn std::error::Error>> {
             config,
             output_dir,
             types,
+            base,
         } => {
             let config_path = config
                 .clone()
                 .unwrap_or_else(|| PathBuf::from("sqlguard.toml"));
             let explicit_config = config.is_some();
-            run_replay_export(&path, &config_path, explicit_config, &output_dir, &types)?;
+            run_replay_export(
+                &path,
+                &config_path,
+                explicit_config,
+                &output_dir,
+                &types,
+                base.as_deref(),
+            )?;
         }
         Commands::GenRollback {
             path,
@@ -268,6 +277,7 @@ fn check_files(
             config_dir,
             filter,
             0,
+            false,
         )?;
         // 写入缓存（clone 一份，原始 violations 用于本次输出）
         cache.insert(file_path, violations.clone());
@@ -326,6 +336,7 @@ fn check_files(
                     config_dir,
                     filter,
                     line_offset,
+                    sql.has_dynamic,
                 )?;
                 file_violations.extend(violations);
             }
@@ -530,6 +541,7 @@ fn run_replay_export(
     explicit_config: bool,
     output_dir: &Path,
     types: &Option<String>,
+    base: Option<&str>,
 ) -> Result<(), SqlGuardError> {
     let (config, _config_dir) = load_config(config_path, explicit_config)?;
 
@@ -548,25 +560,87 @@ fn run_replay_export(
 
     let type_filter = replay_export::parse_type_filter(types);
 
-    let manifest =
-        replay_export::build_manifest(&absolute_target, &sql_files, &mapper_files, &type_filter)?;
-
-    let json = replay_export::manifest_to_json(&manifest)?;
-
     let output_dir_abs = resolve_absolute_path(output_dir);
     if !output_dir_abs.exists() {
         fs::create_dir_all(&output_dir_abs).map_err(SqlGuardError::IoError)?;
     }
+
+    // 增量导出：--base 指定 git 基线，只导出改动语句
+    let (manifest, removed_manifest, sql_count, mapper_count) = if let Some(base_ref) = base {
+        eprintln!("Computing diff: {}...HEAD", base_ref);
+        let mut patterns: Vec<&str> = vec!["*.sql", "*.ddl", "*.dml"];
+        let mapper_patterns_owned: Vec<String> = if config.mapper.enabled {
+            config.mapper.patterns.clone()
+        } else {
+            Vec::new()
+        };
+        for p in &mapper_patterns_owned {
+            patterns.push(p.as_str());
+        }
+        let diffs = git_diff::get_diff(base_ref, &patterns)?;
+        if diffs.is_empty() {
+            eprintln!("No SQL changes detected since {}", base_ref);
+        } else {
+            eprintln!(
+                "Incremental export on {} file(s) changed since {}",
+                diffs.len(),
+                base_ref
+            );
+        }
+        let inc = replay_export::build_incremental_manifest(
+            &absolute_target,
+            &sql_files,
+            &mapper_files,
+            &diffs,
+            base_ref,
+            &type_filter,
+        )?;
+        let removed_manifest = replay_export::RemovedManifest {
+            version: 1,
+            generator: "sqlguard replay-export".to_string(),
+            base: base_ref.to_string(),
+            generated_at: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_secs().to_string())
+                .unwrap_or_default(),
+            removed_count: inc.removed.len(),
+            removed: inc.removed,
+        };
+        (inc.manifest, Some(removed_manifest), sql_files.len(), mapper_files.len())
+    } else {
+        let manifest =
+            replay_export::build_manifest(&absolute_target, &sql_files, &mapper_files, &type_filter)?;
+        (manifest, None, sql_files.len(), mapper_files.len())
+    };
+
+    let json = replay_export::manifest_to_json(&manifest)?;
+
     let manifest_path = output_dir_abs.join("sql-manifest.json");
     fs::write(&manifest_path, &json).map_err(SqlGuardError::IoError)?;
 
-    eprintln!(
-        "Replay manifest exported: {} ({} statements, {} sql files, {} mapper files)",
-        manifest_path.display(),
-        manifest.statement_count,
-        sql_files.len(),
-        mapper_files.len(),
-    );
+    // 增量模式额外输出被删语句清单
+    if let Some(removed) = removed_manifest {
+        let removed_json = replay_export::removed_manifest_to_json(&removed)?;
+        let removed_path = output_dir_abs.join("sql-manifest-removed.json");
+        fs::write(&removed_path, &removed_json).map_err(SqlGuardError::IoError)?;
+        eprintln!(
+            "Replay manifest exported (incremental, base={}): {} ({} statements, {} removed, {} sql files, {} mapper files)",
+            manifest.base.as_deref().unwrap_or(""),
+            manifest_path.display(),
+            manifest.statement_count,
+            removed.removed_count,
+            sql_count,
+            mapper_count,
+        );
+    } else {
+        eprintln!(
+            "Replay manifest exported: {} ({} statements, {} sql files, {} mapper files)",
+            manifest_path.display(),
+            manifest.statement_count,
+            sql_count,
+            mapper_count,
+        );
+    }
 
     Ok(())
 }
@@ -713,6 +787,7 @@ fn run_check_diff(
                     &config_dir,
                     &filter,
                     line_offset,
+                    sql.has_dynamic,
                 )?;
                 let filtered = filter_violations_by_diff(violations, file_diff);
                 all_violations.extend(filtered);
@@ -737,6 +812,7 @@ fn run_check_diff(
                 &config_dir,
                 &filter,
                 0,
+                false,
             )?;
             let filtered = filter_violations_by_diff(violations, file_diff);
             all_violations.extend(filtered);
@@ -1529,6 +1605,7 @@ fn generate_default_config() -> Config {
         cache: sqlguard::config::CacheConfig::default(),
         dialect: sqlguard::config::CheckDialect::default(),
         dialect_fallback: None,
+        trust_dynamic_substitution: true,
     }
 }
 
@@ -1959,6 +2036,7 @@ mod tests {
         let diff = FileDiff {
             path: PathBuf::from("test.sql"),
             hunks: vec![],
+            old_hunks: vec![],
             is_new: true,
         };
         let result = filter_violations_by_diff(violations, &diff);
@@ -1971,6 +2049,7 @@ mod tests {
         let diff = FileDiff {
             path: PathBuf::from("test.sql"),
             hunks: vec![(8, 15)],
+            old_hunks: vec![],
             is_new: false,
         };
         let result = filter_violations_by_diff(violations, &diff);
@@ -1983,6 +2062,7 @@ mod tests {
         let diff = FileDiff {
             path: PathBuf::from("test.sql"),
             hunks: vec![(8, 15)],
+            old_hunks: vec![],
             is_new: false,
         };
         let result = filter_violations_by_diff(violations, &diff);
@@ -1995,6 +2075,7 @@ mod tests {
         let diff = FileDiff {
             path: PathBuf::from("test.sql"),
             hunks: vec![(8, 15)],
+            old_hunks: vec![],
             is_new: false,
         };
         let result = filter_violations_by_diff(violations, &diff);
@@ -2009,6 +2090,7 @@ mod tests {
         let diff = FileDiff {
             path: PathBuf::from("test.sql"),
             hunks: vec![(15, 25)],
+            old_hunks: vec![],
             is_new: false,
         };
         let result = filter_violations_by_diff(vec![v], &diff);

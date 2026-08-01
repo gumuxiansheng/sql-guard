@@ -10,6 +10,11 @@
 //!   （已做 `#{}`→`?` 标准化与 `<include>` 解析），一条标签对应一条清单项。
 //! - 事务控制语句（COMMIT/ROLLBACK/START TRANSACTION/SET/USE）不导出，
 //!   它们不是独立的可重放单元。
+//!
+//! 增量导出（`replay-export --base <ref>`）：复用 `git_diff` 的 hunk 解析，
+//! 只导出自 git 基线以来新增/修改的语句，并通过旧侧 hunk 识别被删除的语句
+//! （写入独立的 `sql-manifest-removed.json`）。详见
+//! `docs/replay-export-incremental-design.md`。
 
 use std::collections::HashSet;
 use std::fs;
@@ -19,6 +24,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::Serialize;
 
 use crate::error::SqlGuardError;
+use crate::git_diff::{self, FileDiff};
 use crate::mapper;
 use crate::rule::engine::parser::parse_sql_to_ast;
 
@@ -30,6 +36,12 @@ pub struct Manifest {
     pub generated_at: String,
     pub statement_count: usize,
     pub statements: Vec<ManifestStatement>,
+    /// 增量导出时的 git 基线（可选；全量导出缺省）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub base: Option<String>,
+    /// 增量导出标记（可选；全量导出缺省）。旧版消费方忽略未知字段。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub incremental: Option<bool>,
 }
 
 /// 清单中的单条 SQL 语句。
@@ -65,6 +77,45 @@ pub struct ManifestStatement {
     /// 仅 mapper 动态分支展开的变体有此字段。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub variant_label: Option<String>,
+    /// 增量导出时的变更状态：`added`（新文件）/ `modified`（改动文件内命中 hunk）。
+    /// 全量导出缺省。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub change: Option<String>,
+}
+
+/// 增量导出中被删除语句的元信息（序列化到 `sql-manifest-removed.json`）。
+#[derive(Debug, Serialize)]
+pub struct RemovedStatement {
+    /// 与旧清单一致的 id（旧文件顺序编号）。
+    pub id: String,
+    /// 来源文件路径（相对 target_dir 的展示路径）。
+    pub source: String,
+    /// 来源类别：`sql` / `mapper`。
+    pub source_type: String,
+    /// 起始行（1-indexed，旧文件行号）。
+    pub line: i64,
+    /// 结束行（1-indexed，含，旧文件行号）。
+    pub end_line: i64,
+    /// Mapper 标签 id，SQL 脚本为 None。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub statement_id: Option<String>,
+}
+
+/// 被删语句清单，序列化为 `sql-manifest-removed.json`。
+#[derive(Debug, Serialize)]
+pub struct RemovedManifest {
+    pub version: u32,
+    pub generator: String,
+    pub base: String,
+    pub generated_at: String,
+    pub removed_count: usize,
+    pub removed: Vec<RemovedStatement>,
+}
+
+/// 增量导出结果：主清单（仅含新增/修改语句）+ 被删语句列表。
+pub struct IncrementalManifest {
+    pub manifest: Manifest,
+    pub removed: Vec<RemovedStatement>,
 }
 
 /// 解析类型过滤器。空集合表示不过滤（导出全部）。
@@ -79,7 +130,7 @@ pub fn parse_type_filter(s: &Option<String>) -> HashSet<String> {
     }
 }
 
-/// 收集并构建重放清单。
+/// 收集并构建重放清单（全量导出）。
 pub fn build_manifest(
     target_dir: &Path,
     sql_files: &[PathBuf],
@@ -94,121 +145,14 @@ pub fn build_manifest(
         let content = fs::read_to_string(file_path).map_err(|e| {
             SqlGuardError::CheckError(format!("Failed to read '{}': {}", file_path.display(), e))
         })?;
-        let mut seq: usize = 0;
-        let ast = parse_sql_to_ast(&content, crate::config::CheckDialect::Generic);
-        let total_lines = content.lines().count() as i64;
-        let source = display_path(file_path, target_dir);
-        let stmt_count = ast.statements.len();
-        for (i, stmt) in ast.statements.iter().enumerate() {
-            match replay_type(&stmt.kind) {
-                None => continue,
-                Some(ty) => {
-                    if !type_filter.is_empty() && !type_filter.contains(ty) {
-                        continue;
-                    }
-                    seq += 1;
-                    let parse_error = if stmt.kind == "PARSE_ERROR" {
-                        Some("parse error".to_string())
-                    } else {
-                        None
-                    };
-                    // 语句结束行：优先用下一条语句的起始行 - 1（能正确覆盖
-                    // 结束符 `)`/`;` 单独成行的情况）；末条语句延伸到 EOF。
-                    let effective_end = if i + 1 < stmt_count {
-                        let next_line = ast.statements[i + 1].line;
-                        if next_line > stmt.line {
-                            next_line - 1
-                        } else {
-                            stmt.end_line
-                        }
-                    } else {
-                        total_lines.max(stmt.end_line)
-                    };
-                    statements.push(ManifestStatement {
-                        id: format!("{}#{}", source, seq),
-                        sql: slice_by_lines(&content, stmt.line, effective_end),
-                        stmt_type: ty.to_string(),
-                        source: source.clone(),
-                        source_type: "sql".to_string(),
-                        line: stmt.line,
-                        end_line: effective_end,
-                        statement_id: None,
-                        parse_error,
-                        variant_of: None,
-                        variant_label: None,
-                    });
-                }
-            }
-        }
+        statements.extend(sql_file_statements(file_path, &content, target_dir, type_filter));
     }
 
     // Mapper XML 模式：保留动态 SQL 结构，按分支组合展开为多个变体。
     // 每条 <select>/<insert>/<update>/<delete> 经 dynamic 模块展开后，
     // 无动态分支 → 1 条（不加 #vN）；有动态分支 → N 条（加 #v<序号>）。
     for file_path in mapper_files {
-        let dyn_stmts = match mapper::dynamic::parse_dynamic_statements(file_path) {
-            Ok(v) => v,
-            Err(e) => {
-                eprintln!(
-                    "Warning: failed to parse mapper XML '{}': {}",
-                    file_path.display(),
-                    e
-                );
-                continue;
-            }
-        };
-        let source = display_path(file_path, target_dir);
-        for stmt in &dyn_stmts {
-            let ty = stmt.statement_type.as_str();
-            if !type_filter.is_empty() && !type_filter.contains(ty) {
-                continue;
-            }
-            let line = stmt.raw_xml_line as i64;
-            let base_id = format!("{}#{}", source, stmt.statement_id);
-            let variants = mapper::dynamic::expand_variants(
-                stmt,
-                mapper::dynamic::DEFAULT_MAX_INDEPENDENT_IFS,
-            );
-
-            // 判断是否有动态分支：变体数 > 1，或唯一变体的 label 非空
-            let has_dynamic = variants.len() > 1 || variants.iter().any(|v| !v.label.is_empty());
-
-            for (vi, v) in variants.iter().enumerate() {
-                // 解析变体 SQL 仅用于检测语法错误，不改写导出文本
-                let parsed = parse_sql_to_ast(&v.sql, crate::config::CheckDialect::Generic);
-                let parse_error = parsed.parse_error.clone().or_else(|| {
-                    if parsed.statements.iter().any(|s| s.kind == "PARSE_ERROR") {
-                        Some("parse error in mapper variant".to_string())
-                    } else {
-                        None
-                    }
-                });
-
-                let (id, variant_of, variant_label) = if has_dynamic {
-                    (
-                        format!("{}#v{}", base_id, vi + 1),
-                        Some(base_id.clone()),
-                        Some(v.label.clone()),
-                    )
-                } else {
-                    (base_id.clone(), None, None)
-                };
-
-                statements.push(ManifestStatement {
-                    id,
-                    sql: v.sql.trim().to_string(),
-                    stmt_type: ty.to_string(),
-                    source: source.clone(),
-                    source_type: "mapper".to_string(),
-                    line,
-                    end_line: line,
-                    statement_id: Some(stmt.statement_id.clone()),
-                    parse_error,
-                    variant_of,
-                    variant_label,
-                });
-            }
-        }
+        statements.extend(mapper_file_statements(file_path, target_dir, type_filter));
     }
 
     Ok(Manifest {
@@ -220,13 +164,380 @@ pub fn build_manifest(
             .unwrap_or_default(),
         statement_count: statements.len(),
         statements,
+        base: None,
+        incremental: None,
     })
+}
+
+/// 解析单个 SQL 脚本文件，生成清单条目。
+///
+/// 序号（`<source>#<N>`）在**全部通过类型过滤的语句**上递增（含后续可能被
+/// hunk 过滤掉的语句），保证增量导出中保留语句的 id 与全量导出一致。
+fn sql_file_statements(
+    file_path: &Path,
+    content: &str,
+    target_dir: &Path,
+    type_filter: &HashSet<String>,
+) -> Vec<ManifestStatement> {
+    let mut statements: Vec<ManifestStatement> = Vec::new();
+    let mut seq: usize = 0;
+    let ast = parse_sql_to_ast(content, crate::config::CheckDialect::Generic);
+    let total_lines = content.lines().count() as i64;
+    let source = display_path(file_path, target_dir);
+    let stmt_count = ast.statements.len();
+    for (i, stmt) in ast.statements.iter().enumerate() {
+        match replay_type(&stmt.kind) {
+            None => continue,
+            Some(ty) => {
+                if !type_filter.is_empty() && !type_filter.contains(ty) {
+                    continue;
+                }
+                seq += 1;
+                let parse_error = if stmt.kind == "PARSE_ERROR" {
+                    Some("parse error".to_string())
+                } else {
+                    None
+                };
+                // 语句结束行：优先用下一条语句的起始行 - 1（能正确覆盖
+                // 结束符 `)`/`;` 单独成行的情况）；末条语句延伸到 EOF。
+                let effective_end = if i + 1 < stmt_count {
+                    let next_line = ast.statements[i + 1].line;
+                    if next_line > stmt.line {
+                        next_line - 1
+                    } else {
+                        stmt.end_line
+                    }
+                } else {
+                    total_lines.max(stmt.end_line)
+                };
+                statements.push(ManifestStatement {
+                    id: format!("{}#{}", source, seq),
+                    sql: slice_by_lines(content, stmt.line, effective_end),
+                    stmt_type: ty.to_string(),
+                    source: source.clone(),
+                    source_type: "sql".to_string(),
+                    line: stmt.line,
+                    end_line: effective_end,
+                    statement_id: None,
+                    parse_error,
+                    variant_of: None,
+                    variant_label: None,
+                    change: None,
+                });
+            }
+        }
+    }
+    statements
+}
+
+/// 解析单个 Mapper XML 文件，生成清单条目（动态分支展开为多个变体）。
+fn mapper_file_statements(
+    file_path: &Path,
+    target_dir: &Path,
+    type_filter: &HashSet<String>,
+) -> Vec<ManifestStatement> {
+    let mut statements: Vec<ManifestStatement> = Vec::new();
+    let dyn_stmts = match mapper::dynamic::parse_dynamic_statements(file_path) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!(
+                "Warning: failed to parse mapper XML '{}': {}",
+                file_path.display(),
+                e
+            );
+            return statements;
+        }
+    };
+    let source = display_path(file_path, target_dir);
+    for stmt in &dyn_stmts {
+        let ty = stmt.statement_type.as_str();
+        if !type_filter.is_empty() && !type_filter.contains(ty) {
+            continue;
+        }
+        let line = stmt.raw_xml_line as i64;
+        let base_id = format!("{}#{}", source, stmt.statement_id);
+        let variants = mapper::dynamic::expand_variants(
+            stmt,
+            mapper::dynamic::DEFAULT_MAX_INDEPENDENT_IFS,
+        );
+
+        // 判断是否有动态分支：变体数 > 1，或唯一变体的 label 非空
+        let has_dynamic = variants.len() > 1 || variants.iter().any(|v| !v.label.is_empty());
+
+        for (vi, v) in variants.iter().enumerate() {
+            // 解析变体 SQL 仅用于检测语法错误，不改写导出文本
+            let parsed = parse_sql_to_ast(&v.sql, crate::config::CheckDialect::Generic);
+            let parse_error = parsed.parse_error.clone().or_else(|| {
+                if parsed.statements.iter().any(|s| s.kind == "PARSE_ERROR") {
+                    Some("parse error in mapper variant".to_string())
+                } else {
+                    None
+                }
+            });
+
+            let (id, variant_of, variant_label) = if has_dynamic {
+                (
+                    format!("{}#v{}", base_id, vi + 1),
+                    Some(base_id.clone()),
+                    Some(v.label.clone()),
+                )
+            } else {
+                (base_id.clone(), None, None)
+            };
+
+            statements.push(ManifestStatement {
+                id,
+                sql: v.sql.trim().to_string(),
+                stmt_type: ty.to_string(),
+                source: source.clone(),
+                source_type: "mapper".to_string(),
+                line,
+                end_line: line,
+                statement_id: Some(stmt.statement_id.clone()),
+                parse_error,
+                variant_of,
+                variant_label,
+                change: None,
+            });
+        }
+    }
+    statements
 }
 
 /// 把清单序列化为 JSON 字符串。
 pub fn manifest_to_json(manifest: &Manifest) -> Result<String, SqlGuardError> {
     serde_json::to_string_pretty(manifest)
         .map_err(|e| SqlGuardError::CheckError(format!("Failed to serialize manifest: {}", e)))
+}
+
+/// 把被删语句清单序列化为 JSON 字符串。
+pub fn removed_manifest_to_json(removed: &RemovedManifest) -> Result<String, SqlGuardError> {
+    serde_json::to_string_pretty(removed).map_err(|e| {
+        SqlGuardError::CheckError(format!("Failed to serialize removed manifest: {}", e))
+    })
+}
+
+/// 构建增量重放清单：只导出自 git 基线以来新增/修改的语句，并识别被删除的语句。
+///
+/// - `diffs`：`git_diff::get_diff(base, ...)` 的输出，路径相对 git 运行目录
+///   （当前工作目录）；本函数按「采集到的绝对文件路径相对 cwd / target_dir」匹配。
+/// - 新增文件（`is_new`）整文件导出，`change = "added"`；改动文件内语句
+///   `[line, end_line] ∩ hunk` 非空才导出，`change = "modified"`。
+/// - 被删语句：对改动文件取 `git show <base>:<path>` 的旧内容解析，语句行范围
+///   与旧侧 hunk（`old_hunks`）有交集即标为 removed；**但旧 id 仍存在于新清单的
+///   语句不算删除**（那是修改，删除行的旧侧 hunk 会覆盖被替换行）。
+///   removed 的 id 使用旧文件编号，与历史全量清单一致。
+///
+/// 已知限制：脚本语句 id 为文件内顺序编号。若删除文件头部的语句导致后续语句
+/// 编号平移，id 可能与新清单中的其他语句碰撞，被删除的语句会被误判为「修改」。
+/// 与 `docs/replay-export-incremental-design.md` 中的方案 B（id 差集）限制一致；
+/// CI 可周期性跑一次全量导出校准归档。
+pub fn build_incremental_manifest(
+    target_dir: &Path,
+    sql_files: &[PathBuf],
+    mapper_files: &[PathBuf],
+    diffs: &[FileDiff],
+    base: &str,
+    type_filter: &HashSet<String>,
+) -> Result<IncrementalManifest, SqlGuardError> {
+    build_incremental_manifest_with_loader(
+        target_dir,
+        sql_files,
+        mapper_files,
+        diffs,
+        base,
+        type_filter,
+        &|diff| git_diff::git_show(base, &diff.path),
+    )
+}
+
+/// [`build_incremental_manifest`] 的可注入版本：旧文件内容由 `old_loader` 提供
+/// （返回 `Ok(None)` 表示 base 中无此文件），便于单元测试不依赖真实 git。
+fn build_incremental_manifest_with_loader(
+    target_dir: &Path,
+    sql_files: &[PathBuf],
+    mapper_files: &[PathBuf],
+    diffs: &[FileDiff],
+    base: &str,
+    type_filter: &HashSet<String>,
+    old_loader: &dyn Fn(&FileDiff) -> Result<Option<String>, SqlGuardError>,
+) -> Result<IncrementalManifest, SqlGuardError> {
+    let mut statements: Vec<ManifestStatement> = Vec::new();
+    let mut removed: Vec<RemovedStatement> = Vec::new();
+
+    // SQL 脚本模式
+    for file_path in sql_files {
+        let diff = match match_diff(file_path, target_dir, diffs) {
+            Some(d) => d,
+            None => continue, // 未改动文件不导出
+        };
+        let content = fs::read_to_string(file_path).map_err(|e| {
+            SqlGuardError::CheckError(format!("Failed to read '{}': {}", file_path.display(), e))
+        })?;
+        let source = display_path(file_path, target_dir);
+        let change = if diff.is_new { "added" } else { "modified" };
+        for mut stmt in sql_file_statements(file_path, &content, target_dir, type_filter) {
+            if diff.is_new || intersects_hunks(stmt.line, stmt.end_line, &diff.hunks) {
+                stmt.change = Some(change.to_string());
+                statements.push(stmt);
+            }
+        }
+        // 被删语句：仅对非新增文件、且存在旧侧删除范围时检测
+        if !diff.is_new && !diff.old_hunks.is_empty() {
+            if let Some(old_content) = old_loader(diff)? {
+                removed.extend(removed_from_sql_file(
+                    &old_content,
+                    &source,
+                    &diff.old_hunks,
+                    type_filter,
+                ));
+            }
+        }
+    }
+
+    // Mapper XML 模式
+    for file_path in mapper_files {
+        let diff = match match_diff(file_path, target_dir, diffs) {
+            Some(d) => d,
+            None => continue,
+        };
+        let source = display_path(file_path, target_dir);
+        let change = if diff.is_new { "added" } else { "modified" };
+        for mut stmt in mapper_file_statements(file_path, target_dir, type_filter) {
+            // mapper 语句锚点为标签起始行；命中 hunk 即导出该标签全部变体
+            if diff.is_new || intersects_hunks(stmt.line, stmt.end_line, &diff.hunks) {
+                stmt.change = Some(change.to_string());
+                statements.push(stmt);
+            }
+        }
+        if !diff.is_new && !diff.old_hunks.is_empty() {
+            if let Some(old_content) = old_loader(diff)? {
+                removed.extend(removed_from_mapper_file(
+                    &old_content,
+                    &source,
+                    &diff.old_hunks,
+                    type_filter,
+                ));
+            }
+        }
+    }
+
+    // 旧 id 仍存在于新清单的候选不是删除（是修改）：
+    // 脚本 id 碰撞场景见函数文档的已知限制。
+    let new_ids: HashSet<String> = statements.iter().map(|s| s.id.clone()).collect();
+    removed.retain(|r| !id_still_exists(&r.id, &new_ids));
+
+    let manifest = Manifest {
+        version: 1,
+        generator: "sqlguard replay-export".to_string(),
+        generated_at: SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs().to_string())
+            .unwrap_or_default(),
+        statement_count: statements.len(),
+        statements,
+        base: Some(base.to_string()),
+        incremental: Some(true),
+    };
+
+    Ok(IncrementalManifest { manifest, removed })
+}
+
+/// removed id 是否仍存在于新清单（含 mapper 动态变体 `#vN` 后缀）。
+fn id_still_exists(removed_id: &str, new_ids: &HashSet<String>) -> bool {
+    new_ids.contains(removed_id)
+        || new_ids
+            .iter()
+            .any(|id| id.starts_with(&format!("{}#v", removed_id)))
+}
+
+/// 从旧文件内容解析被删除的 SQL 语句。
+///
+/// id 按旧文件顺序编号（与历史全量清单一致），行号使用旧文件行号。
+fn removed_from_sql_file(
+    old_content: &str,
+    source: &str,
+    old_hunks: &[(usize, usize)],
+    type_filter: &HashSet<String>,
+) -> Vec<RemovedStatement> {
+    // 复用 sql_file_statements 的行号/id 计算；路径仅用于 display_path，
+    // 传入占位路径 + 根目录使 source 原样返回。
+    let entries = sql_file_statements(Path::new(source), old_content, Path::new("/"), type_filter);
+    entries
+        .into_iter()
+        .filter(|s| intersects_hunks(s.line, s.end_line, old_hunks))
+        .map(|s| RemovedStatement {
+            id: s.id,
+            source: source.to_string(),
+            source_type: "sql".to_string(),
+            line: s.line,
+            end_line: s.end_line,
+            statement_id: None,
+        })
+        .collect()
+}
+
+/// 从旧 Mapper XML 内容解析被删除的语句（按标签粒度，不展开变体）。
+fn removed_from_mapper_file(
+    old_content: &str,
+    source: &str,
+    old_hunks: &[(usize, usize)],
+    type_filter: &HashSet<String>,
+) -> Vec<RemovedStatement> {
+    let dyn_stmts = match mapper::dynamic::parse_dynamic_statements_from_content(old_content, None)
+    {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!(
+                "Warning: failed to parse old mapper content '{}': {}",
+                source, e
+            );
+            return Vec::new();
+        }
+    };
+    dyn_stmts
+        .into_iter()
+        .filter(|s| {
+            let ty = s.statement_type.as_str();
+            if !type_filter.is_empty() && !type_filter.contains(ty) {
+                return false;
+            }
+            let line = s.raw_xml_line as i64;
+            intersects_hunks(line, line, old_hunks)
+        })
+        .map(|s| RemovedStatement {
+            id: format!("{}#{}", source, s.statement_id),
+            source: source.to_string(),
+            source_type: "mapper".to_string(),
+            line: s.raw_xml_line as i64,
+            end_line: s.raw_xml_line as i64,
+            statement_id: Some(s.statement_id),
+        })
+        .collect()
+}
+
+/// 把采集到的绝对文件路径匹配到 git diff 的改动项（路径相对 cwd）。
+///
+/// 依次尝试：相对 cwd（git 在仓库根运行）、相对 target_dir（扫描子目录场景）。
+fn match_diff<'a>(file: &Path, target_dir: &Path, diffs: &'a [FileDiff]) -> Option<&'a FileDiff> {
+    let cwd = std::env::current_dir().ok();
+    let rel = cwd
+        .as_deref()
+        .and_then(|c| file.strip_prefix(c).ok())
+        .or_else(|| file.strip_prefix(target_dir).ok())
+        .unwrap_or(file);
+    let rel_str = rel.to_string_lossy().replace('\\', "/");
+    diffs
+        .iter()
+        .find(|d| d.path.to_string_lossy().replace('\\', "/") == rel_str)
+}
+
+/// 语句行范围 `[line, end_line]` 与任一 hunk `[s, e]` 是否有交集。
+fn intersects_hunks(line: i64, end_line: i64, hunks: &[(usize, usize)]) -> bool {
+    hunks.iter().any(|(s, e)| {
+        let (s, e) = (*s as i64, *e as i64);
+        s <= end_line && e >= line
+    })
 }
 
 /// 把 StmtInfo.kind 映射为重放类型。返回 None 表示该语句不导出（事务控制等）。
@@ -448,11 +759,307 @@ mod tests {
             generated_at: "123".to_string(),
             statement_count: 0,
             statements: vec![],
+            base: None,
+            incremental: None,
         };
         let json = manifest_to_json(&manifest).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed["version"], 1);
         assert_eq!(parsed["statement_count"], 0);
+        assert!(parsed.get("base").is_none(), "full export must not set base");
+    }
+
+    #[test]
+    fn manifest_to_json_incremental_fields() {
+        let manifest = Manifest {
+            version: 1,
+            generator: "test".to_string(),
+            generated_at: "123".to_string(),
+            statement_count: 0,
+            statements: vec![],
+            base: Some("origin/main".to_string()),
+            incremental: Some(true),
+        };
+        let json = manifest_to_json(&manifest).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["base"], "origin/main");
+        assert_eq!(parsed["incremental"], true);
+    }
+
+    // === 增量导出 ===
+
+    #[test]
+    fn intersects_hunks_basic() {
+        assert!(intersects_hunks(5, 8, &[(8, 15)]));
+        assert!(intersects_hunks(10, 20, &[(15, 25)]));
+        assert!(intersects_hunks(1, 3, &[(3, 3)]));
+        assert!(!intersects_hunks(1, 3, &[(4, 10)]));
+        assert!(!intersects_hunks(20, 30, &[(4, 10)]));
+        assert!(!intersects_hunks(5, 5, &[]));
+    }
+
+    #[test]
+    fn build_incremental_manifest_new_file_all_added() {
+        let dir = tempfile::tempdir().unwrap();
+        let sql_path = dir.path().join("new.sql");
+        std::fs::write(&sql_path, "SELECT 1;\nSELECT 2;\n").unwrap();
+
+        let diff = FileDiff {
+            path: PathBuf::from("new.sql"),
+            hunks: vec![(1, 2)],
+            old_hunks: vec![],
+            is_new: true,
+        };
+        let result = build_incremental_manifest(
+            dir.path(),
+            &[sql_path],
+            &[],
+            &[diff],
+            "origin/main",
+            &HashSet::new(),
+        )
+        .unwrap();
+
+        assert_eq!(result.manifest.statement_count, 2);
+        assert_eq!(result.manifest.base.as_deref(), Some("origin/main"));
+        assert_eq!(result.manifest.incremental, Some(true));
+        assert_eq!(result.removed.len(), 0);
+        assert_eq!(
+            result.manifest.statements[0].change.as_deref(),
+            Some("added")
+        );
+        assert_eq!(
+            result.manifest.statements[1].change.as_deref(),
+            Some("added")
+        );
+    }
+
+    #[test]
+    fn build_incremental_manifest_unchanged_file_skipped() {
+        let dir = tempfile::tempdir().unwrap();
+        let sql_path = dir.path().join("a.sql");
+        std::fs::write(&sql_path, "SELECT 1;\nSELECT 2;\n").unwrap();
+        let other_path = dir.path().join("b.sql");
+        std::fs::write(&other_path, "SELECT 9;\n").unwrap();
+
+        let diff = FileDiff {
+            path: PathBuf::from("a.sql"),
+            hunks: vec![(1, 1)],
+            old_hunks: vec![],
+            is_new: false,
+        };
+        let result = build_incremental_manifest(
+            dir.path(),
+            &[sql_path, other_path.clone()],
+            &[],
+            &[diff],
+            "HEAD~1",
+            &HashSet::new(),
+        )
+        .unwrap();
+
+        // b.sql 不在 diff 中：整体不导出
+        assert_eq!(result.manifest.statement_count, 1);
+        assert_eq!(
+            result.manifest.statements[0].change.as_deref(),
+            Some("modified")
+        );
+        // 新增/修改侧 hunk 只命中第 1 条
+        assert_eq!(result.manifest.statements[0].line, 1);
+    }
+
+    #[test]
+    fn build_incremental_manifest_hunk_filters_sql() {
+        let dir = tempfile::tempdir().unwrap();
+        let sql_path = dir.path().join("a.sql");
+        std::fs::write(
+            &sql_path,
+            "SELECT 1;\nSELECT 2;\nSELECT 3;\nSELECT 4;\nSELECT 5;\n",
+        )
+        .unwrap();
+
+        // 只命中第 3 条（行 3）
+        let diff = FileDiff {
+            path: PathBuf::from("a.sql"),
+            hunks: vec![(3, 3)],
+            old_hunks: vec![],
+            is_new: false,
+        };
+        let result = build_incremental_manifest(
+            dir.path(),
+            &[sql_path],
+            &[],
+            &[diff],
+            "origin/main",
+            &HashSet::new(),
+        )
+        .unwrap();
+
+        assert_eq!(result.manifest.statement_count, 1);
+        assert_eq!(result.manifest.statements[0].line, 3);
+        assert_eq!(result.manifest.statements[0].id, "a.sql#3");
+        // id 与全量导出编号一致（序号按全部语句计数，而非只计保留语句）
+        assert_eq!(
+            result.manifest.statements[0].change.as_deref(),
+            Some("modified")
+        );
+    }
+
+    #[test]
+    fn build_incremental_manifest_with_type_filter() {
+        let dir = tempfile::tempdir().unwrap();
+        let sql_path = dir.path().join("a.sql");
+        std::fs::write(&sql_path, "SELECT 1;\nINSERT INTO t VALUES (1);\n").unwrap();
+
+        let diff = FileDiff {
+            path: PathBuf::from("a.sql"),
+            hunks: vec![(1, 2)],
+            old_hunks: vec![],
+            is_new: false,
+        };
+        let mut filter = HashSet::new();
+        filter.insert("insert".to_string());
+
+        let result = build_incremental_manifest(
+            dir.path(),
+            &[sql_path],
+            &[],
+            &[diff],
+            "origin/main",
+            &filter,
+        )
+        .unwrap();
+
+        assert_eq!(result.manifest.statement_count, 1);
+        assert_eq!(result.manifest.statements[0].stmt_type, "insert");
+    }
+
+    #[test]
+    fn build_incremental_manifest_mapper_keeps_all_variants() {
+        let dir = tempfile::tempdir().unwrap();
+        let xml = r#"<mapper>
+  <select id="findByCond">
+    SELECT id, name FROM users
+    <where>
+      <if test="name != null">AND name = #{name}</if>
+    </where>
+  </select>
+</mapper>"#;
+        let xml_path = dir.path().join("User.xml");
+        std::fs::write(&xml_path, xml).unwrap();
+
+        let diff = FileDiff {
+            path: PathBuf::from("User.xml"),
+            hunks: vec![(3, 3)],
+            old_hunks: vec![],
+            is_new: false,
+        };
+        let result = build_incremental_manifest(
+            dir.path(),
+            &[],
+            &[xml_path.clone()],
+            &[diff],
+            "origin/main",
+            &HashSet::new(),
+        )
+        .unwrap();
+
+        // 标签起始行（第 2 行）不在 hunk 内：整标签不导出
+        assert_eq!(result.manifest.statement_count, 0);
+
+        // 命中标签起始行：导出该标签全部变体
+        let diff2 = FileDiff {
+            path: PathBuf::from("User.xml"),
+            hunks: vec![(2, 2)],
+            old_hunks: vec![],
+            is_new: false,
+        };
+        let result2 = build_incremental_manifest(
+            dir.path(),
+            &[],
+            &[xml_path],
+            &[diff2],
+            "origin/main",
+            &HashSet::new(),
+        )
+        .unwrap();
+        assert_eq!(result2.manifest.statement_count, 2);
+        for s in &result2.manifest.statements {
+            assert_eq!(s.statement_id.as_deref(), Some("findByCond"));
+            assert_eq!(s.change.as_deref(), Some("modified"));
+        }
+    }
+
+    #[test]
+    fn removed_from_sql_file_basic() {
+        let old = "SELECT 1;\nSELECT 2;\nSELECT 3;\n";
+        // 旧侧删除行 2-3 → 语句 2、3 被删
+        let removed = removed_from_sql_file(old, "a.sql", &[(2, 3)], &HashSet::new());
+        assert_eq!(removed.len(), 2);
+        assert_eq!(removed[0].id, "a.sql#2");
+        assert_eq!(removed[0].line, 2);
+        assert_eq!(removed[1].id, "a.sql#3");
+        assert_eq!(removed[1].source_type, "sql");
+    }
+
+    #[test]
+    fn removed_from_mapper_file_basic() {
+        let old = "<mapper>\n  <select id=\"gone\">\n    SELECT 1\n  </select>\n  <select id=\"kept\">\n    SELECT 2\n  </select>\n</mapper>";
+        // 旧侧删除行 2 → 标签 gone（起始行 2）被删；kept（起始行 5）保留
+        let removed = removed_from_mapper_file(old, "M.xml", &[(2, 2)], &HashSet::new());
+        assert_eq!(removed.len(), 1);
+        assert_eq!(removed[0].id, "M.xml#gone");
+        assert_eq!(removed[0].statement_id.as_deref(), Some("gone"));
+    }
+
+    #[test]
+    fn id_still_exists_basic() {
+        let mut ids = HashSet::new();
+        ids.insert("a.sql#2".to_string());
+        ids.insert("M.xml#findByCond#v1".to_string());
+        ids.insert("M.xml#findByCond#v2".to_string());
+        assert!(id_still_exists("a.sql#2", &ids));
+        assert!(!id_still_exists("a.sql#3", &ids));
+        // mapper 变体：基 id 也算存在
+        assert!(id_still_exists("M.xml#findByCond", &ids));
+        assert!(!id_still_exists("M.xml#gone", &ids));
+    }
+
+    #[test]
+    fn build_incremental_manifest_modified_statement_not_removed() {
+        // 修改的语句旧行也落在旧侧 hunk 内，但 id 仍存在 → 不是删除
+        let dir = tempfile::tempdir().unwrap();
+        let sql_path = dir.path().join("a.sql");
+        // 旧内容：SELECT 1; SELECT 2; SELECT 3;
+        // 新内容：SELECT 1; SELECT 20;        （第 2 条修改、第 3 条删除）
+        std::fs::write(&sql_path, "SELECT 1;\nSELECT 20;\n").unwrap();
+
+        let diff = FileDiff {
+            path: PathBuf::from("a.sql"),
+            hunks: vec![(2, 2)],
+            old_hunks: vec![(2, 3)],
+            is_new: false,
+        };
+        let old_loader = |_d: &FileDiff| {
+            Ok(Some("SELECT 1;\nSELECT 2;\nSELECT 3;\n".to_string()))
+        };
+        let result = build_incremental_manifest_with_loader(
+            dir.path(),
+            &[sql_path],
+            &[],
+            &[diff],
+            "HEAD~1",
+            &HashSet::new(),
+            &old_loader,
+        )
+        .unwrap();
+
+        assert_eq!(result.manifest.statement_count, 1);
+        assert_eq!(result.manifest.statements[0].id, "a.sql#2");
+        assert_eq!(result.manifest.statements[0].sql, "SELECT 20");
+        // 仅第 3 条被删（#2 是修改，不在 removed）
+        assert_eq!(result.removed.len(), 1);
+        assert_eq!(result.removed[0].id, "a.sql#3");
     }
 
     // === build_manifest (integration) ===

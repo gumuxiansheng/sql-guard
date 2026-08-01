@@ -125,6 +125,12 @@ replay-report/
 > **版本校验**：加载时校验 `version` 字段，当前支持版本 `1`。加载到不支持的版本会抛
 > `UnsupportedManifestVersionException`（继承 `IOException`）并以退出码 2 终止，避免
 > 未来清单格式变化时静默兼容失败导致字段缺失或解析错位。
+>
+> **增量清单（`replay-export --base <ref>`）**：清单新增可选字段 `base` / `incremental`、
+> 语句级可选字段 `change`（`added` / `modified`），`version` 仍为 1，本工程直接兼容
+> （未知字段被 `@JsonIgnoreProperties` 忽略）。增量清单只包含本次改动语句，可当作
+> 全量子集直接重放；`sql-manifest-removed.json`（被删语句元信息）由 CI 侧从历史
+> 报告归档中剔除对应 id，本工程不消费该文件。
 
 ```json
 {
