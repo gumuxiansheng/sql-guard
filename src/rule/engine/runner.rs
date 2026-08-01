@@ -64,7 +64,13 @@ pub fn run_rules_for_file(
             ),
             file_path: file_path.to_path_buf(),
             script_type: script_type.to_string(),
-            line: None,
+            // tokenize 整体失败没有语句级行号，退化到语句起始行（mapper 模式即
+            // `<select>` 标签所在行）；脚本模式 line_offset=0 → None 语义不变。
+            line: if line_offset > 0 {
+                Some(line_offset + 1)
+            } else {
+                None
+            },
             end_line: None,
             column: None,
         });
@@ -90,12 +96,15 @@ pub fn run_rules_for_file(
                 message: format!(
                     "SQL parse error with {} dialect at line {} (statement skipped)",
                     config.dialect.as_str(),
-                    s.line
+                    s.line as usize + line_offset
                 ),
                 file_path: file_path.to_path_buf(),
                 script_type: script_type.to_string(),
-                line: Some(s.line as usize),
-                end_line: Some(s.end_line as usize),
+                // ★ 必须叠加 line_offset：mapper 模式下 SQL 是从 XML 里抽出来的
+                // 片段，行号相对片段起始。不叠加会让所有 PARSE 违规都堆在
+                // 文件开头（表现为「全部定位在 <!DOCTYPE mapper> 行」）。
+                line: Some(s.line as usize + line_offset),
+                end_line: Some(s.end_line as usize + line_offset),
                 column: Some(s.column as usize),
             });
         }

@@ -17,6 +17,19 @@ use sqlguard::reporter;
 use sqlguard::rule::engine;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // 在大栈线程中运行：真实业务 mapper 可含数百甚至上千个 <if>，AllTrue 渲染后
+    // SQL 可达数万行，sqlparser 递归下降解析器对超长输入需要较大栈空间。
+    let handle = std::thread::Builder::new()
+        .stack_size(16 * 1024 * 1024) // 16 MB
+        .spawn(|| main_inner().map_err(|e| e.to_string()))
+        .expect("failed to spawn main thread");
+    match handle.join().expect("main thread panicked") {
+        Ok(()) => Ok(()),
+        Err(msg) => Err(msg.into()),
+    }
+}
+
+fn main_inner() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
 
     match cli.command {
@@ -299,10 +312,15 @@ fn check_files(
                     &config.mapper.statement_type_mapping,
                 );
                 let line_offset = sql.raw_xml_line.saturating_sub(1);
+                // 主渲染（所有 <if> 取真，覆盖面最大）若解析不过，按
+                // ExclusiveNested → FirstBranch 顺序尝试备用渲染（互斥 if 折叠），
+                // 并对候选先做标点补丁（逗号前置/尾逗号等渲染噪音）。三份都不过时
+                // 回退到做了补丁的主渲染，保证 PARSE 错误指向覆盖面最大的那份。
+                let chosen = pick_parseable_candidate(&sql, config);
                 let violations = engine::run_rules_for_file(
                     engine_instance,
                     file_path,
-                    &sql.processed_sql,
+                    &chosen,
                     script_type,
                     config,
                     config_dir,
@@ -317,6 +335,52 @@ fn check_files(
     }
 
     Ok((all_violations, files_checked))
+}
+
+/// SQL 能否被当前方言（含回退链）**完整**解析：无 tokenize 错误、无 PARSE_ERROR 语句。
+///
+/// 供 mapper 模式在「主渲染 / 备用渲染」间做静默选择，避免为了试探而先打一遍
+/// 解析失败的 warning。
+fn sql_parses_cleanly(sql: &str, config: &Config) -> bool {
+    let ast = engine::parser::parse_sql_to_ast_fb(sql, config.dialect, config.dialect_fallback);
+    ast.parse_error.is_none() && !ast.statements.iter().any(|s| s.kind == "PARSE_ERROR")
+}
+
+/// 从一条 mapper 语句的多份渲染候选里挑出**第一份能完整解析**的，并对候选先做
+/// 标点补丁（逗号前置 / 尾逗号等渲染噪音）。
+///
+/// 候选顺序：主渲染 `processed_sql`（AllTrue，覆盖面最大）→ `processed_sql_alt`
+/// （ExclusiveNested，折叠嵌套互斥 if）→ `processed_sql_alt2`（FirstBranch，折叠同层
+/// 互斥 if）。三份都解析不过时回退到「做了补丁的主渲染」，保证规则引擎至少看到
+/// 清理后的文本，且 PARSE 错误指向覆盖面最大的那份。
+fn pick_parseable_candidate(sql: &mapper::parser::ExtractedSql, config: &Config) -> String {
+    let candidates = [
+        Some(sql.processed_sql.as_str()),
+        sql.processed_sql_alt.as_deref(),
+        sql.processed_sql_alt2.as_deref(),
+    ];
+    // 超长 SQL（常见于数百个 <if> 的真实 mapper）：sqlparser 递归下降解析器
+    // 对超长输入会爆栈。跳过候选选择，直接返回 repair 后的主渲染，让规则引擎
+    // 至少能看到清理后的文本；如果主渲染本身解析不过，run_rules_for_file 会
+    // 正常报 PARSE 违规。
+    const PARSE_PROBE_MAX_BYTES: usize = 50_000;
+    for c in candidates.into_iter().flatten() {
+        let repaired = mapper::dynamic::repair_dynamic_artifacts(c);
+        if repaired.len() > PARSE_PROBE_MAX_BYTES {
+            continue;
+        }
+        if !repaired.trim().is_empty() && sql_parses_cleanly(&repaired, config) {
+            return repaired;
+        }
+    }
+    // 所有候选都过长或都解析不过：用主渲染的 repair 结果，保证规则引擎有文本可查
+    let main_repaired = mapper::dynamic::repair_dynamic_artifacts(&sql.processed_sql);
+    if main_repaired.trim().is_empty() {
+        // 主渲染为空（极端情况），退回原始主渲染
+        sql.processed_sql.clone()
+    } else {
+        main_repaired
+    }
 }
 
 // ===== run_check =====
@@ -639,10 +703,11 @@ fn run_check_diff(
                     &config.mapper.statement_type_mapping,
                 );
                 let line_offset = sql.raw_xml_line.saturating_sub(1);
+                let chosen = pick_parseable_candidate(&sql, &config);
                 let violations = engine::run_rules_for_file(
                     &engine_instance,
                     file_path,
-                    &sql.processed_sql,
+                    &chosen,
                     script_type,
                     &config,
                     &config_dir,

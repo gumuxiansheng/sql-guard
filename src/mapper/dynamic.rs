@@ -15,7 +15,7 @@
 //! ## 变体标识
 //! 每个变体带 `label`，如 `if:name!=null=true,choose:when0,foreach:1elem`。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use quick_xml::events::Event;
 use quick_xml::Reader;
@@ -107,6 +107,171 @@ pub fn parse_dynamic_statements(
     parse_statements_dynamic(&content, &fragments)
 }
 
+/// 从 XML 文本解析动态语句（可选外部片段表，支持跨 namespace include）。
+///
+/// [`parse_dynamic_statements`] 是本函数「读文件 + 无外部片段」的封装。
+pub fn parse_dynamic_statements_from_content(
+    content: &str,
+    global: Option<&HashMap<String, Vec<DynNode>>>,
+) -> Result<Vec<DynamicStatement>, SqlGuardError> {
+    let mut fragments = collect_sql_fragments_dynamic(content)?;
+    if let Some(g) = global {
+        // 本地片段优先：仅补充本地没有的 key（跨 namespace 的 `ns.id` 形式不会冲突）
+        for (k, v) in g {
+            fragments.entry(k.clone()).or_insert_with(|| v.clone());
+        }
+    }
+    parse_statements_dynamic(content, &fragments)
+}
+
+/// 收集单个 XML 文本中的 `<sql id="...">` 片段树（供跨文件全局片段表构建）。
+pub fn collect_fragments_from_content(
+    content: &str,
+) -> Result<HashMap<String, Vec<DynNode>>, SqlGuardError> {
+    collect_sql_fragments_dynamic(content)
+}
+
+/// 单变体渲染模式：把动态节点树压成**一条**可解析的代表性 SQL，供静态规则检查使用。
+///
+/// 与 [`expand_variants`]（重放导出用，穷举所有分支）互补：静态检查只需要一条
+/// 语法合法、且尽量覆盖全部列/条件的代表 SQL。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RenderMode {
+    /// 所有 `<if>` 取真——覆盖面最大，是默认首选。
+    AllTrue,
+    /// 嵌套在另一个 `<if>` 内部的**兄弟** `<if>` 只取第一个。
+    ///
+    /// 对付「外层 if 提供 `and`，内层多个 if 互斥地提供操作数」的写法：
+    /// ```xml
+    /// <if test="orgno != null"> and
+    ///   <if test="c != '1'"> n.SUPORGNO = #{orgno} </if>
+    ///   <if test="c != '0'"> n.ORGNO   = #{orgno} </if>
+    /// </if>
+    /// ```
+    /// AllTrue 会拼出 `and n.SUPORGNO = ? n.ORGNO = ?`（语法错误），
+    /// 本模式只保留第一个内层分支。
+    ExclusiveNested,
+    /// 每个同层（含嵌套）的兄弟 `<if>` 组只取第一个渲染。
+    ///
+    /// 对付「顶层/嵌套的**互斥** `<if>` 被 AllTrue 全拼导致条件间缺 AND」的写法，
+    /// 例如 `ibkcdeflg == 0` 与 `ibkcdeflg == 1`、`orgLv == 0` 与 `orgLv != '0'`
+    /// 在运行时互斥（同一参数只能取一个值），全取真会拼成
+    /// `where o.orglev in (...) o.orgno = ?`（缺 AND）→ 解析失败。
+    /// 作为兜底候选，只要能解析即可，牺牲部分覆盖面换取"至少能解析"。
+    /// 与 [`RenderMode::ExclusiveNested`] 的区别：后者只在「嵌套于另一个 `<if>` 内」
+    /// 时折叠，本模式在**所有层级**折叠同层兄弟 `<if>`。
+    FirstBranch,
+}
+
+/// 按 `mode` 把节点树渲染成单条 SQL（未做占位符标准化）。
+///
+/// 语义要点：
+/// - `<where>` / `<set>` / `<trim>`：按 MyBatis 规则补关键字、去多余 AND/OR 与逗号
+/// - `<choose>`：只取第一个 `<when>`（没有 when 则取 `<otherwise>`）——MyBatis 运行时
+///   本就只会命中一个分支，全拼是错的
+/// - `<foreach>`：按「集合有 1 个元素」渲染，即 `open + 单份 body + close`，
+///   这样 `IN <foreach open="(" close=")">#{i}</foreach>` 才能得到合法的 `IN (?)`
+/// - `<bind>`：忽略
+pub fn render_canonical(nodes: &[DynNode], mode: RenderMode) -> String {
+    render_seq_canonical(nodes, mode, false)
+}
+
+fn render_seq_canonical(nodes: &[DynNode], mode: RenderMode, inside_if: bool) -> String {
+    let mut out = String::new();
+    // ExclusiveNested 模式下，同一层级中嵌套于 <if> 内的兄弟 <if> 只保留第一个
+    let mut nested_if_taken = false;
+    // FirstBranch 模式下，每个同层兄弟 <if>` 连续段只保留第一个；
+    // 遇到非 <if> 节点（文本/标签）即重置，使独立的 <if> 段各自成组。
+    let mut first_if_in_run = true;
+    for node in nodes {
+        match node {
+            DynNode::Text(s) => {
+                out.push_str(s);
+                // 仅当文本含非空白内容时才重置「兄弟 if 段」——标签间的空白
+                // （换行/缩进）不能算作段边界，否则同层互斥 <if> 之间因空白被拆开，
+                // 折叠失效。
+                if !s.trim().is_empty() {
+                    first_if_in_run = true;
+                }
+            }
+            DynNode::Bind => {
+                first_if_in_run = true;
+            }
+            DynNode::If { children, .. } => {
+                if mode == RenderMode::ExclusiveNested && inside_if {
+                    if nested_if_taken {
+                        continue;
+                    }
+                    nested_if_taken = true;
+                }
+                if mode == RenderMode::FirstBranch && !first_if_in_run {
+                    continue;
+                }
+                first_if_in_run = false;
+                out.push_str(&render_seq_canonical(children, mode, true));
+            }
+            DynNode::Choose {
+                when_clauses,
+                otherwise,
+            } => {
+                first_if_in_run = true;
+                if let Some((_, ch)) = when_clauses.first() {
+                    out.push_str(&render_seq_canonical(ch, mode, inside_if));
+                } else if let Some(oth) = otherwise {
+                    out.push_str(&render_seq_canonical(oth, mode, inside_if));
+                }
+            }
+            DynNode::ForEach {
+                open,
+                close,
+                children,
+                ..
+            } => {
+                first_if_in_run = true;
+                let body = render_seq_canonical(children, mode, inside_if);
+                if body.trim().is_empty() {
+                    continue;
+                }
+                out.push_str(open);
+                out.push_str(&body);
+                out.push_str(close);
+            }
+            DynNode::Where(ch) => {
+                first_if_in_run = true;
+                out.push(' ');
+                out.push_str(&process_where(&render_seq_canonical(ch, mode, inside_if)));
+                out.push(' ');
+            }
+            DynNode::Set(ch) => {
+                first_if_in_run = true;
+                out.push(' ');
+                out.push_str(&process_set(&render_seq_canonical(ch, mode, inside_if)));
+                out.push(' ');
+            }
+            DynNode::Trim {
+                prefix,
+                suffix,
+                prefix_overrides,
+                suffix_overrides,
+                children,
+            } => {
+                first_if_in_run = true;
+                let inner = render_seq_canonical(children, mode, inside_if);
+                out.push(' ');
+                out.push_str(&process_trim(
+                    &inner,
+                    prefix,
+                    suffix,
+                    prefix_overrides,
+                    suffix_overrides,
+                ));
+                out.push(' ');
+            }
+        }
+    }
+    out
+}
+
 /// 把一条语句的节点树展开为多个变体。
 ///
 /// `max_independent_ifs` 控制全组合阈值；超过则降级为单分支激活。
@@ -146,7 +311,29 @@ pub fn expand_variants(stmt: &DynamicStatement, max_independent_ifs: usize) -> V
     for v in &mut all {
         v.sql = normalize_placeholders(&v.sql);
     }
-    all
+    dedup_variants(all)
+}
+
+/// 按「空白归一化 + 忽略大小写」后的 SQL 去重，保留首次出现的变体（含其 label）。
+///
+/// 不同分支组合经常渲染出**字面完全相同**的 SQL（例如分支体本身为空、
+/// 或互斥分支被同一条件覆盖）。重放侧对同一条 SQL 反复取执行计划纯属浪费，
+/// 也会让使用者误以为「多个分支都是同一个语句」。
+fn dedup_variants(variants: Vec<Variant>) -> Vec<Variant> {
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut out = Vec::with_capacity(variants.len());
+    for v in variants {
+        let key = v
+            .sql
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .to_ascii_lowercase();
+        if key.is_empty() || seen.insert(key) {
+            out.push(v);
+        }
+    }
+    out
 }
 
 // ==================== 内部实现 ====================
@@ -234,6 +421,10 @@ fn expand_node(node: &DynNode, ctx: &mut ExpansionCtx) -> Vec<Variant> {
 
         DynNode::If { test, children } => {
             let this_index = ctx.if_counter;
+            // 本 if 在 DFS 序中占用的索引区间大小：自身 1 个 + 子树内的 if 数。
+            // 用于「关闭分支时手动推进计数器」，保证同一个 if 在不同 active
+            // 取值下拿到**稳定**的索引（否则嵌套 if 永远激活不到 → 变体全重复）。
+            let subtree_span = 1 + count_independent_ifs(children);
             ctx.if_counter += 1;
             let test_label = sanitize_test(test);
 
@@ -259,7 +450,12 @@ fn expand_node(node: &DynNode, ctx: &mut ExpansionCtx) -> Vec<Variant> {
                     out
                 }
                 Policy::SingleBranch { active } => {
-                    if active == Some(this_index) {
+                    // 目标索引落在本 if 的**子树区间**内 → 本 if 必须为 true，
+                    // 这样嵌套 if 才可能被激活到（否则祖先关闭，内层永远渲染不出来，
+                    // 每次都退化成基线 SQL，表现为「多个分支都是同一个语句」）。
+                    let hit = matches!(active, Some(k)
+                        if k >= this_index && k < this_index + subtree_span);
+                    if hit {
                         // 该 if 激活：true
                         let mut out = Vec::new();
                         for mut v in expand_seq(children, ctx) {
@@ -273,7 +469,10 @@ fn expand_node(node: &DynNode, ctx: &mut ExpansionCtx) -> Vec<Variant> {
                         }
                         out
                     } else {
-                        // 该 if 关闭：false
+                        // 该 if 关闭：子树不展开，需手动推进计数器跳过子树内的 if，
+                        // 否则后续兄弟节点的 if 索引会整体前移，导致索引与
+                        // count_independent_ifs 的 DFS 编号错位。
+                        ctx.if_counter += subtree_span - 1;
                         vec![Variant {
                             sql: String::new(),
                             label: format!("if:{}=false", test_label),
@@ -434,42 +633,44 @@ fn process_trim(
     suffix_overrides: &str,
 ) -> String {
     let mut s = text.trim().to_string();
+    // ★ MyBatis 语义：内容为空时整个 <trim> 不输出任何东西（prefix 也不输出）。
+    // 否则 `<trim prefix="set">` 空体会渲染出 `UPDATE t set  WHERE ...` 这种语法错误。
+    if s.is_empty() {
+        return String::new();
+    }
     if !prefix_overrides.is_empty() {
         for ov in prefix_overrides.split('|') {
-            let ov = ov.trim();
-            if !ov.is_empty() {
-                let stripped = s.trim_start();
-                if stripped
-                    .to_ascii_uppercase()
-                    .starts_with(&ov.to_ascii_uppercase())
-                {
-                    s = stripped[ov.len()..].to_string();
-                    break;
-                }
+            if ov.trim().is_empty() {
+                continue;
+            }
+            if let Some(rest) = strip_token_prefix(s.trim_start(), ov) {
+                s = rest.to_string();
+                break;
             }
         }
     }
     if !suffix_overrides.is_empty() {
         for ov in suffix_overrides.split('|') {
-            let ov = ov.trim();
-            if !ov.is_empty() {
-                let trimmed = s.trim_end();
-                if trimmed
-                    .to_ascii_uppercase()
-                    .ends_with(&ov.to_ascii_uppercase())
-                {
-                    s = trimmed[..trimmed.len() - ov.len()].to_string();
-                    break;
-                }
+            if ov.trim().is_empty() {
+                continue;
+            }
+            if let Some(rest) = strip_token_suffix(s.trim_end(), ov) {
+                s = rest.to_string();
+                break;
             }
         }
+    }
+    let s = s.trim();
+    // 去掉 override 后可能变空，同样不输出 prefix/suffix
+    if s.is_empty() {
+        return String::new();
     }
     let mut out = String::new();
     if !prefix.is_empty() {
         out.push_str(prefix);
         out.push(' ');
     }
-    out.push_str(s.trim());
+    out.push_str(s);
     if !suffix.is_empty() {
         out.push(' ');
         out.push_str(suffix);
@@ -477,20 +678,61 @@ fn process_trim(
     out
 }
 
+/// 按 override 记号剥离前缀，大小写不敏感。
+///
+/// override 若以空白结尾（如 `"and "`），则允许匹配**任意空白**——与 MyBatis
+/// `WhereSqlNode` 内置的 `"AND "/"AND\n"/"AND\r"/"AND\t"` 列表等价。
+fn strip_token_prefix<'a>(s: &'a str, ov: &str) -> Option<&'a str> {
+    let ov_trimmed = ov.trim();
+    let head = s.get(..ov_trimmed.len())?;
+    if !head.eq_ignore_ascii_case(ov_trimmed) {
+        return None;
+    }
+    let rest = &s[ov_trimmed.len()..];
+    let needs_boundary = ov.ends_with(char::is_whitespace)
+        || ov_trimmed.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+    if needs_boundary && !rest.is_empty() && !rest.starts_with(char::is_whitespace) {
+        return None;
+    }
+    Some(rest.trim_start())
+}
+
+/// 按 override 记号剥离后缀，大小写不敏感。
+fn strip_token_suffix<'a>(s: &'a str, ov: &str) -> Option<&'a str> {
+    let ov_trimmed = ov.trim();
+    if s.len() < ov_trimmed.len() {
+        return None;
+    }
+    let tail = s.get(s.len() - ov_trimmed.len()..)?;
+    if !tail.eq_ignore_ascii_case(ov_trimmed) {
+        return None;
+    }
+    Some(s[..s.len() - ov_trimmed.len()].trim_end())
+}
+
 /// 去除开头的 AND / OR（含其后空白），大小写不敏感。
+///
+/// ★ 关键：关键字后可以是**任意空白**（空格 / 换行 / Tab），不能只认空格。
+/// 真实 mapper 中 `<if>` 体常写成独立一行的 `and`：
+/// ```xml
+/// <if test="x != null">
+/// and
+///     X = #{x}
+/// </if>
+/// ```
+/// 旧实现要求 `"AND "` 严格跟空格，导致 `and\n` 无法剥离，
+/// 渲染出 `WHERE and X = ?` 这种语法错误（本仓库样例中占解析失败的 82%）。
 fn trim_leading_and_or(s: &str) -> &str {
-    let upper: String = s.chars().take(4).flat_map(|c| c.to_uppercase()).collect();
-    if upper.starts_with("AND ") {
-        return s[4..].trim_start();
-    }
-    if upper.starts_with("OR ") {
-        return s[3..].trim_start();
-    }
-    if upper == "AND" {
-        return "";
-    }
-    if upper == "OR" {
-        return "";
+    for kw in ["AND", "OR"] {
+        // 用 get 避免多字节字符边界 panic
+        if let Some(head) = s.get(..kw.len()) {
+            if head.eq_ignore_ascii_case(kw) {
+                let rest = &s[kw.len()..];
+                if rest.is_empty() || rest.starts_with(char::is_whitespace) {
+                    return rest.trim_start();
+                }
+            }
+        }
     }
     s
 }
@@ -504,6 +746,159 @@ fn sanitize_test(test: &str) -> String {
     } else {
         cleaned.chars().take(40).collect()
     }
+}
+
+/// 修去动态渲染产生的、**在合法 SQL 中绝不可能出现**的标点产物。
+///
+/// 只动"不可能有效"的标点，绝不改写语义，因此不会掩盖真实规则违规：
+/// - `(,` → `(` ：列/值列表里绝不可能紧跟左括号后就是逗号
+/// - `,)` → `)` ：绝不可能紧跟右括号前就是逗号（如 `IN (?, ,)`）
+/// - `SET ,` → `SET ` ：逗号前置（comma-first）写法被 `<set>`/`<trim>` 保留下来的首逗号
+/// - `, FROM` / `, WHERE` / `, GROUP` / `, ORDER` / `, HAVING` / `, LIMIT` /
+///   `, UNION` / `, VALUES` → 删逗号：SELECT/SET 列表尾逗号残留
+///
+/// 这些产物来自 MyBatis 逗号前置风格与 `<set>`/`<trim>` 只去尾逗号不去首逗号的语义，
+/// 在静态检查侧属于"渲染噪音"，修去后既能解析、又保留全部真实列/条件供规则检查。
+pub fn repair_dynamic_artifacts(sql: &str) -> String {
+    let chars: Vec<char> = sql.chars().collect();
+    let n = chars.len();
+    let mut out = String::with_capacity(n);
+    let mut i = 0;
+    while i < n {
+        let c = chars[i];
+        // '(' 后（允许空白）紧跟 ',' → 跳掉该逗号，保留单空格分隔
+        if c == '(' {
+            out.push('(');
+            let mut j = i + 1;
+            while j < n && chars[j].is_whitespace() {
+                j += 1;
+            }
+            if j < n && chars[j] == ',' {
+                j += 1;
+                while j < n && chars[j].is_whitespace() {
+                    j += 1;
+                }
+                out.push(' ');
+                i = j;
+                continue;
+            }
+            i = j;
+            continue;
+        }
+        // ',' 后处理
+        if c == ',' {
+            let mut j = i + 1;
+            while j < n && chars[j].is_whitespace() {
+                j += 1;
+            }
+            // ',)' → 跳掉逗号
+            if j < n && chars[j] == ')' {
+                i = j;
+                continue;
+            }
+            // ', FROM/WHERE/...' → 跳掉逗号
+            if let Some(kw_end) =
+                match_keyword_after_ws(&chars, j, &["FROM", "WHERE", "GROUP", "ORDER", "HAVING", "LIMIT", "UNION", "VALUES"])
+            {
+                i = kw_end;
+                continue;
+            }
+            out.push(',');
+            i += 1;
+            continue;
+        }
+        // 'SET' 后（允许空白）紧跟 ',' → 跳掉该逗号（保留 SET 关键字）
+        if is_word(&chars, i, "SET") {
+            let mut j = i + 3;
+            while j < n && chars[j].is_whitespace() {
+                j += 1;
+            }
+            if j < n && chars[j] == ',' {
+                j += 1;
+                while j < n && chars[j].is_whitespace() {
+                    j += 1;
+                }
+                out.push_str("SET ");
+                i = j;
+                continue;
+            }
+            out.push('S');
+            i += 1;
+            continue;
+        }
+        // 'SELECT' 后（允许空白）紧跟 ',' → 跳掉该逗号：逗号前置写法写在
+        // CTE 列列表（`WITH x AS (SELECT , col ...)`）里产生的首逗号，合法 SQL 中
+        // `SELECT ,` 不可能出现。
+        if is_word(&chars, i, "SELECT") {
+            let mut j = i + 6;
+            while j < n && chars[j].is_whitespace() {
+                j += 1;
+            }
+            if j < n && chars[j] == ',' {
+                j += 1;
+                while j < n && chars[j].is_whitespace() {
+                    j += 1;
+                }
+                out.push_str("SELECT ");
+                i = j;
+                continue;
+            }
+            out.push('S');
+            i += 1;
+            continue;
+        }
+        out.push(c);
+        i += 1;
+    }
+    out
+}
+
+/// 从 `start` 起跳过空白后，是否匹配 `kw`（大小写不敏感）且其后为词边界。
+/// 命中返回 kw **起始**位置（调用方据此只跳过前导逗号、保留关键字本身），否则 `None`。
+fn match_keyword_after_ws(
+    chars: &[char],
+    start: usize,
+    kws: &[&str],
+) -> Option<usize> {
+    let mut j = start;
+    while j < chars.len() && chars[j].is_whitespace() {
+        j += 1;
+    }
+    for kw in kws {
+        let bytes: Vec<char> = kw.chars().collect();
+        if j + bytes.len() <= chars.len() {
+            let slice: String = chars[j..j + bytes.len()].iter().collect();
+            if slice.eq_ignore_ascii_case(kw) {
+                let after = j + bytes.len();
+                let boundary = after >= chars.len()
+                    || !chars[after].is_ascii_alphanumeric() && chars[after] != '_';
+                if boundary {
+                    return Some(j);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// `chars[i..]` 在词边界内是否以 `w` 开头（大小写不敏感）。
+fn is_word(chars: &[char], i: usize, w: &str) -> bool {
+    if i > 0 {
+        let prev = chars[i - 1];
+        if prev.is_ascii_alphanumeric() || prev == '_' {
+            return false;
+        }
+    }
+    let wb: Vec<char> = w.chars().collect();
+    if i + wb.len() > chars.len() {
+        return false;
+    }
+    let slice: String = chars[i..i + wb.len()].iter().collect();
+    if !slice.eq_ignore_ascii_case(w) {
+        return false;
+    }
+    let after = i + wb.len();
+    after >= chars.len() || !chars[after].is_ascii_alphanumeric() && chars[after] != '_'
 }
 
 // ==================== XML 解析（保留结构）====================
@@ -574,13 +969,24 @@ fn inline_includes(
     nodes: Vec<DynNode>,
     fragments: &HashMap<String, Vec<DynNode>>,
 ) -> Result<Vec<DynNode>, SqlGuardError> {
+    inline_includes_depth(nodes, fragments, 0)
+}
+
+/// 片段内可以再写 `<include>`，需要递归展开；`depth` 防止片段互相引用造成死循环。
+const MAX_INCLUDE_DEPTH: usize = 10;
+
+fn inline_includes_depth(
+    nodes: Vec<DynNode>,
+    fragments: &HashMap<String, Vec<DynNode>>,
+    depth: usize,
+) -> Result<Vec<DynNode>, SqlGuardError> {
     let mut out = Vec::with_capacity(nodes.len());
     for node in nodes {
         match node {
             DynNode::Text(t) => {
                 // 文本中可能含 <include refid="..."/>（来自 collect_nodes_until_end 的 Empty 事件处理）
                 if t.contains("<include") {
-                    let expanded = expand_include_in_text(&t, fragments)?;
+                    let expanded = expand_include_in_text(&t, fragments, depth)?;
                     out.extend(expanded);
                 } else {
                     out.push(DynNode::Text(t));
@@ -589,7 +995,7 @@ fn inline_includes(
             DynNode::If { test, children } => {
                 out.push(DynNode::If {
                     test,
-                    children: inline_includes(children, fragments)?,
+                    children: inline_includes_depth(children, fragments, depth)?,
                 });
             }
             DynNode::Choose {
@@ -598,10 +1004,10 @@ fn inline_includes(
             } => {
                 let mut new_when = Vec::with_capacity(when_clauses.len());
                 for (test, ch) in when_clauses {
-                    new_when.push((test, inline_includes(ch, fragments)?));
+                    new_when.push((test, inline_includes_depth(ch, fragments, depth)?));
                 }
                 let new_oth = match otherwise {
-                    Some(ch) => Some(inline_includes(ch, fragments)?),
+                    Some(ch) => Some(inline_includes_depth(ch, fragments, depth)?),
                     None => None,
                 };
                 out.push(DynNode::Choose {
@@ -619,14 +1025,14 @@ fn inline_includes(
                     open,
                     close,
                     separator,
-                    children: inline_includes(children, fragments)?,
+                    children: inline_includes_depth(children, fragments, depth)?,
                 });
             }
             DynNode::Where(ch) => {
-                out.push(DynNode::Where(inline_includes(ch, fragments)?));
+                out.push(DynNode::Where(inline_includes_depth(ch, fragments, depth)?));
             }
             DynNode::Set(ch) => {
-                out.push(DynNode::Set(inline_includes(ch, fragments)?));
+                out.push(DynNode::Set(inline_includes_depth(ch, fragments, depth)?));
             }
             DynNode::Trim {
                 prefix,
@@ -640,7 +1046,7 @@ fn inline_includes(
                     suffix,
                     prefix_overrides,
                     suffix_overrides,
-                    children: inline_includes(children, fragments)?,
+                    children: inline_includes_depth(children, fragments, depth)?,
                 });
             }
             other => out.push(other),
@@ -654,6 +1060,7 @@ fn inline_includes(
 fn expand_include_in_text(
     text: &str,
     fragments: &HashMap<String, Vec<DynNode>>,
+    depth: usize,
 ) -> Result<Vec<DynNode>, SqlGuardError> {
     // 复用 include 模块的解析：把文本中的 <include> 替换为占位标记，
     // 再按标记切分，遇到标记插入片段节点副本。
@@ -685,7 +1092,16 @@ fn expand_include_in_text(
                     out.push(DynNode::Text(std::mem::take(&mut buf)));
                 }
                 if let Some(frag) = fragments.get(&refid) {
-                    out.extend(frag.iter().cloned());
+                    // 片段自身可能还含 <include>，递归展开（有深度上限防环）
+                    if depth < MAX_INCLUDE_DEPTH {
+                        out.extend(inline_includes_depth(
+                            frag.clone(),
+                            fragments,
+                            depth + 1,
+                        )?);
+                    } else {
+                        out.extend(frag.iter().cloned());
+                    }
                 } else {
                     out.push(DynNode::Text(format!("/* missing include: {} */", refid)));
                 }
@@ -789,6 +1205,11 @@ impl<'a> XmlScanner<'a> {
                         SqlGuardError::MapperError(format!("XML text unescape error: {}", e))
                     })?;
                     text_buf.push_str(&unescaped);
+                }
+                // ★ `<![CDATA[ ... ]]>` 内容原样保留。mapper 里常用它包住
+                // `<=` / `>=` / `<>`，旧实现直接丢弃会把比较条件整段吃掉。
+                Event::CData(c) => {
+                    text_buf.push_str(&String::from_utf8_lossy(c.as_ref()));
                 }
                 Event::Empty(e) => {
                     let name = lowercased_name(&e);
@@ -935,6 +1356,13 @@ impl<'a> XmlScanner<'a> {
                     children,
                 })
             }
+            // `<selectKey>` 是**独立的**主键取值语句，不属于外层 INSERT 的 SQL 文本。
+            // 若当作透明容器展开，会把 `SELECT SEQ.NEXTVAL FROM DUAL` 直接拼进
+            // INSERT 里造成语法错误，故整体丢弃。
+            "selectkey" => {
+                let _ = self.collect_nodes_until_end(name)?;
+                Ok(DynNode::Text(String::new()))
+            }
             _ => {
                 // 未知动态标签：当作透明容器，收集至匹配 End
                 let children = self.collect_nodes_until_end(name)?;
@@ -1060,6 +1488,45 @@ mod tests {
             vs.len(),
             4,
             "2 ifs → 4 variants, got: {:?}",
+            variant_tuples(&vs)
+        );
+    }
+
+    /// 回归测试：嵌套 `<if>` 的内层分支在外层激活时必须可达。
+    ///
+    /// 问题 5 的根因是嵌套 if 的索引计数器未跨过子树，导致 `active` 落到内层 if
+    /// 时其外层 if 被判为 false、子树被整体折叠，最终「多个分支渲染成同一条基线
+    /// SQL」。修复后 `active` 落在某 if 的 `subtree_span` 区间即视为该 if 为 true，
+    /// 内层 if 才能被正确展开。
+    #[test]
+    fn nested_if_inner_branch_reachable() {
+        let xml = r#"<mapper>
+  <select id="q">
+    SELECT * FROM t
+    <where>
+      <if test="a != null">AND a = #{a}</if>
+      <if test="b != null">
+        AND b = #{b}
+        <if test="c != null">AND c = #{c}</if>
+      </if>
+    </where>
+  </select>
+</mapper>"#;
+        let path = write_tmp("nested_if", xml);
+        let stmts = parse_dynamic_statements(&path).unwrap();
+        let vs = expand_variants(&stmts[0], DEFAULT_MAX_INDEPENDENT_IFS);
+        // 关键：内层 if（c）在其外层 if（b）激活时必须可达，不能退化为基线 SQL。
+        assert!(
+            vs.iter()
+                .any(|v| v.sql.contains("b = ?") && v.sql.contains("c = ?")),
+            "内层 if 不可达 / 退化为基线，变体：{:?}",
+            variant_tuples(&vs)
+        );
+        // b 单独（c 关闭）也应存在，证明两个分支相互独立。
+        assert!(
+            vs.iter()
+                .any(|v| v.sql.contains("b = ?") && !v.sql.contains("c = ?")),
+            "b 单独分支缺失，变体：{:?}",
             variant_tuples(&vs)
         );
     }
@@ -1282,6 +1749,71 @@ mod tests {
             !true_v.sql.contains("WHERE AND"),
             "AND should be stripped: {}",
             true_v.sql
+        );
+    }
+
+    /// 标点补丁只删「合法 SQL 中绝不可能出现」的标点，不改语义。
+    #[test]
+    fn repair_strips_impossible_punctuation() {
+        assert_eq!(
+            repair_dynamic_artifacts("INSERT ( , a , b )"),
+            "INSERT ( a , b )",
+            "'(,' and ',)' should be stripped"
+        );
+        assert_eq!(
+            repair_dynamic_artifacts("SET , col = ? , modtm = ?"),
+            "SET col = ? , modtm = ?",
+            "leading comma after SET should be stripped"
+        );
+        assert_eq!(
+            repair_dynamic_artifacts("SELECT a , b , FROM t"),
+            "SELECT a , b FROM t",
+            "trailing comma before FROM should be stripped"
+        );
+        assert_eq!(
+            repair_dynamic_artifacts("WHERE a = ? , )"),
+            "WHERE a = ? )",
+            "comma before ) should be stripped"
+        );
+        // SELECT 列表前置逗号（CTE 逗号前置写法）
+        assert_eq!(
+            repair_dynamic_artifacts("WITH x AS (SELECT , a , b FROM t)"),
+            "WITH x AS (SELECT a , b FROM t)"
+        );
+        // 正常 SQL 不应被改动
+        assert_eq!(
+            repair_dynamic_artifacts("SELECT a, b FROM t WHERE x = ?"),
+            "SELECT a, b FROM t WHERE x = ?"
+        );
+    }
+
+    /// FirstBranch 把同层互斥 `<if>` 折叠为第一个分支，避免 AllTrue 把互斥分支全拼
+    /// 导致条件间缺 AND（`where x = 1 y = 2`）。
+    #[test]
+    fn first_branch_takes_first_of_exclusive_group() {
+        let xml = r#"<mapper>
+  <select id="q">
+    SELECT * FROM t
+    where
+    <if test="a == 0">X = 1</if>
+    <if test="a == 1">Y = 2</if>
+    <if test="b != null">and Z = #{b}</if>
+  </select>
+</mapper>"#;
+        let path = write_tmp("first_branch", xml);
+        let stmts = parse_dynamic_statements(&path).unwrap();
+        let fb = render_canonical(&stmts[0].root_nodes, RenderMode::FirstBranch);
+        let fb = fb.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(fb.contains("X = 1"), "first branch should render: {}", fb);
+        assert!(
+            !fb.contains("Y = 2"),
+            "other exclusive branch must be dropped: {}",
+            fb
+        );
+        assert!(
+            !fb.contains("Z ="),
+            "independent sibling also collapsed by fallback: {}",
+            fb
         );
     }
 }

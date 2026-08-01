@@ -1,13 +1,22 @@
-//! MyBatis Mapper XML 解析与 SQL 提取。
+//! MyBatis Mapper XML 解析与 SQL 提取（静态检查侧）。
 //!
-//! 流程：
-//! 1. 第一遍：扫描所有 `<sql id="...">` 片段，存入 `HashMap<id, content>`
-//! 2. 第二遍：扫描 `<select>/<insert>/<update>/<delete>` 标签：
-//!    - 收集标签内文本内容（动态 SQL 标签如 `<if>/<where>/<foreach>` 剥离，
-//!      仅保留其内部文本，由事件流自然实现，不用 regex）
-//!    - 解析 `<include refid="..."/>`（同文件内 + 跨 namespace）
-//!    - 标准化 `#{}` / `${}` 占位符
-//!    - 记录 `<select>` 标签在 XML 中的起始行号
+//! ## 与 [`crate::mapper::dynamic`] 的关系
+//! 本模块**不再自己剥离动态标签**，而是复用 [`dynamic`] 解析出的 [`DynNode`] 树，
+//! 再用 [`dynamic::render_canonical`] 压成**一条**代表性 SQL 交给规则引擎。
+//! 这样 `<where>`/`<set>`/`<trim>`/`<foreach>`/`<choose>` 的 MyBatis 语义
+//! （补 WHERE/SET 关键字、去首个 AND/OR、去尾逗号、空体不输出 prefix、
+//! `IN (...)` 括号）只有一份实现，静态检查与 `replay-export` 行为一致。
+//!
+//! 历史实现「剥离所有标签、只保留文本」会造成两类系统性误判：
+//! - `<trim prefix="WHERE">` / `<trim prefix="set">` 被整体剥离 → UPDATE 看起来
+//!   既没有 SET 也没有 WHERE → 误报 DML002（无 where 的 update）
+//! - `<if>` 体里独立成行的 `and` 无法被剥离 → 渲染出 `WHERE and X = ?` → 解析失败
+//!
+//! ## 双渲染兜底
+//! 主 SQL 用 [`RenderMode::AllTrue`]（所有 `<if>` 取真，覆盖面最大）。
+//! 少数 mapper 把「外层 if 提供 `and`、内层多个 if 互斥提供操作数」写在一起，
+//! 全取真会拼出语法错误，此时用 [`RenderMode::ExclusiveNested`] 的
+//! [`ExtractedSql::processed_sql_alt`] 兜底（由调用方在主 SQL 解析失败时启用）。
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -17,11 +26,8 @@ use quick_xml::Reader;
 
 use crate::error::SqlGuardError;
 
-use super::include::resolve_includes;
+use super::dynamic::{self, DynNode, DynamicStatement, RenderMode};
 use super::placeholder::normalize_placeholders;
-
-/// 四类 SQL 语句标签。
-const SQL_TAGS: &[&str] = &["select", "insert", "update", "delete"];
 
 /// 提取出的一条 SQL 语句。
 #[derive(Debug, Clone)]
@@ -35,8 +41,50 @@ pub struct ExtractedSql {
     pub raw_xml_line: usize,
     /// 标签内原始文本（含占位符和已剥离的动态标签文本）。
     pub raw_sql: String,
-    /// 经过 include 解析 + 占位符标准化后，可直接交给 sqlparser 的 SQL。
+    /// 经过 include 解析 + 动态标签渲染 + 占位符标准化后，可直接交给 sqlparser 的 SQL。
     pub processed_sql: String,
+    /// 备用渲染（[`RenderMode::ExclusiveNested`]）。与主 SQL 相同时为 `None`。
+    ///
+    /// 仅在 [`Self::processed_sql`] 解析失败时启用，避免「互斥内层 if」写法被误报。
+    pub processed_sql_alt: Option<String>,
+    /// 第三兜底渲染（[`RenderMode::FirstBranch`]）：每个同层兄弟 `<if>` 组只取第一个。
+    ///
+    /// 接在 `processed_sql_alt` 之后作为最终兜底，专门吃掉「同层/嵌套的**互斥** `<if>`
+    /// 被 AllTrue 全拼导致条件间缺 AND」的写法（如 `ibkcdeflg==0` 与 `ibkcdeflg==1`、
+    /// `orgLv==0` 与 `orgLv!='0'`）。与主 SQL 相同时为 `None`。
+    pub processed_sql_alt2: Option<String>,
+}
+
+/// 把一条动态语句渲染为 [`ExtractedSql`]；渲染结果为空白时返回 `None`。
+fn render_extracted(stmt: &DynamicStatement) -> Option<ExtractedSql> {
+    let raw_sql = dynamic::render_canonical(&stmt.root_nodes, RenderMode::AllTrue);
+    if raw_sql.trim().is_empty() {
+        return None;
+    }
+    let processed_sql = normalize_placeholders(&raw_sql);
+    let alt_raw = dynamic::render_canonical(&stmt.root_nodes, RenderMode::ExclusiveNested);
+    let alt = normalize_placeholders(&alt_raw);
+    let processed_sql_alt = if alt.trim().is_empty() || alt == processed_sql {
+        None
+    } else {
+        Some(alt)
+    };
+    let alt2_raw = dynamic::render_canonical(&stmt.root_nodes, RenderMode::FirstBranch);
+    let alt2 = normalize_placeholders(&alt2_raw);
+    let processed_sql_alt2 = if alt2.trim().is_empty() || alt2 == processed_sql || Some(&alt2) == processed_sql_alt.as_ref() {
+        None
+    } else {
+        Some(alt2)
+    };
+    Some(ExtractedSql {
+        statement_id: stmt.statement_id.clone(),
+        statement_type: stmt.statement_type.clone(),
+        raw_xml_line: stmt.raw_xml_line,
+        raw_sql,
+        processed_sql,
+        processed_sql_alt,
+        processed_sql_alt2,
+    })
 }
 
 /// 从单个 Mapper XML 文件提取所有 SQL 语句（仅同文件内 include 解析）。
@@ -51,8 +99,8 @@ pub fn extract_sql_from_xml(xml_path: &Path) -> Result<Vec<ExtractedSql>, SqlGua
         ))
     })?;
 
-    let fragments = collect_sql_fragments(&content)?;
-    extract_statements(&content, &fragments, None)
+    let stmts = dynamic::parse_dynamic_statements_from_content(&content, None)?;
+    Ok(stmts.iter().filter_map(render_extracted).collect())
 }
 
 /// 从多个 Mapper XML 文件批量提取 SQL，构建跨 namespace 全局片段表。
@@ -76,8 +124,8 @@ pub fn extract_sql_from_xmls(
     xml_paths: &[PathBuf],
 ) -> Result<Vec<(PathBuf, Vec<ExtractedSql>)>, SqlGuardError> {
     // 阶段 1：收集所有文件的 namespace + 本地片段，注册到全局表
-    let mut global: HashMap<String, String> = HashMap::new();
-    let mut per_file: Vec<(PathBuf, String, HashMap<String, String>)> = Vec::new();
+    let mut global: HashMap<String, Vec<DynNode>> = HashMap::new();
+    let mut per_file: Vec<(PathBuf, String)> = Vec::new();
 
     for path in xml_paths {
         let content = std::fs::read_to_string(path).map_err(|e| {
@@ -89,24 +137,24 @@ pub fn extract_sql_from_xmls(
         })?;
 
         let namespace = extract_mapper_namespace(&content);
-        let local_frags = collect_sql_fragments(&content)?;
+        let local_frags = dynamic::collect_fragments_from_content(&content)?;
 
         // 注册到全局表：每个片段同时按 `namespace.id` 注册
         // （namespace 缺失时跳过全局注册，仍可作为本地片段使用）
         if let Some(ref ns) = namespace {
-            for (id, content) in &local_frags {
-                global.insert(format!("{}.{}", ns, id), content.clone());
+            for (id, nodes) in &local_frags {
+                global.insert(format!("{}.{}", ns, id), nodes.clone());
             }
         }
 
-        per_file.push((path.clone(), content, local_frags));
+        per_file.push((path.clone(), content));
     }
 
     // 阶段 2：逐文件提取，传入全局片段表
     let mut results = Vec::with_capacity(per_file.len());
-    for (path, content, local_frags) in per_file {
-        let stmts = extract_statements(&content, &local_frags, Some(&global))?;
-        results.push((path, stmts));
+    for (path, content) in per_file {
+        let stmts = dynamic::parse_dynamic_statements_from_content(&content, Some(&global))?;
+        results.push((path, stmts.iter().filter_map(render_extracted).collect()));
     }
     Ok(results)
 }
@@ -133,66 +181,6 @@ fn extract_mapper_namespace(content: &str) -> Option<String> {
         }
     }
     None
-}
-
-// ===== 内部实现 =====
-
-/// 第一遍：收集所有 `<sql id="...">` 片段。
-fn collect_sql_fragments(content: &str) -> Result<HashMap<String, String>, SqlGuardError> {
-    let mut scanner = XmlScanner::new(content);
-    let mut fragments = HashMap::new();
-
-    while let Some(result) = scanner.next_event() {
-        let (event, _line) = result?;
-        if let Event::Start(e) = event {
-            let name = lowercased_name(&e);
-            if name == "sql" {
-                if let Some(id) = extract_attr(e.attributes(), "id")? {
-                    // 收集到匹配的 </sql>
-                    let inner = scanner.collect_until_end("sql")?;
-                    fragments.insert(id, inner);
-                }
-            }
-        }
-    }
-    Ok(fragments)
-}
-
-/// 第二遍：扫描 SQL 标签并提取每条语句。
-///
-/// `global` 为 `Some` 时启用跨 namespace include 解析；为 `None` 时退化为单文件模式。
-fn extract_statements(
-    content: &str,
-    fragments: &HashMap<String, String>,
-    global: Option<&HashMap<String, String>>,
-) -> Result<Vec<ExtractedSql>, SqlGuardError> {
-    let mut scanner = XmlScanner::new(content);
-    let mut results = Vec::new();
-
-    while let Some(result) = scanner.next_event() {
-        let (event, line_before) = result?;
-        if let Event::Start(e) = event {
-            let name = lowercased_name(&e);
-            if SQL_TAGS.contains(&name.as_str()) {
-                let stmt_id = extract_attr(e.attributes(), "id")?.unwrap_or_default();
-                let raw_sql = scanner.collect_until_end(&name)?;
-                if raw_sql.trim().is_empty() {
-                    continue;
-                }
-                let with_includes = resolve_includes(&raw_sql, fragments, global)?;
-                let with_where = process_where_markers(&with_includes);
-                let processed = normalize_placeholders(&with_where);
-                results.push(ExtractedSql {
-                    statement_id: stmt_id,
-                    statement_type: name,
-                    raw_xml_line: line_before,
-                    raw_sql,
-                    processed_sql: processed,
-                });
-            }
-        }
-    }
-    Ok(results)
 }
 
 // ===== quick-xml 事件扫描器 =====
@@ -255,52 +243,6 @@ impl<'a> XmlScanner<'a> {
         }
     }
 
-    /// 在当前 reader 位置（刚读完 Start 标签）开始，收集文本内容直到匹配的 End。
-    /// - `<include refid="..."/>` 保留为原始标签文本，交给后续 [`resolve_includes`]
-    /// - 其他子标签（动态 SQL 标签 `<if>/<where>/<foreach>` 等）剥离，仅保留其内部文本
-    fn collect_until_end(&mut self, end_tag: &str) -> Result<String, SqlGuardError> {
-        let end_bytes = end_tag.as_bytes();
-        let mut out = String::new();
-        while let Some(result) = self.next_event() {
-            let (event, _line) = result?;
-            match event {
-                Event::Text(t) => {
-                    let unescaped = t.unescape().map_err(|e| {
-                        SqlGuardError::MapperError(format!("XML text unescape error: {}", e))
-                    })?;
-                    out.push_str(&unescaped);
-                }
-                Event::Empty(e) => {
-                    // 保留 <include refid="..."/> 给后续 resolve_includes 处理；
-                    // 其他空标签（如 <bind .../>）剥离
-                    let name = lowercased_name(&e);
-                    if name == "include" {
-                        if let Some(refid) = extract_attr(e.attributes(), "refid")? {
-                            out.push_str(&format!("<include refid=\"{}\"/>", refid));
-                        }
-                    }
-                }
-                Event::End(e) => {
-                    if e.name().as_ref().eq_ignore_ascii_case(end_bytes) {
-                        return Ok(out);
-                    }
-                }
-                Event::Start(e) => {
-                    // <where> 标签：MyBatis 会自动插入 WHERE 关键字并去掉首个 AND/OR，
-                    // 这里先埋 marker，后续 process_where_markers 统一处理
-                    if lowercased_name(&e) == "where" {
-                        out.push_str("__WHERE__");
-                    }
-                    // 其他动态标签（if/foreach/set/trim 等）：剥离标签本身，内部文本保留
-                }
-                _ => {}
-            }
-        }
-        Err(SqlGuardError::MapperError(format!(
-            "Unexpected EOF while collecting <{}> content",
-            end_tag
-        )))
-    }
 }
 
 fn lowercased_name(e: &quick_xml::events::BytesStart<'_>) -> String {
@@ -324,56 +266,6 @@ fn extract_attr(
         }
     }
     Ok(None)
-}
-
-/// 将 `__WHERE__` marker 替换为 `WHERE `，并去除紧跟在后的第一个 `AND`/`OR`。
-///
-/// MyBatis 的 `<where>` 标签行为：
-/// - 若内部内容非空，插入 `WHERE` 关键字
-/// - 去除内容开头的 `AND` 或 `OR`（忽略前导空白）
-fn process_where_markers(s: &str) -> String {
-    const MARKER: &str = "__WHERE__";
-    let mut result = String::with_capacity(s.len() + 16);
-    let mut remaining = s;
-    loop {
-        match remaining.find(MARKER) {
-            None => {
-                result.push_str(remaining);
-                break;
-            }
-            Some(pos) => {
-                result.push_str(&remaining[..pos]);
-                result.push_str("WHERE ");
-                let after_marker = &remaining[pos + MARKER.len()..];
-                let after_ws = after_marker.trim_start();
-                // Strip leading AND or OR (case-insensitive, after optional whitespace)
-                let upper_4: String = after_ws
-                    .chars()
-                    .take(4)
-                    .flat_map(|c| c.to_uppercase())
-                    .collect();
-                let stripped = if upper_4.starts_with("AND ") {
-                    Some(4)
-                } else if upper_4.starts_with("OR ") {
-                    Some(3)
-                } else if after_ws.len() <= 3 && upper_4.trim_end().eq_ignore_ascii_case("AND") {
-                    Some(after_ws.len())
-                } else if after_ws.len() <= 2 && upper_4.trim_end().eq_ignore_ascii_case("OR") {
-                    Some(after_ws.len())
-                } else {
-                    None
-                };
-                if let Some(skip) = stripped {
-                    // Strip whitespace AND the AND/OR keyword
-                    remaining = &after_ws[skip..];
-                } else {
-                    // No AND/OR to strip; whitespace already consumed by "WHERE " suffix
-                    remaining = after_ws;
-                }
-            }
-        }
-    }
-    result
 }
 
 #[cfg(test)]
@@ -550,33 +442,171 @@ mod tests {
         );
     }
 
+    /// 提取并压成单行，便于断言。
+    fn one_line(xml: &str, name: &str) -> String {
+        let path = std::env::temp_dir().join(format!("sqlguard_parser_{}.xml", name));
+        std::fs::write(&path, xml).unwrap();
+        let result = extract_sql_from_xml(&path).unwrap();
+        assert_eq!(result.len(), 1, "expect exactly 1 statement");
+        result[0]
+            .processed_sql
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    /// 回归：`<if>` 体里 `and` 独占一行时也必须被 `<where>` 剥掉。
+    /// 旧实现只认 `"AND "`（严格跟空格），`and\n` 残留会渲染出 `WHERE and X = ?`。
     #[test]
-    fn process_where_markers_strips_first_and() {
-        assert_eq!(
-            process_where_markers("__WHERE__ AND name = ?"),
-            "WHERE name = ?"
+    fn where_strips_and_on_its_own_line() {
+        let sql = one_line(
+            r#"<mapper>
+  <select id="q">
+    SELECT * FROM t
+    <where>
+      <if test="a != null">
+        and
+        A = #{a}
+      </if>
+    </where>
+  </select>
+</mapper>"#,
+            "and_newline",
+        );
+        assert_eq!(sql, "SELECT * FROM t WHERE A = ?", "got: {}", sql);
+    }
+
+    /// 回归（用户问题 1/2）：`<trim prefix="WHERE" prefixOverrides="AND |OR ">`
+    /// 等价于 `<where>`，旧实现整体剥离导致 UPDATE 看起来没有 WHERE → 误报 DML002。
+    #[test]
+    fn trim_acts_as_where_and_set() {
+        let sql = one_line(
+            r#"<mapper>
+  <update id="u">
+    UPDATE t
+    <trim prefix="set" suffixOverrides=",">
+      <if test="a != null">A = #{a},</if>
+      <if test="b != null">B = #{b},</if>
+    </trim>
+    <trim prefix="WHERE" prefixOverrides="AND |OR ">
+      <if test="id != null">AND ID = #{id}</if>
+    </trim>
+  </update>
+</mapper>"#,
+            "trim_where_set",
         );
         assert_eq!(
-            process_where_markers("__WHERE__AND name = ?"),
-            "WHERE name = ?"
+            sql, "UPDATE t set A = ?, B = ? WHERE ID = ?",
+            "got: {}",
+            sql
         );
-        assert_eq!(
-            process_where_markers("__WHERE__\n  AND name = ?"),
-            "WHERE name = ?"
+    }
+
+    /// `<trim>` 内容为空时整个标签不输出（含 prefix），否则会渲染出 `UPDATE t set WHERE`。
+    #[test]
+    fn empty_trim_emits_nothing() {
+        let sql = one_line(
+            r#"<mapper>
+  <delete id="d">
+    DELETE FROM t
+    <trim prefix="WHERE" prefixOverrides="AND |OR "></trim>
+  </delete>
+</mapper>"#,
+            "trim_empty",
         );
-        assert_eq!(
-            process_where_markers("__WHERE__ OR name = ?"),
-            "WHERE name = ?"
+        assert_eq!(sql, "DELETE FROM t", "got: {}", sql);
+    }
+
+    /// `<foreach>` 必须渲染出 open/close，否则 `IN` 后面空空如也。
+    #[test]
+    fn foreach_renders_in_list() {
+        let sql = one_line(
+            r#"<mapper>
+  <select id="q">
+    SELECT * FROM t WHERE id IN
+    <foreach collection="ids" item="i" open="(" close=")" separator=",">#{i}</foreach>
+  </select>
+</mapper>"#,
+            "foreach_in",
         );
-        assert_eq!(
-            process_where_markers("__WHERE__ name = ?"),
-            "WHERE name = ?"
+        assert_eq!(sql, "SELECT * FROM t WHERE id IN (?)", "got: {}", sql);
+    }
+
+    /// `<![CDATA[ ]]>` 内容不能被丢弃（mapper 常用它包 `<=` / `>=`）。
+    #[test]
+    fn cdata_content_preserved() {
+        let sql = one_line(
+            r#"<mapper>
+  <select id="q">
+    SELECT * FROM t WHERE d <![CDATA[ >= ]]> #{d}
+  </select>
+</mapper>"#,
+            "cdata",
         );
-        assert_eq!(
-            process_where_markers("__WHERE__ and name = ?"),
-            "WHERE name = ?"
+        assert_eq!(sql, "SELECT * FROM t WHERE d >= ?", "got: {}", sql);
+    }
+
+    /// `<choose>` 只命中一个分支，全拼会造出语法错误。
+    #[test]
+    fn choose_takes_first_when() {
+        let sql = one_line(
+            r#"<mapper>
+  <select id="q">
+    SELECT * FROM t ORDER BY
+    <choose>
+      <when test="x == 1">A</when>
+      <when test="x == 2">B</when>
+      <otherwise>C</otherwise>
+    </choose>
+  </select>
+</mapper>"#,
+            "choose",
         );
-        assert_eq!(process_where_markers("__WHERE__"), "WHERE ");
+        assert_eq!(sql, "SELECT * FROM t ORDER BY A", "got: {}", sql);
+    }
+
+    /// `<selectKey>` 是独立语句，不能被拼进外层 INSERT。
+    #[test]
+    fn select_key_is_dropped() {
+        let sql = one_line(
+            r#"<mapper>
+  <insert id="i">
+    <selectKey keyProperty="id" resultType="long" order="BEFORE">
+      SELECT SEQ_T.NEXTVAL FROM DUAL
+    </selectKey>
+    INSERT INTO t (id, a) VALUES (#{id}, #{a})
+  </insert>
+</mapper>"#,
+            "select_key",
+        );
+        assert_eq!(sql, "INSERT INTO t (id, a) VALUES (?, ?)", "got: {}", sql);
+    }
+
+    /// 「外层 if 提供 and，内层多个 if 互斥提供操作数」→ 需要 alt 渲染兜底。
+    #[test]
+    fn exclusive_nested_alt_is_provided() {
+        let xml = r#"<mapper>
+  <select id="q">
+    SELECT * FROM t
+    <where>
+      <if test="orgno != null"> and
+        <if test="c != '1'"> SUPORGNO = #{orgno} </if>
+        <if test="c != '0'"> ORGNO = #{orgno} </if>
+      </if>
+    </where>
+  </select>
+</mapper>"#;
+        let path = std::env::temp_dir().join("sqlguard_parser_excl_nested.xml");
+        std::fs::write(&path, xml).unwrap();
+        let result = extract_sql_from_xml(&path).unwrap();
+        let alt = result[0]
+            .processed_sql_alt
+            .as_ref()
+            .expect("alt render should exist")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert_eq!(alt, "SELECT * FROM t WHERE SUPORGNO = ?", "got: {}", alt);
     }
 
     #[test]
@@ -592,5 +622,32 @@ mod tests {
         assert_eq!(result.len(), 1);
         assert!(result[0].processed_sql.contains("_var_tableName"));
         assert!(result[0].processed_sql.contains("?"));
+    }
+
+    #[test]
+    fn debug_finwhitelist_insert() {
+        // 临时调试测试：FinwhitelistEntity.xml 的 INSERT 列列表含子查询
+        // `(select t.name from G_SYS_trade t ...) AS INDUSTRY_CODE_NAME`，
+        // sqlparser 不支持 INSERT 列列表中嵌套子查询表达式 → PARSE_ERROR。
+        // 这是 mapper XML 本身的非标准 SQL 写法，不是 sqlguard 的 bug。
+        // 保留此测试作为回归验证：确保该语句始终走 PARSE 路径而非崩溃。
+        let content = match std::fs::read_to_string("examples/mapper/mapper-full/mapper/FinwhitelistEntity.xml") {
+            Ok(c) => c,
+            Err(_) => { return; } // 文件不存在时静默跳过
+        };
+        let fragments = crate::mapper::dynamic::collect_fragments_from_content(&content).unwrap();
+        let stmts = crate::mapper::dynamic::parse_dynamic_statements_from_content(&content, Some(&fragments)).unwrap();
+        let insert = stmts.iter().find(|s| s.statement_id == "insert");
+        assert!(insert.is_some(), "insert statement should exist");
+        if let Some(s) = insert {
+            let rendered = crate::mapper::dynamic::render_canonical(&s.root_nodes, crate::mapper::dynamic::RenderMode::AllTrue);
+            let normalized = crate::mapper::placeholder::normalize_placeholders(&rendered);
+            // INSERT 列列表中的子查询会导致 PG 解析失败，这是预期行为
+            let ast = crate::rule::engine::parser::parse_sql_to_ast_fb(&normalized, crate::config::CheckDialect::GaussDB, Some(crate::config::CheckDialect::Oracle));
+            assert!(
+                ast.statements.iter().any(|st| st.kind == "PARSE_ERROR"),
+                "INSERT with subquery in column list should be PARSE_ERROR"
+            );
+        }
     }
 }
