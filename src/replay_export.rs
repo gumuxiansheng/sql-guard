@@ -131,11 +131,14 @@ pub fn parse_type_filter(s: &Option<String>) -> HashSet<String> {
 }
 
 /// 收集并构建重放清单（全量导出）。
+///
+/// `trust_dynamic`：信任跳过 MyBatis `${}` 替换（对应 `Config.trust_dynamic_substitution`）。
 pub fn build_manifest(
     target_dir: &Path,
     sql_files: &[PathBuf],
     mapper_files: &[PathBuf],
     type_filter: &HashSet<String>,
+    trust_dynamic: bool,
 ) -> Result<Manifest, SqlGuardError> {
     let mut statements: Vec<ManifestStatement> = Vec::new();
 
@@ -152,7 +155,7 @@ pub fn build_manifest(
     // 每条 <select>/<insert>/<update>/<delete> 经 dynamic 模块展开后，
     // 无动态分支 → 1 条（不加 #vN）；有动态分支 → N 条（加 #v<序号>）。
     for file_path in mapper_files {
-        statements.extend(mapper_file_statements(file_path, target_dir, type_filter));
+        statements.extend(mapper_file_statements(file_path, target_dir, type_filter, trust_dynamic));
     }
 
     Ok(Manifest {
@@ -231,10 +234,16 @@ fn sql_file_statements(
 }
 
 /// 解析单个 Mapper XML 文件，生成清单条目（动态分支展开为多个变体）。
+///
+/// `trust_dynamic`：信任跳过 MyBatis `${}` 替换（对应 `Config.trust_dynamic_substitution`）。
+/// 开启时，含 `${}` 的语句若因运行时片段残缺而解析失败，不报普通「解析错误」，
+/// 而是标记为「含 ${} 运行时替换、未静态校验」——既诚实标注，又不退化成作者错误，
+/// 与 `run_rules_for_file` 的 `DYN` 警告语义一致。
 fn mapper_file_statements(
     file_path: &Path,
     target_dir: &Path,
     type_filter: &HashSet<String>,
+    trust_dynamic: bool,
 ) -> Vec<ManifestStatement> {
     let mut statements: Vec<ManifestStatement> = Vec::new();
     let dyn_stmts = match mapper::dynamic::parse_dynamic_statements(file_path) {
@@ -261,19 +270,37 @@ fn mapper_file_statements(
             mapper::dynamic::DEFAULT_MAX_INDEPENDENT_IFS,
         );
 
+        // 是否含 MyBatis `${}` 运行时文本替换（静态期不可解析）。
+        let has_dollar = mapper::dynamic::contains_dollar_substitution(stmt);
+
         // 判断是否有动态分支：变体数 > 1，或唯一变体的 label 非空
         let has_dynamic = variants.len() > 1 || variants.iter().any(|v| !v.label.is_empty());
 
         for (vi, v) in variants.iter().enumerate() {
             // 解析变体 SQL 仅用于检测语法错误，不改写导出文本
             let parsed = parse_sql_to_ast(&v.sql, crate::config::CheckDialect::Generic);
-            let parse_error = parsed.parse_error.clone().or_else(|| {
-                if parsed.statements.iter().any(|s| s.kind == "PARSE_ERROR") {
-                    Some("parse error in mapper variant".to_string())
+            let parse_error = if parsed.parse_error.is_some()
+                || parsed.statements.iter().any(|s| s.kind == "PARSE_ERROR")
+            {
+                if has_dollar && trust_dynamic {
+                    // 信任跳过：解析失败源于运行时 `${}` 片段，预期内、非作者错误。
+                    // 保留 parse_error（Java 重放侧据此跳过不可静态解析的 SQL），
+                    // 但明确标注为「动态未校验」，区别于真正的语法缺陷。
+                    Some(
+                        "contains ${} runtime substitution; statically unchecked \
+                         (trust_dynamic_substitution enabled)"
+                            .to_string(),
+                    )
                 } else {
-                    None
+                    // 优先保留解析器原始错误详情（tokenize 失败如 `SQL tokenize error: ...`）；
+                    // PARSE_ERROR 语句无原始详情，回退通用文案。
+                    Some(parsed.parse_error.clone().unwrap_or_else(|| {
+                        "parse error in mapper variant".to_string()
+                    }))
                 }
-            });
+            } else {
+                None
+            };
 
             let (id, variant_of, variant_label) = if has_dynamic {
                 (
@@ -339,6 +366,7 @@ pub fn build_incremental_manifest(
     diffs: &[FileDiff],
     base: &str,
     type_filter: &HashSet<String>,
+    trust_dynamic: bool,
 ) -> Result<IncrementalManifest, SqlGuardError> {
     build_incremental_manifest_with_loader(
         target_dir,
@@ -347,12 +375,15 @@ pub fn build_incremental_manifest(
         diffs,
         base,
         type_filter,
+        trust_dynamic,
         &|diff| git_diff::git_show(base, &diff.path),
     )
 }
 
 /// [`build_incremental_manifest`] 的可注入版本：旧文件内容由 `old_loader` 提供
 /// （返回 `Ok(None)` 表示 base 中无此文件），便于单元测试不依赖真实 git。
+///
+/// `trust_dynamic`：信任跳过 MyBatis `${}` 替换（对应 `Config.trust_dynamic_substitution`）。
 fn build_incremental_manifest_with_loader(
     target_dir: &Path,
     sql_files: &[PathBuf],
@@ -360,6 +391,7 @@ fn build_incremental_manifest_with_loader(
     diffs: &[FileDiff],
     base: &str,
     type_filter: &HashSet<String>,
+    trust_dynamic: bool,
     old_loader: &dyn Fn(&FileDiff) -> Result<Option<String>, SqlGuardError>,
 ) -> Result<IncrementalManifest, SqlGuardError> {
     let mut statements: Vec<ManifestStatement> = Vec::new();
@@ -403,7 +435,7 @@ fn build_incremental_manifest_with_loader(
         };
         let source = display_path(file_path, target_dir);
         let change = if diff.is_new { "added" } else { "modified" };
-        for mut stmt in mapper_file_statements(file_path, target_dir, type_filter) {
+        for mut stmt in mapper_file_statements(file_path, target_dir, type_filter, trust_dynamic) {
             // mapper 语句锚点为标签起始行；命中 hunk 即导出该标签全部变体
             if diff.is_new || intersects_hunks(stmt.line, stmt.end_line, &diff.hunks) {
                 stmt.change = Some(change.to_string());
@@ -817,6 +849,7 @@ mod tests {
             &[diff],
             "origin/main",
             &HashSet::new(),
+            true,
         )
         .unwrap();
 
@@ -855,6 +888,7 @@ mod tests {
             &[diff],
             "HEAD~1",
             &HashSet::new(),
+            true,
         )
         .unwrap();
 
@@ -892,6 +926,7 @@ mod tests {
             &[diff],
             "origin/main",
             &HashSet::new(),
+            true,
         )
         .unwrap();
 
@@ -927,6 +962,7 @@ mod tests {
             &[diff],
             "origin/main",
             &filter,
+            true,
         )
         .unwrap();
 
@@ -961,6 +997,7 @@ mod tests {
             &[diff],
             "origin/main",
             &HashSet::new(),
+            true,
         )
         .unwrap();
 
@@ -981,6 +1018,7 @@ mod tests {
             &[diff2],
             "origin/main",
             &HashSet::new(),
+            true,
         )
         .unwrap();
         assert_eq!(result2.manifest.statement_count, 2);
@@ -1050,6 +1088,7 @@ mod tests {
             &[diff],
             "HEAD~1",
             &HashSet::new(),
+            true,
             &old_loader,
         )
         .unwrap();
@@ -1067,7 +1106,7 @@ mod tests {
     #[test]
     fn build_manifest_empty() {
         let dir = tempfile::tempdir().unwrap();
-        let manifest = build_manifest(dir.path(), &[], &[], &HashSet::new()).unwrap();
+        let manifest = build_manifest(dir.path(), &[], &[], &HashSet::new(), true).unwrap();
         assert_eq!(manifest.statement_count, 0);
         assert!(manifest.statements.is_empty());
     }
@@ -1078,7 +1117,7 @@ mod tests {
         let sql_path = dir.path().join("test.sql");
         std::fs::write(&sql_path, "SELECT 1;\nSELECT 2;\n").unwrap();
 
-        let manifest = build_manifest(dir.path(), &[sql_path], &[], &HashSet::new()).unwrap();
+        let manifest = build_manifest(dir.path(), &[sql_path], &[], &HashSet::new(), true).unwrap();
         assert_eq!(manifest.statement_count, 2);
         assert_eq!(manifest.statements[0].stmt_type, "select");
         assert_eq!(manifest.statements[0].source_type, "sql");
@@ -1095,7 +1134,7 @@ mod tests {
         let mut filter = HashSet::new();
         filter.insert("insert".to_string());
 
-        let manifest = build_manifest(dir.path(), &[sql_path], &[], &filter).unwrap();
+        let manifest = build_manifest(dir.path(), &[sql_path], &[], &filter, true).unwrap();
         assert_eq!(manifest.statement_count, 1);
         assert_eq!(manifest.statements[0].stmt_type, "insert");
     }
@@ -1106,9 +1145,68 @@ mod tests {
         let sql_path = dir.path().join("test.sql");
         std::fs::write(&sql_path, "START TRANSACTION;\nSELECT 1;\nCOMMIT;\n").unwrap();
 
-        let manifest = build_manifest(dir.path(), &[sql_path], &[], &HashSet::new()).unwrap();
+        let manifest = build_manifest(dir.path(), &[sql_path], &[], &HashSet::new(), true).unwrap();
         // Only SELECT 1 should be exported; START TRANSACTION and COMMIT are skipped
         assert_eq!(manifest.statement_count, 1);
         assert_eq!(manifest.statements[0].stmt_type, "select");
+    }
+
+    #[test]
+    fn build_manifest_mapper_dollar_substitution_trusted() {
+        let dir = tempfile::tempdir().unwrap();
+        // 含 ${} 整段替换，渲染后结构残缺 → 静态解析失败（运行时才确定内容，预期内）
+        let xml = r#"<mapper>
+  <select id="dynamicCols">
+    SELECT ${selectSql} FROM dual WHERE
+  </select>
+</mapper>"#;
+        let xml_path = dir.path().join("Dyn.xml");
+        std::fs::write(&xml_path, xml).unwrap();
+
+        // 信任开启：解析失败标记为「动态未校验」，而非普通解析错误（Java 重放侧据此跳过，行为不变）
+        let trusted = build_manifest(dir.path(), &[], &[xml_path.clone()], &HashSet::new(), true).unwrap();
+        assert_eq!(trusted.statement_count, 1);
+        let pe = trusted.statements[0]
+            .parse_error
+            .as_deref()
+            .expect("expected a parse marker when trusted");
+        assert!(
+            pe.contains("statically unchecked"),
+            "trusted parse_error should note dynamic substitution, got: {}",
+            pe
+        );
+
+        // 信任关闭：回退为普通解析错误文案
+        let untrusted = build_manifest(dir.path(), &[], &[xml_path], &HashSet::new(), false).unwrap();
+        let pe2 = untrusted.statements[0]
+            .parse_error
+            .as_deref()
+            .expect("expected a parse marker when untrusted");
+        assert_eq!(pe2, "parse error in mapper variant");
+    }
+
+    #[test]
+    fn build_manifest_mapper_tokenize_error_detail_preserved() {
+        let dir = tempfile::tempdir().unwrap();
+        // 首 token 即未闭合字符串 → try_with_sql 失败，parse_error 应保留原始 tokenize 详情
+        let xml = r#"<mapper>
+  <select id="badStr">
+    'unterminated
+  </select>
+</mapper>"#;
+        let xml_path = dir.path().join("Dyn.xml");
+        std::fs::write(&xml_path, xml).unwrap();
+
+        let manifest = build_manifest(dir.path(), &[], &[xml_path], &HashSet::new(), false).unwrap();
+        assert_eq!(manifest.statement_count, 1);
+        let pe = manifest.statements[0]
+            .parse_error
+            .as_deref()
+            .expect("expected a parse marker");
+        assert!(
+            pe.contains("tokenize error"),
+            "should preserve original tokenize detail, got: {}",
+            pe
+        );
     }
 }
