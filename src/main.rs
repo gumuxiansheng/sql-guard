@@ -2054,9 +2054,17 @@ mod tests {
 
     #[test]
     fn resolve_absolute_path_keeps_absolute() {
+        // Windows 上 `/tmp/test` 是「根相对」而非绝对（仅 `\` 前缀算绝对），
+        // join 后保留当前盘符成为 `C:/tmp/test`；Unix 上原样保留。
         let abs = Path::new("/tmp/test");
         let result = resolve_absolute_path(abs);
         assert!(result.is_absolute());
+        assert!(
+            result.ends_with(Path::new("tmp/test")),
+            "不应拼接 cwd 目录，实际: {:?}",
+            result
+        );
+        #[cfg(not(windows))]
         assert_eq!(result, PathBuf::from("/tmp/test"));
     }
 
@@ -2080,6 +2088,13 @@ mod tests {
     #[test]
     fn resolve_output_dir_absolute_kept() {
         let result = resolve_output_dir(Some(Path::new("/tmp/out")), Path::new("/tmp/target"));
+        assert!(result.is_absolute());
+        assert!(
+            result.ends_with(Path::new("tmp/out")),
+            "不应拼接 cwd 目录，实际: {:?}",
+            result
+        );
+        #[cfg(not(windows))]
         assert_eq!(result, PathBuf::from("/tmp/out"));
     }
 
