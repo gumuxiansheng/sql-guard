@@ -592,7 +592,9 @@ fn match_diff<'a>(file: &Path, target_dir: &Path, diffs: &'a [FileDiff]) -> Opti
 }
 
 /// 语句行范围 `[line, end_line]` 与任一 hunk `[s, e]` 是否有交集。
-fn intersects_hunks(line: i64, end_line: i64, hunks: &[(usize, usize)]) -> bool {
+///
+/// 提取为 `pub` 以便 `sqlguard-mine` 复用同一套「语句级 diff 交集」逻辑。
+pub fn intersects_hunks(line: i64, end_line: i64, hunks: &[(usize, usize)]) -> bool {
     hunks.iter().any(|(s, e)| {
         let (s, e) = (*s as i64, *e as i64);
         s <= end_line && e >= line

@@ -107,6 +107,68 @@ fn collect_xml_files(
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    /// 默认 `MapperConfig`（`patterns = ["**/*Mapper.xml"]`）必须递归收集子目录里的
+    /// `*Mapper.xml` 文件。回归：递归扫描逻辑本身正确（不漏子目录）。
+    #[test]
+    fn collects_nested_mapper_xml_files() {
+        let base = std::env::temp_dir().join("sqlguard_mine_nested_test");
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(base.join("sub/deep")).unwrap();
+        fs::write(base.join("UserMapper.xml"), "<xml/>").unwrap();
+        fs::write(base.join("sub/OrderMapper.xml"), "<xml/>").unwrap();
+        fs::write(base.join("sub/deep/ProductMapper.xml"), "<xml/>").unwrap();
+        fs::write(base.join("ignore.txt"), "x").unwrap();
+
+        let mut cfg = MapperConfig::default();
+        cfg.enabled = true;
+        cfg.paths = vec![base.to_string_lossy().to_string()];
+
+        let mut files = collect_mapper_files(&base, &cfg, &[]);
+        files.sort();
+        assert_eq!(
+            files.len(),
+            3,
+            "expected 3 *Mapper.xml files, got {:?}",
+            files
+        );
+        assert!(files
+            .iter()
+            .all(|f| f.file_name().unwrap().to_string_lossy().ends_with("Mapper.xml")));
+
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /// `sqlguard-mine` 显式把 `patterns` 设为包含 `**/*.xml`，因此子目录里**无 Mapper 后缀**
+    /// 的普通 `*.xml` 也必须被递归收集（这正是「只扫第一层」bug 的修复点）。
+    #[test]
+    fn collects_nested_plain_xml_with_wildcard_pattern() {
+        let base = std::env::temp_dir().join("sqlguard_mine_plain_xml_test");
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(base.join("sub/deep")).unwrap();
+        fs::write(base.join("a.xml"), "<xml/>").unwrap();
+        fs::write(base.join("sub/b.xml"), "<xml/>").unwrap();
+        fs::write(base.join("sub/deep/c.xml"), "<xml/>").unwrap();
+        fs::write(base.join("UserMapper.xml"), "<xml/>").unwrap();
+
+        let mut cfg = MapperConfig::default();
+        cfg.enabled = true;
+        cfg.paths = vec![base.to_string_lossy().to_string()];
+        // 与 sqlguard-mine 的修复一致：同时匹配 *Mapper.xml 与任意 *.xml
+        cfg.patterns = vec!["**/*Mapper.xml".to_string(), "**/*.xml".to_string()];
+
+        let mut files = collect_mapper_files(&base, &cfg, &[]);
+        files.sort();
+        assert_eq!(files.len(), 4, "expected 4 xml files, got {:?}", files);
+
+        let _ = fs::remove_dir_all(&base);
+    }
+}
+
 /// 把 MyBatis 语句标签映射到 SqlGuard 的 `script_type`。
 ///
 /// 默认映射（向后兼容）：select/insert/update/delete → `"dml"`。

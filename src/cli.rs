@@ -24,7 +24,7 @@ pub enum Commands {
         #[clap(short, long)]
         config: Option<PathBuf>,
 
-        /// Output format(s): plain, json, html, all
+        /// Output format(s): plain, json, html, sarif, all
         #[clap(short, long, default_value = "plain")]
         format: String,
 
@@ -176,7 +176,9 @@ pub enum Commands {
         #[clap(short, long, default_value = ".")]
         output_dir: PathBuf,
 
-        /// Override [rollback].dialect: mysql / postgresql / gaussdb.
+        /// Override [rollback].dialect: mysql / mariadb / postgresql / gaussdb.
+        ///
+        /// `postgres`/`pg` and `gauss`/`gaussdb` are accepted aliases.
         #[clap(long)]
         dialect: Option<String>,
 
