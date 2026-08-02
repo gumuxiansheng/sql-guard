@@ -87,11 +87,14 @@
 └─────────────────────────────────────────────────────────────┘
 ```
 
-## 快速开始
+## 安装
 
-### 安装
+### 前置要求
 
-四种方式任选其一：
+- **预编译二进制 / Docker**：无需任何依赖，开箱即用。
+- **`cargo install` / 从源码构建**：需要 [Rust 工具链](https://www.rust-lang.org/tools/install) **1.72+**（推荐 1.80+）。Windows 用户建议使用 **MSVC** 工具链（`rustup default stable-x86_64-pc-windows-msvc`）。
+
+### 安装方式（任选其一）
 
 #### 方式 1：`cargo install`（推荐，跨平台）
 
@@ -103,7 +106,7 @@ Rust 工具链会自动编译并安装到 `~/.cargo/bin/sqlguard`，加入 `PATH
 
 #### 方式 2：预编译二进制
 
-从 [GitHub Releases](../../releases) 下载对应平台的二进制：
+从 [Releases](../../releases) 下载对应平台的二进制：
 
 | 平台 | 文件 |
 |------|------|
@@ -121,8 +124,6 @@ chmod +x sqlguard-* && mv sqlguard-* /usr/local/bin/sqlguard
 # 重命名为 sqlguard.exe 并加入 PATH
 ```
 
-二进制由 [Release 工作流](.github/workflows/release.yml) 在打 tag 时自动构建发布。
-
 #### 方式 3：Docker
 
 ```bash
@@ -134,11 +135,24 @@ docker run --rm -v "$PWD:/work" ghcr.io/sqlguard/sqlguard:latest check /work/sql
 #### 方式 4：从源码构建
 
 ```bash
-git clone https://github.com/sqlguard/sqlguard.git
-cd sqlguard
+git clone https://cnb.cool/mikezhu/sql-guard.git
+cd sql-guard
 cargo build --release
 # 产物在 target/release/sqlguard
+# 独立挖掘工具：
+cargo build --release --bin sqlguard-mine
 ```
+
+### 验证安装
+
+```bash
+sqlguard --version
+sqlguard --help
+```
+
+## 快速开始
+
+> 安装步骤见上方「安装」章节。
 
 ### 初始化项目
 
@@ -244,6 +258,82 @@ sqlguard replay-export ./sql -o manifest_out/ \
 | 输出 | 每条语句的执行计划、耗时、慢 SQL 报告 |
 
 详见 `replay/` 工程的 `Main.java` 与 `pom.xml`。
+
+## 使用示例
+
+下面汇总几个最常用的端到端场景，便于快速套用。
+
+### 场景 1：本地最小工作流（init → check → report）
+
+```bash
+# 1. 初始化项目（生成配置 + 22 条内置规则 + 示例目录）
+sqlguard init my-sql-project && cd my-sql-project
+
+# 2. 编写脚本
+mkdir -p sql/ddl sql/dml
+cat > sql/ddl/create_users.sql <<'SQL'
+CREATE TABLE users (
+    id   INT PRIMARY KEY,
+    name VARCHAR(100) NOT NULL
+);
+SQL
+
+# 3. 检查
+sqlguard check ./sql
+
+# 4. 生成 HTML 报告并归档
+sqlguard check ./sql -f html -o reports/
+# 打开 reports/sqlguard-report.html
+```
+
+### 场景 2：MyBatis Mapper 模式
+
+在 `sqlguard.toml` 中启用 Mapper 扫描后，直接检查 XML 中的 SQL：
+
+```toml
+[mapper]
+enabled = true
+paths = ["src/main/resources/mapper"]
+patterns = ["**/*Mapper.xml"]
+```
+
+```bash
+# 自动提取 <select>/<insert>/<update>/<delete> 中的 SQL 并检查
+sqlguard check ./src/main/resources/mapper
+```
+
+### 场景 3：CI 增量校验（只查本次改动）
+
+```bash
+sqlguard check-diff --base origin/main -f json -o reports/
+```
+
+适合在 PR 流水线中只校验本次提交改动的 SQL 语句，避免存量代码的历史违规阻塞新提交。
+
+### 场景 4：自定义一条规则
+
+1. 编写规则脚本 `config/rules/dml/my_custom_rule.rhai`（可参考已内置的 `no_constant_where.rhai`）；
+2. 在 `sqlguard.rules.toml` 注册：
+
+```toml
+[[rules]]
+id = "DML999"
+name = "my_custom_rule"
+group = "custom"
+description = "Demo: reject constant WHERE conditions"
+enabled = true
+script_path = "config/rules/dml/my_custom_rule.rhai"
+applies_to = ["dml"]
+severity = "warning"
+```
+
+3. 运行仅该规则验证：
+
+```bash
+sqlguard check ./sql --rules DML999
+```
+
+完整 API 与编写规范见 [docs/rule-scripting.md](docs/rule-scripting.md)；内置规则清单见 [docs/default-rules.md](docs/default-rules.md)。
 
 ## 项目结构
 
@@ -723,6 +813,10 @@ sqlguard replay-export [OPTIONS] [PATH]
   清单 `version` 保持 1，旧版 `sqlguard-replay` 直接可用（忽略未知字段）。
 - 无改动时清单 `statement_count: 0`，removed 文件照常生成。
 
+> 交互式终端（stderr 为 TTY）下显示按文件计的实时进度条
+> `Exporting SQL manifest: 40% [========----------] 2/5 files`；管道/CI 日志
+> 不输出控制字符，保持干净。
+
 ```bash
 # CI：只导出本次 PR 改动，重放成本与改动量成正比
 sqlguard replay-export ./sql -o manifest_out/ --base origin/main
@@ -1123,6 +1217,77 @@ CI（`.github/workflows/ci.yml`）在 PR 合入主干时自动运行：`cargo fm
 | [serde](https://crates.io/crates/serde) / [toml](https://crates.io/crates/toml) | 配置序列化 |
 | [criterion](https://crates.io/crates/criterion) | 基准测试（benches/） |
 | [proptest](https://crates.io/crates/proptest) | 模糊测试（SQL 解析器鲁棒性） |
+
+## 贡献指南
+
+欢迎参与 SqlGuard 的开发！无论是修复 bug、新增规则、完善文档还是提交 issue，都非常感谢。
+
+### 开发环境准备
+
+```bash
+# 仓库地址（当前远程）
+git clone https://cnb.cool/mikezhu/sql-guard.git
+cd sql-guard
+
+# 需要 Rust 1.72+（推荐 1.80+）
+rustc --version
+
+# 构建主二进制与独立挖掘工具
+cargo build --release
+cargo build --release --bin sqlguard-mine
+```
+
+### 本地校验（提交前请务必通过）
+
+CI（`.github/workflows/ci.yml`）在 PR 合入主干时会自动运行以下检查，请在本地预先跑通：
+
+```bash
+cargo fmt --check          # 代码格式（rustfmt）
+cargo clippy -D warnings   # 静态检查（不允许 warning）
+cargo test --all-targets   # 全量测试（单元 + 集成 + proptest）
+cargo test --test integration_test   # 仅集成测试
+```
+
+### 代码风格
+
+- 统一使用 `rustfmt` 默认格式，提交前执行 `cargo fmt`。
+- `clippy` 以 `-D warnings` 严格模式运行，新增代码不得引入 lint 警告。
+- 模块顶部注释说明职责；对外公共 API 补充文档注释（`///`）。
+
+### 如何新增一条检查规则
+
+这是最常见的贡献路径，按固定四步进行：
+
+1. **编写规则脚本**：在 `config/rules/ddl/` 或 `config/rules/dml/` 下新增 `.rhai` 文件，遍历 AST 上报违规，复用 `config/rules/lib/helpers.rhai` 中的辅助函数（`guard_parse_error` / `violation` 等，无需 import）。可参考现有规则如 `config/rules/ddl/no_drop_table.rhai`。
+2. **注册规则**：在 `sqlguard.rules.toml` 中追加 `[[rules]]`，指定唯一 `id`、分组、严重级别与 `script_path`。
+3. **补充测试**：在 `tests/integration_test.rs` 增加覆盖该规则的用例（含命中与放行的正反例）。
+4. **更新文档**：在 `docs/default-rules.md` 登记规则说明；若影响用户可见行为，同步更新 `README.md` 与 `docs/rule-scripting.md`。
+
+> 注意：`examples/sql-guard/config/rules/` 下另有一份规则副本（含内联 helper 以兼容旧版示例二进制），修改内置规则时两份需保持同步。
+
+### 提交信息规范
+
+建议使用 [约定式提交（Conventional Commits）](https://www.conventionalcommits.org/)：
+
+```
+<type>(<scope>): <subject>
+```
+
+常用 `type`：`feat`（新功能）、`fix`（修复）、`docs`（文档）、`refactor`（重构）、`test`（测试）、`chore`（杂项）。例如：`feat(rule): add DML999 constant-where check`。
+
+### Pull Request 流程
+
+1. 基于 `master` 新建特性分支（`git checkout -b feat/xxx`）。
+2. 完成开发并确保本地校验全绿（fmt / clippy / test）。
+3. 提交 PR，描述**动机、改动范围、测试方式**；若涉及规则行为变化，说明对存量配置的影响。
+4. 等待 CI 通过；审查意见修改后同步推送。
+
+### 报告问题
+
+- 提交 Issue 时请附上：SqlGuard 版本（`sqlguard --version`）、复现用的 SQL / Mapper 片段、期望与实际行为。
+- 解析相关的问题请注明使用的 `dialect` 与 `dialect_fallback` 配置。
+
+更多设计细节见 `docs/` 目录：`rule-scripting.md`、`default-rules.md`、`backup-rollback-design.md`、`dialect-fallback.md` 等。
 
 ## License
 

@@ -1,4 +1,5 @@
 use std::fs;
+use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -533,6 +534,31 @@ fn run_check(
     }
 }
 
+/// 进度条单行文本：`Exporting SQL manifest: 50% [==========----------] 3/6 files  a.sql`。
+/// 文件名右侧截断到 24 字符，避免长路径撑满整行。`total == 0` 时返回 None（无进度可显示）。
+fn progress_line(done: usize, total: usize, name: &str) -> Option<String> {
+    if total == 0 {
+        return None;
+    }
+    let pct = done * 100 / total;
+    let width = 20usize;
+    let filled = done * width / total;
+    let bar: String = std::iter::repeat('=')
+        .take(filled)
+        .chain(std::iter::repeat('-').take(width - filled))
+        .collect();
+    let name: String = if name.chars().count() > 24 {
+        let tail: String = name.chars().rev().take(24).collect();
+        format!("…{}", tail.chars().rev().collect::<String>())
+    } else {
+        name.to_string()
+    };
+    Some(format!(
+        "Exporting SQL manifest: {}% [{}] {}/{} files  {}",
+        pct, bar, done, total, name
+    ))
+}
+
 // ===== run_replay_export =====
 
 fn run_replay_export(
@@ -565,6 +591,28 @@ fn run_replay_export(
         fs::create_dir_all(&output_dir_abs).map_err(SqlGuardError::IoError)?;
     }
 
+    // 导出进度条：仅 stderr 为 TTY 时渲染（CI / 管道日志不输出 \r 控制字符）。
+    // 每处理完一个文件回调一次 (done, total, 当前文件)。
+    let stderr_tty = std::io::stderr().is_terminal();
+    let mut render_progress = |done: usize, total: usize, file: &Path| {
+        if !stderr_tty {
+            return;
+        }
+        let name = file
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let Some(line) = progress_line(done, total, &name) else {
+            return;
+        };
+        if done >= total {
+            // 完成：换行，后续摘要从新行开始
+            eprint!("\x1b[2K\r{}\n", line);
+        } else {
+            eprint!("\x1b[2K\r{}", line);
+        }
+    };
+
     // 增量导出：--base 指定 git 基线，只导出改动语句
     let (manifest, removed_manifest, sql_count, mapper_count) = if let Some(base_ref) = base {
         eprintln!("Computing diff: {}...HEAD", base_ref);
@@ -595,6 +643,7 @@ fn run_replay_export(
             base_ref,
             &type_filter,
             config.trust_dynamic_substitution,
+            &mut render_progress,
         )?;
         let removed_manifest = replay_export::RemovedManifest {
             version: 1,
@@ -615,6 +664,7 @@ fn run_replay_export(
             &mapper_files,
             &type_filter,
             config.trust_dynamic_substitution,
+            &mut render_progress,
         )?;
         (manifest, None, sql_files.len(), mapper_files.len())
     };
@@ -1958,6 +2008,32 @@ severity = "warning"
 mod tests {
     use super::*;
     use sqlguard::git_diff::FileDiff;
+
+    // === progress_line ===
+
+    #[test]
+    fn progress_line_half_way() {
+        assert_eq!(
+            progress_line(3, 6, "a.sql"),
+            Some("Exporting SQL manifest: 50% [==========----------] 3/6 files  a.sql".to_string())
+        );
+    }
+
+    #[test]
+    fn progress_line_truncates_long_filename() {
+        let long = "very-very-long-mapper-file-name-that-exceeds-24-chars.xml";
+        let line = progress_line(1, 2, long).unwrap();
+        assert!(
+            line.ends_with("1/2 files  …hat-exceeds-24-chars.xml"),
+            "应保留右侧 24 字符，实际: {}",
+            line
+        );
+    }
+
+    #[test]
+    fn progress_line_total_zero_is_none() {
+        assert_eq!(progress_line(0, 0, "a.sql"), None);
+    }
 
     fn make_violation(rule_id: &str, line: Option<usize>) -> Violation {
         Violation {
