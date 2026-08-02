@@ -594,6 +594,7 @@ fn run_replay_export(
             &diffs,
             base_ref,
             &type_filter,
+            config.trust_dynamic_substitution,
         )?;
         let removed_manifest = replay_export::RemovedManifest {
             version: 1,
@@ -608,8 +609,13 @@ fn run_replay_export(
         };
         (inc.manifest, Some(removed_manifest), sql_files.len(), mapper_files.len())
     } else {
-        let manifest =
-            replay_export::build_manifest(&absolute_target, &sql_files, &mapper_files, &type_filter)?;
+        let manifest = replay_export::build_manifest(
+            &absolute_target,
+            &sql_files,
+            &mapper_files,
+            &type_filter,
+            config.trust_dynamic_substitution,
+        )?;
         (manifest, None, sql_files.len(), mapper_files.len())
     };
 

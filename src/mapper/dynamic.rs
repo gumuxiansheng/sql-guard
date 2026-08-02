@@ -314,6 +314,56 @@ pub fn expand_variants(stmt: &DynamicStatement, max_independent_ifs: usize) -> V
     dedup_variants(all)
 }
 
+/// 判断一条动态语句是否包含 MyBatis `${}` 文本替换（运行时才确定内容，静态期不可解析）。
+///
+/// 用于 replay-export 的信任跳过：含 `${}` 的语句渲染后若因运行时片段残缺而解析失败，
+/// 属于预期内，不应在清单里标记为普通「解析错误」。实现上直接扫描解析后的节点树文本——
+/// `${}` 在 `DynNode::Text` 中保持原文，未被 `normalize_placeholders` 改写。
+pub fn contains_dollar_substitution(stmt: &DynamicStatement) -> bool {
+    fn walk(nodes: &[DynNode]) -> bool {
+        for n in nodes {
+            match n {
+                DynNode::Text(s) => {
+                    if s.contains("${") {
+                        return true;
+                    }
+                }
+                DynNode::If { children, .. } => {
+                    if walk(children) {
+                        return true;
+                    }
+                }
+                DynNode::Choose {
+                    when_clauses,
+                    otherwise,
+                } => {
+                    for (_, ch) in when_clauses {
+                        if walk(ch) {
+                            return true;
+                        }
+                    }
+                    if let Some(o) = otherwise {
+                        if walk(o) {
+                            return true;
+                        }
+                    }
+                }
+                DynNode::ForEach { children, .. }
+                | DynNode::Where(children)
+                | DynNode::Set(children)
+                | DynNode::Trim { children, .. } => {
+                    if walk(children) {
+                        return true;
+                    }
+                }
+                DynNode::Bind => {}
+            }
+        }
+        false
+    }
+    walk(&stmt.root_nodes)
+}
+
 /// 按「空白归一化 + 忽略大小写」后的 SQL 去重，保留首次出现的变体（含其 label）。
 ///
 /// 不同分支组合经常渲染出**字面完全相同**的 SQL（例如分支体本身为空、

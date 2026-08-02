@@ -7,6 +7,22 @@ use sqlguard::mapper;
 use sqlguard::rule::engine::parser::parse_sql_to_ast_fb;
 
 fn main() {
+    // 在大栈线程中运行：真实业务 mapper 可含数百个 <if>，AllTrue 渲染后 SQL 可达数万行，
+    // sqlparser 递归下降解析器对超长输入需要较大栈空间（与 main.rs 一致）。
+    let handle = std::thread::Builder::new()
+        .stack_size(64 * 1024 * 1024)
+        .spawn(diag)
+        .expect("failed to spawn diag thread");
+    match handle.join() {
+        Ok(()) => {}
+        Err(_) => {
+            eprintln!("mapdiag thread panicked (likely stack overflow on very deep SQL)");
+            std::process::exit(1);
+        }
+    }
+}
+
+fn diag() {
     let dir = std::env::args().nth(1).expect("usage: mapdiag <mapper-dir>");
     let show = std::env::args().nth(2).unwrap_or_default();
     let mut files: Vec<PathBuf> = Vec::new();
@@ -21,6 +37,8 @@ fn main() {
     let mut total = 0usize;
     let mut failed = 0usize;
     let mut rescued_by_alt = 0usize;
+    // 信任跳过：含 `${}` 运行时替换、解析失败预期内的语句，诚实记为 DYN（不计入 PARSE 失败）
+    let mut trusted_dyn = 0usize;
     let mut cats: BTreeMap<String, usize> = BTreeMap::new();
     // 每个类别保留最多 N 个样例，便于观察触发写法
     let cap: usize = std::env::args()
@@ -64,29 +82,46 @@ fn main() {
                 rescued_by_alt += 1;
                 continue;
             }
-            failed += 1;
             let sql = primary.trim();
-            let cat = categorize(sql, &s.statement_type);
-            *cats.entry(cat.clone()).or_default() += 1;
-            let bucket = samples.entry(cat).or_default();
-            if bucket.len() < cap {
-                bucket.push(format!(
-                    "{}#{} :: {}",
-                    f.file_name().unwrap().to_string_lossy(),
-                    s.statement_id,
-                    squeeze(sql, 400)
-                ));
+            if s.has_dynamic {
+                // 信任跳过：含 `${}` 运行时替换，解析失败预期内 → 诚实记为 DYN，不算 PARSE 失败
+                trusted_dyn += 1;
+                let cat = "DYN 信任跳过（含 ${} 运行时替换）".to_string();
+                *cats.entry(cat.clone()).or_default() += 1;
+                let bucket = samples.entry(cat).or_default();
+                if bucket.len() < cap {
+                    bucket.push(format!(
+                        "{}#{} :: {}",
+                        f.file_name().unwrap().to_string_lossy(),
+                        s.statement_id,
+                        squeeze(sql, 400)
+                    ));
+                }
+            } else {
+                failed += 1;
+                let cat = categorize(sql, &s.statement_type);
+                *cats.entry(cat.clone()).or_default() += 1;
+                let bucket = samples.entry(cat).or_default();
+                if bucket.len() < cap {
+                    bucket.push(format!(
+                        "{}#{} :: {}",
+                        f.file_name().unwrap().to_string_lossy(),
+                        s.statement_id,
+                        squeeze(sql, 400)
+                    ));
+                }
             }
         }
     }
 
     println!(
-        "files={} statements={} failed={} ({:.1}%)  [alt 兜底救回 {}]",
+        "files={} statements={} failed={} ({:.1}%)  [alt 兜底救回 {} | 信任跳过 DYN {}]",
         files.len(),
         total,
         failed,
         100.0 * failed as f64 / total.max(1) as f64,
-        rescued_by_alt
+        rescued_by_alt,
+        trusted_dyn
     );
     println!("\n=== 失败归类 ===");
     let mut v: Vec<_> = cats.iter().collect();
