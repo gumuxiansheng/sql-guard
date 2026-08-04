@@ -2883,3 +2883,81 @@ fn test_replay_export_incremental_no_changes() {
 
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// DML108 (no_constant_where) 应拦截 WHERE 子句中的字面量自比较恒真条件
+/// （WHERE 1=1 / WHERE 2=2 / 'a'='a' / WHERE true），且不误报真实条件
+/// （status = 'active' / col = 1 / a.id = b.id）。默认 init 已启用本规则。
+#[test]
+fn test_no_constant_where_flags_tautology() {
+    // 1) 反面：恒真 / 常量条件应被拦截
+    let bad_dir = "/tmp/sqlguard-test-constant-where-bad";
+    let _ = std::fs::remove_dir_all(bad_dir);
+    Command::new(&binary_abs_path())
+        .args(["init", bad_dir])
+        .output()
+        .expect("init");
+    std::fs::create_dir_all(format!("{}/sql/dml", bad_dir)).unwrap();
+    std::fs::write(
+        format!("{}/sql/dml/bad.sql", bad_dir),
+        "SELECT * FROM users WHERE 2=2;\n\
+         SELECT id FROM orders WHERE 'a' = 'a';\n\
+         UPDATE t SET f = 1 WHERE 1=1;\n\
+         DELETE FROM logs WHERE true;\n",
+    )
+    .unwrap();
+    let out = Command::new(&binary_abs_path())
+        .args([
+            "check",
+            bad_dir,
+            "-c",
+            &format!("{}/sqlguard.toml", bad_dir),
+            "-f",
+            "plain",
+        ])
+        .output()
+        .expect("check");
+    let so = String::from_utf8_lossy(&out.stdout);
+    let se = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        so.contains("no_constant_where") || se.contains("no_constant_where"),
+        "应拦截 WHERE 2=2 / 'a'='a' / 1=1 / true 等恒真条件\nstdout:{}\nstderr:{}",
+        so,
+        se
+    );
+    let _ = std::fs::remove_dir_all(bad_dir);
+
+    // 2) 正面：真实条件不应误报
+    let good_dir = "/tmp/sqlguard-test-constant-where-good";
+    let _ = std::fs::remove_dir_all(good_dir);
+    Command::new(&binary_abs_path())
+        .args(["init", good_dir])
+        .output()
+        .expect("init");
+    std::fs::create_dir_all(format!("{}/sql/dml", good_dir)).unwrap();
+    std::fs::write(
+        format!("{}/sql/dml/good.sql", good_dir),
+        "SELECT id, name FROM users WHERE status = 'active';\n\
+         SELECT a.id FROM a JOIN b ON a.id = b.id WHERE id = 1;\n",
+    )
+    .unwrap();
+    let out2 = Command::new(&binary_abs_path())
+        .args([
+            "check",
+            good_dir,
+            "-c",
+            &format!("{}/sqlguard.toml", good_dir),
+            "-f",
+            "plain",
+        ])
+        .output()
+        .expect("check");
+    let so2 = String::from_utf8_lossy(&out2.stdout);
+    let se2 = String::from_utf8_lossy(&out2.stderr);
+    assert!(
+        !(so2.contains("no_constant_where") || se2.contains("no_constant_where")),
+        "真实条件（status='active' / col=1 / a.id=b.id）不应触发 no_constant_where\nstdout:{}\nstderr:{}",
+        so2,
+        se2
+    );
+    let _ = std::fs::remove_dir_all(good_dir);
+}

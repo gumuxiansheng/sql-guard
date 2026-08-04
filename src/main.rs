@@ -1996,8 +1996,8 @@ severity = "warning"
 id = "DML108"
 name = "no_constant_where"
 group = "dml-convention"
-description = "Avoid constant conditions in WHERE clause"
-enabled = false
+description = "Avoid constant/tautology conditions in WHERE clause (e.g. 1=1, 2=2, 'a'='a', TRUE)"
+enabled = true
 script_path = "config/rules/dml/no_constant_where.rhai"
 applies_to = ["dml"]
 severity = "warning"

@@ -433,7 +433,7 @@ SELECT id FROM users ORDER BY RANDOM() LIMIT 10;
 
 ---
 
-## P1 规则（默认禁用，建议评估后启用）
+## P1 规则（默认禁用，建议评估后启用；其中 DML108 已默认启用）
 
 ### DML101 — `no_unused_join`
 
@@ -641,23 +641,31 @@ END FROM orders;
 |------|-----|
 | 文件 | `config/rules/dml/no_constant_where.rhai` |
 | 分组 | `dml-convention` |
-| 严重度 | `warning` |
-| 检测方式 | 字符串匹配 |
+| 严重度 | `warning`（默认启用） |
+| 检测方式 | AST（提取 WHERE 子句文本后按 token 判定字面量自比较） |
 | 对标 | SQLFluff ST10 |
 
-**校验原因**：`WHERE 1=1` 通常是动态 SQL 拼接的产物或用调试遗留代码。静态 SQL 中应移除。`WHERE 1=0` / `WHERE FALSE` 可能是调试代码。
+**校验原因**：`WHERE 1=1` / `WHERE 2=2` 这类"字面量 = 相同字面量"的等值条件是恒真（全匹配）筛选，通常是动态 SQL 拼接的占位符或调试遗留代码，在静态 SQL 中无实际意义，应删除或改为真实条件。`WHERE 1=0` / `WHERE 1<>1` / `WHERE 'a'='b'` / `WHERE TRUE` / `WHERE FALSE` 等"两侧都是字面量"的比较是恒假或裸布尔常量，同样属于可疑的常量条件。
+
+**检测逻辑**：基于 AST 取 SELECT / UPDATE / DELETE 的 WHERE 子句文本，仅当某个比较的**左右两侧都是字面量**（数字 / 字符串 / 布尔）时才判定为常量条件。因此 `col = 1`、`a.id = b.id`、`status = 'active'` 等真实条件不会误报；且无论恒真条件出现在子句开头还是中间（如 `WHERE 1=1 AND status='active'`）都会被捕获——因为语句中"出现了 `1=1`"。
 
 **反面案例**：
 ```sql
 SELECT * FROM users WHERE 1=1;
+SELECT * FROM users WHERE 2=2;
+SELECT * FROM users WHERE 'x' = 'x';
+SELECT * FROM users WHERE status = 'active' AND 1=1;  -- 含恒真条件，同样拦截
 SELECT * FROM users WHERE true;
 SELECT * FROM users WHERE 1=0;
+UPDATE users SET flag = 1 WHERE 1<>1;
+DELETE FROM logs WHERE 'a' = 'b';
 ```
 
 **正面案例**：
 ```sql
 SELECT * FROM users WHERE status = 'active';
-SELECT * FROM users WHERE 1=1 AND status = 'active';  -- 动态 SQL 拼接时"无害"但建议重构
+SELECT * FROM users WHERE id = 1;
+SELECT a.id, b.name FROM a JOIN b ON a.id = b.id;  -- 列自比较（非字面量），不误报
 ```
 
 ---
