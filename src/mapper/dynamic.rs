@@ -89,15 +89,13 @@ pub struct Variant {
 ///
 /// 与 [`crate::mapper::parser::extract_sql_from_xml`] 的区别：保留动态标签结构，
 /// 不剥离；`<include>` 在解析阶段内联展开（同文件内，按 refid 完整匹配）。
+/// `encoding` 是读取 XML 文件所用的编码标签（`[scan] encoding` / `--encoding`）。
 pub fn parse_dynamic_statements(
     xml_path: &std::path::Path,
+    encoding: &str,
 ) -> Result<Vec<DynamicStatement>, SqlGuardError> {
-    let content = std::fs::read_to_string(xml_path).map_err(|e| {
-        SqlGuardError::MapperError(format!(
-            "Failed to read mapper XML '{}': {}",
-            xml_path.display(),
-            e
-        ))
+    let content = crate::encoding::read_to_string(xml_path, encoding).map_err(|e| {
+        SqlGuardError::MapperError(format!("Failed to read mapper XML: {}", e))
     })?;
 
     // 第一遍：收集 <sql id="..."> 片段为 DynNode 树
@@ -1484,7 +1482,7 @@ mod tests {
   </select>
 </mapper>"#;
         let path = write_tmp("single_if", xml);
-        let stmts = parse_dynamic_statements(&path).unwrap();
+        let stmts = parse_dynamic_statements(&path, "utf-8").unwrap();
         assert_eq!(stmts.len(), 1);
         let vs = expand_variants(&stmts[0], DEFAULT_MAX_INDEPENDENT_IFS);
         // 1 个 if → 2 变体（true / false）
@@ -1532,7 +1530,7 @@ mod tests {
   </select>
 </mapper>"#;
         let path = write_tmp("two_ifs", xml);
-        let stmts = parse_dynamic_statements(&path).unwrap();
+        let stmts = parse_dynamic_statements(&path, "utf-8").unwrap();
         let vs = expand_variants(&stmts[0], DEFAULT_MAX_INDEPENDENT_IFS);
         assert_eq!(
             vs.len(),
@@ -1563,7 +1561,7 @@ mod tests {
   </select>
 </mapper>"#;
         let path = write_tmp("nested_if", xml);
-        let stmts = parse_dynamic_statements(&path).unwrap();
+        let stmts = parse_dynamic_statements(&path, "utf-8").unwrap();
         let vs = expand_variants(&stmts[0], DEFAULT_MAX_INDEPENDENT_IFS);
         // 关键：内层 if（c）在其外层 if（b）激活时必须可达，不能退化为基线 SQL。
         assert!(
@@ -1594,7 +1592,7 @@ mod tests {
   </select>
 </mapper>"#;
         let path = write_tmp("choose", xml);
-        let stmts = parse_dynamic_statements(&path).unwrap();
+        let stmts = parse_dynamic_statements(&path, "utf-8").unwrap();
         let vs = expand_variants(&stmts[0], DEFAULT_MAX_INDEPENDENT_IFS);
         assert_eq!(
             vs.len(),
@@ -1624,7 +1622,7 @@ mod tests {
   </select>
 </mapper>"#;
         let path = write_tmp("foreach", xml);
-        let stmts = parse_dynamic_statements(&path).unwrap();
+        let stmts = parse_dynamic_statements(&path, "utf-8").unwrap();
         let vs = expand_variants(&stmts[0], DEFAULT_MAX_INDEPENDENT_IFS);
         assert_eq!(
             vs.len(),
@@ -1666,7 +1664,7 @@ mod tests {
   </update>
 </mapper>"#;
         let path = write_tmp("set", xml);
-        let stmts = parse_dynamic_statements(&path).unwrap();
+        let stmts = parse_dynamic_statements(&path, "utf-8").unwrap();
         let vs = expand_variants(&stmts[0], DEFAULT_MAX_INDEPENDENT_IFS);
         // 2 ifs → 4 variants
         assert_eq!(vs.len(), 4);
@@ -1709,7 +1707,7 @@ mod tests {
             ifs
         );
         let path = write_tmp("threshold", &xml);
-        let stmts = parse_dynamic_statements(&path).unwrap();
+        let stmts = parse_dynamic_statements(&path, "utf-8").unwrap();
         let vs = expand_variants(&stmts[0], 8);
         assert_eq!(
             vs.len(),
@@ -1734,7 +1732,7 @@ mod tests {
   </select>
 </mapper>"#;
         let path = write_tmp("no_dynamic", xml);
-        let stmts = parse_dynamic_statements(&path).unwrap();
+        let stmts = parse_dynamic_statements(&path, "utf-8").unwrap();
         let vs = expand_variants(&stmts[0], DEFAULT_MAX_INDEPENDENT_IFS);
         assert_eq!(vs.len(), 1);
         assert!(
@@ -1759,7 +1757,7 @@ mod tests {
   </select>
 </mapper>"#;
         let path = write_tmp("include", xml);
-        let stmts = parse_dynamic_statements(&path).unwrap();
+        let stmts = parse_dynamic_statements(&path, "utf-8").unwrap();
         let vs = expand_variants(&stmts[0], DEFAULT_MAX_INDEPENDENT_IFS);
         // include 内联后含 1 个 if → 2 变体
         assert_eq!(
@@ -1787,7 +1785,7 @@ mod tests {
   </select>
 </mapper>"#;
         let path = write_tmp("trim", xml);
-        let stmts = parse_dynamic_statements(&path).unwrap();
+        let stmts = parse_dynamic_statements(&path, "utf-8").unwrap();
         let vs = expand_variants(&stmts[0], DEFAULT_MAX_INDEPENDENT_IFS);
         let true_v = vs.iter().find(|v| v.label.contains("=true")).unwrap();
         assert!(
@@ -1851,7 +1849,7 @@ mod tests {
   </select>
 </mapper>"#;
         let path = write_tmp("first_branch", xml);
-        let stmts = parse_dynamic_statements(&path).unwrap();
+        let stmts = parse_dynamic_statements(&path, "utf-8").unwrap();
         let fb = render_canonical(&stmts[0].root_nodes, RenderMode::FirstBranch);
         let fb = fb.split_whitespace().collect::<Vec<_>>().join(" ");
         assert!(fb.contains("X = 1"), "first branch should render: {}", fb);

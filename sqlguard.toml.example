@@ -103,6 +103,15 @@ formats = ["plain", "json", "html", "sarif"]
 #   为空时回退到 [structure].paths，仍为空则扫描整个 target_dir（兜底）。
 #   指定后只扫描这些目录下的 .sql/.ddl/.dml，散落在白名单外的 SQL 会被忽略。
 #
+# encoding：扫描文件的编码格式（SQL 脚本 + Mapper XML 统一使用），默认 utf-8。
+#   历史项目（如 Windows 老系统导出）的脚本可能是 GBK / GB18030 / UTF-16 等，
+#   可用 WHATWG 编码标签指定，如 encoding = "gbk"（等效 --encoding gbk）。
+#   文件带 BOM 时按 BOM 判定编码并剥离 BOM（BOM 优先于本配置）。
+#   配置非 UTF-8 编码时，FILE001「必须 UTF-8 无 BOM」策略检查自动跳过。
+#   支持的标签：utf-8 / gbk / gb2312 / gb18030 / big5 / shift_jis（sjis, cp932）
+#   / euc-jp / euc-kr / utf-16le / utf-16be / utf-32le / utf-32be
+#   / windows-1252（latin1, iso-8859-1）/ ascii 等。
+#
 # [scan]
 # paths = []
 # exclude_dirs = [
@@ -110,6 +119,7 @@ formats = ["plain", "json", "html", "sarif"]
 #   "target", "node_modules", "build", "dist", "out",  # 构建产物
 #   ".idea", ".vscode",                   # IDE 配置
 # ]
+# encoding = "utf-8"
 
 # ================================================================================
 # 文件格式检查 [file_check]
@@ -120,6 +130,8 @@ formats = ["plain", "json", "html", "sarif"]
 # 两条检查归入 file-format 分组，可用 --exclude-rules FILE001,FILE002
 # 或 --exclude-groups file-format 临时关闭。
 # 缺省（未写 [file_check] 段）时按下方默认值启用。
+# 注：当 [scan] encoding 配置为非 UTF-8（如 gbk）时，FILE001 自动跳过——
+#   文件预期就是该编码，不再执行「必须 UTF-8」策略检查。
 #
 # enabled              总开关，false 时完全跳过文件格式检查。
 # check_encoding       是否检查 UTF-8 无 BOM（FILE001）。

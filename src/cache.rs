@@ -13,6 +13,7 @@
 //!   （当前阶段 1 规则集固定全开，`dialect=gaussdb` 唯一确定重写行为；
 //!   未来引入配置开关时需把规则集 ID 纳入签名）
 //! - 方言回退链第二候选（`dialect_fallback`）
+//! - 扫描编码（`[scan] encoding` 或 CLI `--encoding`）
 //! - 规则筛选器（CLI `--rules/--groups/--exclude-*`）
 //! - 主配置文件 `(mtime, size)`
 //! - 规则配置文件 `(mtime, size)`（如有 `rules_file`）
@@ -202,6 +203,7 @@ pub fn compute_run_signature(
         "dialect_fb={}",
         dialect_fallback.map(|d| d.as_str()).unwrap_or("none")
     ));
+    parts.push(format!("enc={}", config.scan.encoding));
     parts.push(format!("ir={}", filter.include_rules.join(",")));
     parts.push(format!("ig={}", filter.include_groups.join(",")));
     parts.push(format!("er={}", filter.exclude_rules.join(",")));

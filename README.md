@@ -501,6 +501,16 @@ exclude_dirs = [
   "target", "node_modules", "build", "dist", "out",  # 构建产物
   ".idea", ".vscode",                                # IDE 配置
 ]
+
+# 扫描文件的编码格式（SQL 脚本 + Mapper XML 统一使用），默认 utf-8。
+# 历史项目（如 Windows 老系统导出）的脚本可能是 GBK / GB18030 / UTF-16 等，
+# 可用 WHATWG 编码标签指定，如 encoding = "gbk"（等效 --encoding gbk）。
+# 文件带 BOM 时按 BOM 判定编码并剥离 BOM（BOM 优先于本配置）。
+# 配置非 UTF-8 编码时，FILE001「必须 UTF-8 无 BOM」策略检查自动跳过。
+# 支持的标签：utf-8 / gbk / gb2312 / gb18030 / big5 / shift_jis（sjis, cp932）
+#   / euc-jp / euc-kr / utf-16le / utf-16be / utf-32le / utf-32be
+#   / windows-1252（latin1, iso-8859-1）/ ascii 等。
+encoding = "utf-8"
 ```
 
 `paths` 与 `exclude_dirs` 组合语义：
@@ -576,6 +586,9 @@ line_ending_severity = "warning"    # 换行符违规级别（提示）
 两条检查归入 `file-format` 分组，缺省（未写 `[file_check]` 段）时按默认值启用。
 可用 `--exclude-rules FILE001,FILE002` 或 `--exclude-groups file-format` 临时关闭。
 
+> 当 `[scan] encoding` 或 `--encoding` 配置为非 UTF-8（如 `gbk`）时，FILE001 自动跳过——
+> 文件预期就是该编码，不再执行「必须 UTF-8」策略检查，避免与显式编码配置矛盾。
+
 ### `[cache]` 文件级缓存（P2-8）
 
 对未修改的文件（mtime + size 不变）复用上次检查的 violations，跳过解析与规则执行，大仓库重复 `check` 时显著提速。默认关闭。
@@ -593,6 +606,7 @@ cache_file = ".sqlguard-cache.json"    # 缓存文件名（相对 target_dir）
 | 文件 mtime 或 size 变化 | 单文件 miss，重跑后更新 |
 | SqlGuard 版本 | 整体失效（签名含 `CARGO_PKG_VERSION`） |
 | `[dialect]` 或 CLI `--dialect` | 整体失效 |
+| `[scan] encoding` 或 CLI `--encoding` | 整体失效 |
 | CLI `--rules/--groups/--exclude-*` | 整体失效（filter 不同则结果不同） |
 | 主配置文件 `sqlguard.toml` mtime/size | 整体失效 |
 | 规则配置文件 `sqlguard.rules.toml` mtime/size | 整体失效 |

@@ -53,7 +53,7 @@ fn diag() {
     };
 
     for f in &files {
-        let extracted = match mapper::extract_sql_from_xml(f) {
+        let extracted = match mapper::extract_sql_from_xml(f, "utf-8") {
             Ok(v) => v,
             Err(e) => {
                 *cats.entry(format!("XML-ERROR: {}", e)).or_default() += 1;

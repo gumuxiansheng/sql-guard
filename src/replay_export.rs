@@ -17,7 +17,6 @@
 //! `docs/replay-export-incremental-design.md`。
 
 use std::collections::HashSet;
-use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -133,12 +132,14 @@ pub fn parse_type_filter(s: &Option<String>) -> HashSet<String> {
 /// 收集并构建重放清单（全量导出）。
 ///
 /// `trust_dynamic`：信任跳过 MyBatis `${}` 替换（对应 `Config.trust_dynamic_substitution`）。
+/// `encoding`：读取 SQL / Mapper XML 文件所用的编码标签（`[scan] encoding`）。
 pub fn build_manifest(
     target_dir: &Path,
     sql_files: &[PathBuf],
     mapper_files: &[PathBuf],
     type_filter: &HashSet<String>,
     trust_dynamic: bool,
+    encoding: &str,
     progress: &mut dyn FnMut(usize, usize, &Path),
 ) -> Result<Manifest, SqlGuardError> {
     let mut statements: Vec<ManifestStatement> = Vec::new();
@@ -148,9 +149,8 @@ pub fn build_manifest(
     // SQL 脚本模式：解析多语句，按行范围截取文本
     // id 使用 per-file 序号（每个文件从 1 开始），保证前面文件增删不会平移后续编号。
     for file_path in sql_files {
-        let content = fs::read_to_string(file_path).map_err(|e| {
-            SqlGuardError::CheckError(format!("Failed to read '{}': {}", file_path.display(), e))
-        })?;
+        let content = crate::encoding::read_to_string(file_path, encoding)
+            .map_err(SqlGuardError::CheckError)?;
         statements.extend(sql_file_statements(file_path, &content, target_dir, type_filter));
         done += 1;
         progress(done, total, file_path);
@@ -160,7 +160,13 @@ pub fn build_manifest(
     // 每条 <select>/<insert>/<update>/<delete> 经 dynamic 模块展开后，
     // 无动态分支 → 1 条（不加 #vN）；有动态分支 → N 条（加 #v<序号>）。
     for file_path in mapper_files {
-        statements.extend(mapper_file_statements(file_path, target_dir, type_filter, trust_dynamic));
+        statements.extend(mapper_file_statements(
+            file_path,
+            target_dir,
+            type_filter,
+            trust_dynamic,
+            encoding,
+        ));
         done += 1;
         progress(done, total, file_path);
     }
@@ -251,9 +257,10 @@ fn mapper_file_statements(
     target_dir: &Path,
     type_filter: &HashSet<String>,
     trust_dynamic: bool,
+    encoding: &str,
 ) -> Vec<ManifestStatement> {
     let mut statements: Vec<ManifestStatement> = Vec::new();
-    let dyn_stmts = match mapper::dynamic::parse_dynamic_statements(file_path) {
+    let dyn_stmts = match mapper::dynamic::parse_dynamic_statements(file_path, encoding) {
         Ok(v) => v,
         Err(e) => {
             eprintln!(
@@ -361,11 +368,13 @@ pub fn removed_manifest_to_json(removed: &RemovedManifest) -> Result<String, Sql
 ///   与旧侧 hunk（`old_hunks`）有交集即标为 removed；**但旧 id 仍存在于新清单的
 ///   语句不算删除**（那是修改，删除行的旧侧 hunk 会覆盖被替换行）。
 ///   removed 的 id 使用旧文件编号，与历史全量清单一致。
+/// - `encoding`：读取 SQL / Mapper XML 文件所用的编码标签（`[scan] encoding`）。
 ///
 /// 已知限制：脚本语句 id 为文件内顺序编号。若删除文件头部的语句导致后续语句
 /// 编号平移，id 可能与新清单中的其他语句碰撞，被删除的语句会被误判为「修改」。
 /// 与 `docs/replay-export-incremental-design.md` 中的方案 B（id 差集）限制一致；
 /// CI 可周期性跑一次全量导出校准归档。
+#[allow(clippy::too_many_arguments)]
 pub fn build_incremental_manifest(
     target_dir: &Path,
     sql_files: &[PathBuf],
@@ -374,6 +383,7 @@ pub fn build_incremental_manifest(
     base: &str,
     type_filter: &HashSet<String>,
     trust_dynamic: bool,
+    encoding: &str,
     progress: &mut dyn FnMut(usize, usize, &Path),
 ) -> Result<IncrementalManifest, SqlGuardError> {
     build_incremental_manifest_with_loader(
@@ -384,6 +394,7 @@ pub fn build_incremental_manifest(
         base,
         type_filter,
         trust_dynamic,
+        encoding,
         &|diff| git_diff::git_show(base, &diff.path),
         progress,
     )
@@ -393,9 +404,11 @@ pub fn build_incremental_manifest(
 /// （返回 `Ok(None)` 表示 base 中无此文件），便于单元测试不依赖真实 git。
 ///
 /// `trust_dynamic`：信任跳过 MyBatis `${}` 替换（对应 `Config.trust_dynamic_substitution`）。
+/// `encoding`：读取 SQL / Mapper XML 文件所用的编码标签（`[scan] encoding`）。
 ///
 /// `progress`：每处理完一个文件调用一次 `(已完成数, 总文件数, 当前文件)`，用于进度展示；
 /// 不需要进度时传入 `&mut |_, _, _| {}`。
+#[allow(clippy::too_many_arguments)]
 fn build_incremental_manifest_with_loader(
     target_dir: &Path,
     sql_files: &[PathBuf],
@@ -404,6 +417,7 @@ fn build_incremental_manifest_with_loader(
     base: &str,
     type_filter: &HashSet<String>,
     trust_dynamic: bool,
+    encoding: &str,
     old_loader: &dyn Fn(&FileDiff) -> Result<Option<String>, SqlGuardError>,
     progress: &mut dyn FnMut(usize, usize, &Path),
 ) -> Result<IncrementalManifest, SqlGuardError> {
@@ -422,9 +436,8 @@ fn build_incremental_manifest_with_loader(
                 continue; // 未改动文件不导出
             }
         };
-        let content = fs::read_to_string(file_path).map_err(|e| {
-            SqlGuardError::CheckError(format!("Failed to read '{}': {}", file_path.display(), e))
-        })?;
+        let content = crate::encoding::read_to_string(file_path, encoding)
+            .map_err(SqlGuardError::CheckError)?;
         let source = display_path(file_path, target_dir);
         let change = if diff.is_new { "added" } else { "modified" };
         for mut stmt in sql_file_statements(file_path, &content, target_dir, type_filter) {
@@ -460,7 +473,13 @@ fn build_incremental_manifest_with_loader(
         };
         let source = display_path(file_path, target_dir);
         let change = if diff.is_new { "added" } else { "modified" };
-        for mut stmt in mapper_file_statements(file_path, target_dir, type_filter, trust_dynamic) {
+        for mut stmt in mapper_file_statements(
+            file_path,
+            target_dir,
+            type_filter,
+            trust_dynamic,
+            encoding,
+        ) {
             // mapper 语句锚点为标签起始行；命中 hunk 即导出该标签全部变体
             if diff.is_new || intersects_hunks(stmt.line, stmt.end_line, &diff.hunks) {
                 stmt.change = Some(change.to_string());
@@ -879,6 +898,7 @@ mod tests {
             "origin/main",
             &HashSet::new(),
             true,
+            "utf-8",
             &mut |_, _, _| {},
         )
         .unwrap();
@@ -919,6 +939,7 @@ mod tests {
             "HEAD~1",
             &HashSet::new(),
             true,
+            "utf-8",
             &mut |_, _, _| {},
         )
         .unwrap();
@@ -958,6 +979,7 @@ mod tests {
             "origin/main",
             &HashSet::new(),
             true,
+            "utf-8",
             &mut |_, _, _| {},
         )
         .unwrap();
@@ -995,6 +1017,7 @@ mod tests {
             "origin/main",
             &filter,
             true,
+            "utf-8",
             &mut |_, _, _| {},
         )
         .unwrap();
@@ -1031,6 +1054,7 @@ mod tests {
             "origin/main",
             &HashSet::new(),
             true,
+            "utf-8",
             &mut |_, _, _| {},
         )
         .unwrap();
@@ -1053,6 +1077,7 @@ mod tests {
             "origin/main",
             &HashSet::new(),
             true,
+            "utf-8",
             &mut |_, _, _| {},
         )
         .unwrap();
@@ -1124,6 +1149,7 @@ mod tests {
             "HEAD~1",
             &HashSet::new(),
             true,
+            "utf-8",
             &old_loader,
             &mut |_, _, _| {},
         )
@@ -1142,7 +1168,7 @@ mod tests {
     #[test]
     fn build_manifest_empty() {
         let dir = tempfile::tempdir().unwrap();
-        let manifest = build_manifest(dir.path(), &[], &[], &HashSet::new(), true, &mut |_, _, _| {}).unwrap();
+        let manifest = build_manifest(dir.path(), &[], &[], &HashSet::new(), true, "utf-8", &mut |_, _, _| {}).unwrap();
         assert_eq!(manifest.statement_count, 0);
         assert!(manifest.statements.is_empty());
     }
@@ -1153,7 +1179,7 @@ mod tests {
         let sql_path = dir.path().join("test.sql");
         std::fs::write(&sql_path, "SELECT 1;\nSELECT 2;\n").unwrap();
 
-        let manifest = build_manifest(dir.path(), &[sql_path], &[], &HashSet::new(), true, &mut |_, _, _| {}).unwrap();
+        let manifest = build_manifest(dir.path(), &[sql_path], &[], &HashSet::new(), true, "utf-8", &mut |_, _, _| {}).unwrap();
         assert_eq!(manifest.statement_count, 2);
         assert_eq!(manifest.statements[0].stmt_type, "select");
         assert_eq!(manifest.statements[0].source_type, "sql");
@@ -1170,7 +1196,7 @@ mod tests {
         let mut filter = HashSet::new();
         filter.insert("insert".to_string());
 
-        let manifest = build_manifest(dir.path(), &[sql_path], &[], &filter, true, &mut |_, _, _| {}).unwrap();
+        let manifest = build_manifest(dir.path(), &[sql_path], &[], &filter, true, "utf-8", &mut |_, _, _| {}).unwrap();
         assert_eq!(manifest.statement_count, 1);
         assert_eq!(manifest.statements[0].stmt_type, "insert");
     }
@@ -1181,7 +1207,7 @@ mod tests {
         let sql_path = dir.path().join("test.sql");
         std::fs::write(&sql_path, "START TRANSACTION;\nSELECT 1;\nCOMMIT;\n").unwrap();
 
-        let manifest = build_manifest(dir.path(), &[sql_path], &[], &HashSet::new(), true, &mut |_, _, _| {}).unwrap();
+        let manifest = build_manifest(dir.path(), &[sql_path], &[], &HashSet::new(), true, "utf-8", &mut |_, _, _| {}).unwrap();
         // Only SELECT 1 should be exported; START TRANSACTION and COMMIT are skipped
         assert_eq!(manifest.statement_count, 1);
         assert_eq!(manifest.statements[0].stmt_type, "select");
@@ -1200,7 +1226,7 @@ mod tests {
         std::fs::write(&xml_path, xml).unwrap();
 
         // 信任开启：解析失败标记为「动态未校验」，而非普通解析错误（Java 重放侧据此跳过，行为不变）
-        let trusted = build_manifest(dir.path(), &[], &[xml_path.clone()], &HashSet::new(), true, &mut |_, _, _| {}).unwrap();
+        let trusted = build_manifest(dir.path(), &[], &[xml_path.clone()], &HashSet::new(), true, "utf-8", &mut |_, _, _| {}).unwrap();
         assert_eq!(trusted.statement_count, 1);
         let pe = trusted.statements[0]
             .parse_error
@@ -1213,7 +1239,7 @@ mod tests {
         );
 
         // 信任关闭：回退为普通解析错误文案
-        let untrusted = build_manifest(dir.path(), &[], &[xml_path], &HashSet::new(), false, &mut |_, _, _| {}).unwrap();
+        let untrusted = build_manifest(dir.path(), &[], &[xml_path], &HashSet::new(), false, "utf-8", &mut |_, _, _| {}).unwrap();
         let pe2 = untrusted.statements[0]
             .parse_error
             .as_deref()
@@ -1233,7 +1259,7 @@ mod tests {
         let xml_path = dir.path().join("Dyn.xml");
         std::fs::write(&xml_path, xml).unwrap();
 
-        let manifest = build_manifest(dir.path(), &[], &[xml_path], &HashSet::new(), false, &mut |_, _, _| {}).unwrap();
+        let manifest = build_manifest(dir.path(), &[], &[xml_path], &HashSet::new(), false, "utf-8", &mut |_, _, _| {}).unwrap();
         assert_eq!(manifest.statement_count, 1);
         let pe = manifest.statements[0]
             .parse_error

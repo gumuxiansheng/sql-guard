@@ -48,6 +48,7 @@ fn main_inner() -> Result<(), Box<dyn std::error::Error>> {
             dialect_fallback,
             cache,
             no_cache,
+            encoding,
         } => {
             let config_path = config
                 .clone()
@@ -67,6 +68,7 @@ fn main_inner() -> Result<(), Box<dyn std::error::Error>> {
                 dialect_fallback.as_deref(),
                 cache,
                 no_cache,
+                encoding.as_deref(),
             )?;
         }
         Commands::Init { path } => {
@@ -84,6 +86,7 @@ fn main_inner() -> Result<(), Box<dyn std::error::Error>> {
             exclude_groups,
             dialect,
             dialect_fallback,
+            encoding,
         } => {
             let config_path = config
                 .clone()
@@ -102,6 +105,7 @@ fn main_inner() -> Result<(), Box<dyn std::error::Error>> {
                 &exclude_groups,
                 dialect.as_deref(),
                 dialect_fallback.as_deref(),
+                encoding.as_deref(),
             )?;
         }
         Commands::ReplayExport {
@@ -110,6 +114,7 @@ fn main_inner() -> Result<(), Box<dyn std::error::Error>> {
             output_dir,
             types,
             base,
+            encoding,
         } => {
             let config_path = config
                 .clone()
@@ -122,6 +127,7 @@ fn main_inner() -> Result<(), Box<dyn std::error::Error>> {
                 &output_dir,
                 &types,
                 base.as_deref(),
+                encoding.as_deref(),
             )?;
         }
         Commands::GenRollback {
@@ -135,6 +141,7 @@ fn main_inner() -> Result<(), Box<dyn std::error::Error>> {
             fail_on_warning,
             allow_partial,
             review_report,
+            encoding,
         } => {
             let config_path = config
                 .clone()
@@ -152,6 +159,7 @@ fn main_inner() -> Result<(), Box<dyn std::error::Error>> {
                 fail_on_warning,
                 allow_partial,
                 review_report,
+                encoding.as_deref(),
             )?;
             std::process::exit(code);
         }
@@ -258,6 +266,7 @@ fn check_files(
             &classification_result.script_type,
             &config.file_check,
             filter,
+            &config.scan.encoding,
         ));
 
         // 查缓存：命中则跳过读文件 + 解析 + 规则执行
@@ -266,9 +275,8 @@ fn check_files(
             continue;
         }
 
-        let sql_content = fs::read_to_string(file_path).map_err(|e| {
-            SqlGuardError::CheckError(format!("Failed to read '{}': {}", file_path.display(), e))
-        })?;
+        let sql_content = sqlguard::encoding::read_to_string(file_path, &config.scan.encoding)
+            .map_err(SqlGuardError::CheckError)?;
         let violations = engine::run_rules_for_file(
             engine_instance,
             file_path,
@@ -297,6 +305,7 @@ fn check_files(
                 &mapper_script_type,
                 &config.file_check,
                 filter,
+                &config.scan.encoding,
             ));
 
             // 查缓存：命中则跳过 XML 解析 + 逐条规则执行
@@ -305,7 +314,7 @@ fn check_files(
                 continue;
             }
 
-            let extracted = match mapper::extract_sql_from_xml(file_path) {
+            let extracted = match mapper::extract_sql_from_xml(file_path, &config.scan.encoding) {
                 Ok(v) => v,
                 Err(e) => {
                     eprintln!(
@@ -411,6 +420,7 @@ fn run_check(
     dialect_fallback_override: Option<&str>,
     cache_flag: bool,
     no_cache_flag: bool,
+    encoding_override: Option<&str>,
 ) -> Result<(), SqlGuardError> {
     if cache_flag && no_cache_flag {
         return Err(SqlGuardError::CheckError(
@@ -418,6 +428,12 @@ fn run_check(
         ));
     }
     let (mut config, config_dir) = load_config(config_path, explicit_config)?;
+    if let Some(enc) = encoding_override {
+        sqlguard::encoding::validate(enc)
+            .map_err(SqlGuardError::ConfigError)?;
+        config.scan.encoding = enc.to_string();
+        eprintln!("Scan encoding override: {}", enc);
+    }
     if let Some(d) = dialect_override {
         config.dialect = sqlguard::config::CheckDialect::from_str(d);
         eprintln!("Dialect override: {} → {}", config.dialect.as_str(), d);
@@ -568,8 +584,14 @@ fn run_replay_export(
     output_dir: &Path,
     types: &Option<String>,
     base: Option<&str>,
+    encoding_override: Option<&str>,
 ) -> Result<(), SqlGuardError> {
-    let (config, _config_dir) = load_config(config_path, explicit_config)?;
+    let (mut config, _config_dir) = load_config(config_path, explicit_config)?;
+    if let Some(enc) = encoding_override {
+        sqlguard::encoding::validate(enc).map_err(SqlGuardError::ConfigError)?;
+        config.scan.encoding = enc.to_string();
+        eprintln!("Scan encoding override: {}", enc);
+    }
 
     let absolute_target = resolve_absolute_path(target_dir);
 
@@ -643,6 +665,7 @@ fn run_replay_export(
             base_ref,
             &type_filter,
             config.trust_dynamic_substitution,
+            &config.scan.encoding,
             &mut render_progress,
         )?;
         let removed_manifest = replay_export::RemovedManifest {
@@ -664,6 +687,7 @@ fn run_replay_export(
             &mapper_files,
             &type_filter,
             config.trust_dynamic_substitution,
+            &config.scan.encoding,
             &mut render_progress,
         )?;
         (manifest, None, sql_files.len(), mapper_files.len())
@@ -716,8 +740,14 @@ fn run_check_diff(
     exclude_groups: &Option<String>,
     dialect_override: Option<&str>,
     dialect_fallback_override: Option<&str>,
+    encoding_override: Option<&str>,
 ) -> Result<(), SqlGuardError> {
     let (mut config, config_dir) = load_config(config_path, explicit_config)?;
+    if let Some(enc) = encoding_override {
+        sqlguard::encoding::validate(enc).map_err(SqlGuardError::ConfigError)?;
+        config.scan.encoding = enc.to_string();
+        eprintln!("Scan encoding override: {}", enc);
+    }
     if let Some(d) = dialect_override {
         config.dialect = sqlguard::config::CheckDialect::from_str(d);
         eprintln!("Dialect override: {} → {}", config.dialect.as_str(), d);
@@ -807,6 +837,7 @@ fn run_check_diff(
                 &script_type,
                 &config.file_check,
                 &filter,
+                &config.scan.encoding,
             ));
         }
 
@@ -816,7 +847,7 @@ fn run_check_diff(
 
         if is_xml {
             // mapper 模式：提取所有片段，逐条跑 + 过滤
-            let extracted = match mapper::extract_sql_from_xml(file_path) {
+            let extracted = match mapper::extract_sql_from_xml(file_path, &config.scan.encoding) {
                 Ok(v) => v,
                 Err(e) => {
                     eprintln!(
@@ -852,13 +883,9 @@ fn run_check_diff(
             // 脚本模式
             let classification_result =
                 classification::classify_file(file_path, &config.classification)?;
-            let sql_content = fs::read_to_string(file_path).map_err(|e| {
-                SqlGuardError::CheckError(format!(
-                    "Failed to read '{}': {}",
-                    file_path.display(),
-                    e
-                ))
-            })?;
+            let sql_content =
+                sqlguard::encoding::read_to_string(file_path, &config.scan.encoding)
+                    .map_err(SqlGuardError::CheckError)?;
             let violations = engine::run_rules_for_file(
                 &engine_instance,
                 file_path,
@@ -949,8 +976,14 @@ fn run_gen_rollback(
     fail_on_warning: bool,
     allow_partial: bool,
     review_report: bool,
+    encoding_override: Option<&str>,
 ) -> Result<i32, SqlGuardError> {
     let (mut config, _config_dir) = load_config(config_path, explicit_config)?;
+    if let Some(enc) = encoding_override {
+        sqlguard::encoding::validate(enc).map_err(SqlGuardError::ConfigError)?;
+        config.scan.encoding = enc.to_string();
+        eprintln!("Scan encoding override: {}", enc);
+    }
 
     // 应用 CLI 覆盖到 rollback 配置
     let rc: &mut sqlguard::config::RollbackConfig = &mut config.rollback;
@@ -1027,9 +1060,8 @@ fn run_gen_rollback(
 
     // 脚本模式：解析每个 SQL 文件为 SqlAst，遍历 StmtInfo
     for file_path in &sql_files {
-        let content = fs::read_to_string(file_path).map_err(|e| {
-            SqlGuardError::CheckError(format!("Failed to read '{}': {}", file_path.display(), e))
-        })?;
+        let content = sqlguard::encoding::read_to_string(file_path, &config.scan.encoding)
+            .map_err(SqlGuardError::CheckError)?;
         let ast =
             engine::parser::parse_sql_to_ast_fb(&content, config.dialect, config.dialect_fallback);
 
@@ -1067,7 +1099,7 @@ fn run_gen_rollback(
     // Mapper 模式：解析 XML，对每个 SQL 片段生成
     if config.mapper.enabled {
         for file_path in &mapper_files {
-            let extracted = match mapper::extract_sql_from_xml(file_path) {
+            let extracted = match mapper::extract_sql_from_xml(file_path, &config.scan.encoding) {
                 Ok(v) => v,
                 Err(e) => {
                     eprintln!(
@@ -1732,6 +1764,15 @@ formats = ["plain", "json", "html", "sarif"]
 #   为空时回退到 [structure].paths，仍为空则扫描整个 target_dir（兜底）。
 #   指定后只扫描这些目录下的 .sql/.ddl/.dml，散落在白名单外的 SQL 会被忽略。
 #
+# encoding：扫描文件的编码格式（SQL 脚本 + Mapper XML 统一使用），默认 utf-8。
+#   历史项目（如 Windows 老系统导出）的脚本可能是 GBK / GB18030 / UTF-16 等，
+#   可用 WHATWG 编码标签指定，如 encoding = "gbk"（等效 --encoding gbk）。
+#   文件带 BOM 时按 BOM 判定编码并剥离 BOM（BOM 优先于本配置）。
+#   配置非 UTF-8 编码时，FILE001「必须 UTF-8 无 BOM」策略检查自动跳过。
+#   支持的标签：utf-8 / gbk / gb2312 / gb18030 / big5 / shift_jis（sjis, cp932）
+#   / euc-jp / euc-kr / utf-16le / utf-16be / utf-32le / utf-32be
+#   / windows-1252（latin1, iso-8859-1）/ ascii 等。
+#
 # [scan]
 # paths = []
 # exclude_dirs = [
@@ -1739,6 +1780,7 @@ formats = ["plain", "json", "html", "sarif"]
 #   "target", "node_modules", "build", "dist", "out",  # 构建产物
 #   ".idea", ".vscode",                   # IDE 配置
 # ]
+# encoding = "utf-8"
 
 # ================================================================================
 # 文件格式检查 [file_check]
@@ -1749,6 +1791,8 @@ formats = ["plain", "json", "html", "sarif"]
 # 两条检查归入 file-format 分组，可用 --exclude-rules FILE001,FILE002
 # 或 --exclude-groups file-format 临时关闭。
 # 缺省（未写 [file_check] 段）时按下方默认值启用。
+# 注：当 [scan] encoding 配置为非 UTF-8（如 gbk）时，FILE001 自动跳过——
+#   文件预期就是该编码，不再执行「必须 UTF-8」策略检查。
 
 [file_check]
 enabled = true

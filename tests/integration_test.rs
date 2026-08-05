@@ -138,6 +138,71 @@ fn test_check_finds_violations() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// 非 UTF-8 编码支持：--encoding gbk 应正常解析 GBK 编码脚本并发现违规；
+/// 缺省 utf-8 时解码失败，错误提示应包含编码修复 hint（指向 --encoding）。
+#[test]
+fn test_check_gbk_encoded_sql() {
+    let dir = "/tmp/sqlguard-test-gbk";
+    let _ = std::fs::remove_dir_all(dir);
+
+    Command::new(&binary_abs_path())
+        .args(["init", dir])
+        .output()
+        .expect("Failed to run sqlguard init");
+
+    // GBK 编码的 SQL 脚本：注释为 GBK 字节（"用户表"），并含 DROP TABLE 触发规则。
+    std::fs::create_dir_all(format!("{}/sql/ddl", dir)).unwrap();
+    let mut bytes: Vec<u8> = b"DROP TABLE users;\n-- ".to_vec();
+    bytes.extend_from_slice(&[0xD3, 0xC3, 0xBB, 0xA7, 0xB1, 0xED]); // 用户表 (GBK)
+    bytes.push(b'\n');
+    std::fs::write(format!("{}/sql/ddl/gbk_table.sql", dir), &bytes).unwrap();
+
+    let config_path = format!("{}/sqlguard.toml", dir);
+
+    // --encoding gbk：正常解析并发现 DROP TABLE 违规；FILE001 自动跳过（非 UTF-8 预期）
+    let output = Command::new(&binary_abs_path())
+        .args([
+            "check", dir, "-c", &config_path, "-f", "plain", "--encoding", "gbk",
+        ])
+        .output()
+        .expect("Failed to run sqlguard check");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stdout.contains("no_drop_table") || stderr.contains("no_drop_table"),
+        "gbk 编码文件应发现 DROP TABLE 违规\nstdout: {}\nstderr: {}",
+        stdout,
+        stderr
+    );
+    assert!(
+        !(stdout.contains("Failed to decode") || stderr.contains("Failed to decode")),
+        "gbk 编码文件不应解码失败\nstdout: {}\nstderr: {}",
+        stdout,
+        stderr
+    );
+
+    // 缺省 utf-8：解码失败，错误提示应包含修复 hint（--encoding / [scan] encoding）
+    let output = Command::new(&binary_abs_path())
+        .args(["check", dir, "-c", &config_path, "-f", "plain"])
+        .output()
+        .expect("Failed to run sqlguard check");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("Failed to decode"),
+        "gbk 文件按 utf-8 解码应失败\nstdout: {}\nstderr: {}",
+        stdout,
+        stderr
+    );
+    assert!(
+        stderr.contains("gbk"),
+        "错误提示应包含编码修复 hint\nstderr: {}",
+        stderr
+    );
+
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 /// 验证规则配置拆分到独立文件（显式 rules_file）时可被正确加载：
 /// 主配置不含 [[rules]]，仅通过 rules_file 指向 sqlguard.rules.toml。
 #[test]

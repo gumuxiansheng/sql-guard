@@ -101,13 +101,13 @@ fn render_extracted(stmt: &DynamicStatement) -> Option<ExtractedSql> {
 /// 从单个 Mapper XML 文件提取所有 SQL 语句（仅同文件内 include 解析）。
 ///
 /// 跨 namespace 引用需使用 [`extract_sql_from_xmls`] 批量提取，构建全局片段表。
-pub fn extract_sql_from_xml(xml_path: &Path) -> Result<Vec<ExtractedSql>, SqlGuardError> {
-    let content = std::fs::read_to_string(xml_path).map_err(|e| {
-        SqlGuardError::MapperError(format!(
-            "Failed to read mapper XML '{}': {}",
-            xml_path.display(),
-            e
-        ))
+/// `encoding` 是读取 XML 文件所用的编码标签（`[scan] encoding` / `--encoding`）。
+pub fn extract_sql_from_xml(
+    xml_path: &Path,
+    encoding: &str,
+) -> Result<Vec<ExtractedSql>, SqlGuardError> {
+    let content = crate::encoding::read_to_string(xml_path, encoding).map_err(|e| {
+        SqlGuardError::MapperError(format!("Failed to read mapper XML: {}", e))
     })?;
 
     let stmts = dynamic::parse_dynamic_statements_from_content(&content, None)?;
@@ -130,22 +130,21 @@ pub fn extract_sql_from_xml(xml_path: &Path) -> Result<Vec<ExtractedSql>, SqlGua
 ///
 /// ★ D2：当前 main.rs 仅用单文件版 `extract_sql_from_xml`，此批量版是跨 namespace
 /// include 解析的核心扩展能力，保留用于未来多文件批量处理场景。
+/// `encoding` 是读取 XML 文件所用的编码标签（`[scan] encoding` / `--encoding`）。
 #[allow(dead_code)]
 pub fn extract_sql_from_xmls(
     xml_paths: &[PathBuf],
+    encoding: &str,
 ) -> Result<Vec<(PathBuf, Vec<ExtractedSql>)>, SqlGuardError> {
     // 阶段 1：收集所有文件的 namespace + 本地片段，注册到全局表
     let mut global: HashMap<String, Vec<DynNode>> = HashMap::new();
     let mut per_file: Vec<(PathBuf, String)> = Vec::new();
 
     for path in xml_paths {
-        let content = std::fs::read_to_string(path).map_err(|e| {
-            SqlGuardError::MapperError(format!(
-                "Failed to read mapper XML '{}': {}",
-                path.display(),
-                e
-            ))
-        })?;
+        let content =
+            crate::encoding::read_to_string(path, encoding).map_err(|e| {
+                SqlGuardError::MapperError(format!("Failed to read mapper XML: {}", e))
+            })?;
 
         let namespace = extract_mapper_namespace(&content);
         let local_frags = dynamic::collect_fragments_from_content(&content)?;
@@ -293,7 +292,7 @@ mod tests {
 </mapper>"#;
         let dir = std::env::temp_dir().join("sqlguard_parser_test_1.xml");
         std::fs::write(&dir, xml).unwrap();
-        let result = extract_sql_from_xml(&dir).unwrap();
+        let result = extract_sql_from_xml(&dir, "utf-8").unwrap();
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].statement_id, "findById");
         assert_eq!(result[0].statement_type, "select");
@@ -312,7 +311,7 @@ mod tests {
 </mapper>"#;
         let path = std::env::temp_dir().join("sqlguard_parser_test_2.xml");
         std::fs::write(&path, xml).unwrap();
-        let result = extract_sql_from_xml(&path).unwrap();
+        let result = extract_sql_from_xml(&path, "utf-8").unwrap();
         assert_eq!(result.len(), 4);
         assert_eq!(result[0].statement_type, "select");
         assert_eq!(result[1].statement_type, "insert");
@@ -332,7 +331,7 @@ mod tests {
 </mapper>"#;
         let path = std::env::temp_dir().join("sqlguard_parser_test_3.xml");
         std::fs::write(&path, xml).unwrap();
-        let result = extract_sql_from_xml(&path).unwrap();
+        let result = extract_sql_from_xml(&path, "utf-8").unwrap();
         assert_eq!(result.len(), 1);
         // 动态标签应被剥离，文本保留；<where> 会插入 WHERE 并去除首个 AND
         assert!(result[0].processed_sql.contains("WHERE"));
@@ -352,7 +351,7 @@ mod tests {
 </mapper>"#;
         let path = std::env::temp_dir().join("sqlguard_parser_test_4.xml");
         std::fs::write(&path, xml).unwrap();
-        let result = extract_sql_from_xml(&path).unwrap();
+        let result = extract_sql_from_xml(&path, "utf-8").unwrap();
         assert_eq!(result.len(), 1);
         assert!(result[0].processed_sql.contains("id, name, email"));
         assert!(!result[0].processed_sql.contains("<include"));
@@ -370,7 +369,7 @@ mod tests {
 </mapper>"#;
         let path = std::env::temp_dir().join("sqlguard_parser_test_where1.xml");
         std::fs::write(&path, xml).unwrap();
-        let result = extract_sql_from_xml(&path).unwrap();
+        let result = extract_sql_from_xml(&path, "utf-8").unwrap();
         assert_eq!(result.len(), 1);
         let sql = result[0].processed_sql.trim();
         // Must contain WHERE keyword (inserted by the fix)
@@ -405,7 +404,7 @@ mod tests {
 </mapper>"#;
         let path = std::env::temp_dir().join("sqlguard_parser_test_where2.xml");
         std::fs::write(&path, xml).unwrap();
-        let result = extract_sql_from_xml(&path).unwrap();
+        let result = extract_sql_from_xml(&path, "utf-8").unwrap();
         assert_eq!(result.len(), 1);
         let sql = result[0].processed_sql.trim();
         assert!(
@@ -438,7 +437,7 @@ mod tests {
 </mapper>"#;
         let path = std::env::temp_dir().join("sqlguard_parser_test_where3.xml");
         std::fs::write(&path, xml).unwrap();
-        let result = extract_sql_from_xml(&path).unwrap();
+        let result = extract_sql_from_xml(&path, "utf-8").unwrap();
         assert_eq!(result.len(), 1);
         let sql = result[0].processed_sql.trim();
         assert!(
@@ -457,7 +456,7 @@ mod tests {
     fn one_line(xml: &str, name: &str) -> String {
         let path = std::env::temp_dir().join(format!("sqlguard_parser_{}.xml", name));
         std::fs::write(&path, xml).unwrap();
-        let result = extract_sql_from_xml(&path).unwrap();
+        let result = extract_sql_from_xml(&path, "utf-8").unwrap();
         assert_eq!(result.len(), 1, "expect exactly 1 statement");
         result[0]
             .processed_sql
@@ -609,7 +608,7 @@ mod tests {
 </mapper>"#;
         let path = std::env::temp_dir().join("sqlguard_parser_excl_nested.xml");
         std::fs::write(&path, xml).unwrap();
-        let result = extract_sql_from_xml(&path).unwrap();
+        let result = extract_sql_from_xml(&path, "utf-8").unwrap();
         let alt = result[0]
             .processed_sql_alt
             .as_ref()
@@ -629,7 +628,7 @@ mod tests {
 </mapper>"#;
         let path = std::env::temp_dir().join("sqlguard_parser_test_5.xml");
         std::fs::write(&path, xml).unwrap();
-        let result = extract_sql_from_xml(&path).unwrap();
+        let result = extract_sql_from_xml(&path, "utf-8").unwrap();
         assert_eq!(result.len(), 1);
         assert!(result[0].processed_sql.contains("_var_tableName"));
         assert!(result[0].processed_sql.contains("?"));
@@ -648,7 +647,7 @@ mod tests {
 </mapper>"#;
         let path = std::env::temp_dir().join("sqlguard_parser_test_6.xml");
         std::fs::write(&path, xml).unwrap();
-        let result = extract_sql_from_xml(&path).unwrap();
+        let result = extract_sql_from_xml(&path, "utf-8").unwrap();
         assert_eq!(result.len(), 2);
         let dynamic = result.iter().find(|s| s.statement_id == "dynamicTable").unwrap();
         let static_sql = result.iter().find(|s| s.statement_id == "staticSql").unwrap();

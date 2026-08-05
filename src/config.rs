@@ -288,12 +288,20 @@ fn default_mapper_patterns() -> Vec<String> {
 ///   仍为空则扫描整个 `target_dir`（兜底，保持向后兼容）。
 /// - `exclude_dirs`：递归扫描时跳过的目录名黑名单，适用于 SQL 扫描、
 ///   Mapper XML 扫描、目录结构校验三个场景。默认包含版本控制与构建产物目录。
+/// - `encoding`：扫描文件的编码格式（SQL 脚本 + Mapper XML 统一使用）。
+///   默认 `utf-8`（与历史行为一致）；GBK / GB18030 / UTF-16 / Big5 等
+///   历史项目编码可用 WHATWG 编码标签指定，如 `encoding = "gbk"`。
+///   文件带 BOM 时 BOM 优先于本配置。配置非 UTF-8 时 FILE001
+///   「必须 UTF-8 无 BOM」策略检查自动跳过（见 `checker::encoding`）。
 #[derive(Debug, Deserialize, Clone)]
 pub struct ScanConfig {
     #[serde(default)]
     pub paths: Vec<String>,
     #[serde(default = "default_exclude_dirs")]
     pub exclude_dirs: Vec<String>,
+    /// 扫描文件的编码格式，默认 `utf-8`。详见 [`crate::encoding`]。
+    #[serde(default = "default_scan_encoding")]
+    pub encoding: String,
 }
 
 impl Default for ScanConfig {
@@ -301,8 +309,14 @@ impl Default for ScanConfig {
         ScanConfig {
             paths: Vec::new(),
             exclude_dirs: default_exclude_dirs(),
+            encoding: default_scan_encoding(),
         }
     }
+}
+
+/// 默认扫描编码：UTF-8（向后兼容 `std::fs::read_to_string`）。
+fn default_scan_encoding() -> String {
+    crate::encoding::DEFAULT_ENCODING.to_string()
 }
 
 /// 默认跳过的目录名黑名单：版本控制元数据 + 常见构建产物 / IDE 配置。
@@ -454,7 +468,18 @@ impl Config {
         }
 
         config.validate_rule_ids()?;
+        config.validate_scan_encoding()?;
         Ok(config)
+    }
+
+    /// 校验 `[scan] encoding` 是否受支持；不合法时给出可用标签清单。
+    fn validate_scan_encoding(&self) -> Result<(), SqlGuardError> {
+        crate::encoding::validate(&self.scan.encoding).map_err(|e| {
+            SqlGuardError::ConfigError(format!(
+                "Invalid [scan] encoding '{}': {}",
+                self.scan.encoding, e
+            ))
+        })
     }
 
     /// 从独立的规则文件（仅含 `[[rules]]` 数组）加载规则列表。

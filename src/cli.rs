@@ -67,6 +67,15 @@ pub enum Commands {
         /// Mutually exclusive with --cache.
         #[clap(long)]
         no_cache: bool,
+
+        /// Override [scan] encoding for reading scanned files (default utf-8).
+        ///
+        /// Supported labels: utf-8, gbk, gb2312, gb18030, big5, shift_jis
+        /// (sjis, cp932), euc-jp, euc-kr, utf-16le, utf-16be, utf-32le,
+        /// utf-32be, windows-1252 (latin1, iso-8859-1), ascii, ...
+        /// Files with a BOM are decoded per the BOM regardless of this value.
+        #[clap(long)]
+        encoding: Option<String>,
     },
     /// Export a SQL manifest (sql-manifest.json) for dynamic replay.
     ///
@@ -99,6 +108,14 @@ pub enum Commands {
         /// Omit for a full export (current behavior).
         #[clap(long)]
         base: Option<String>,
+
+        /// Override [scan] encoding for reading scanned files (default utf-8).
+        ///
+        /// Supported labels: utf-8, gbk, gb2312, gb18030, big5, shift_jis
+        /// (sjis, cp932), euc-jp, euc-kr, utf-16le, utf-16be, utf-32le,
+        /// utf-32be, windows-1252 (latin1, iso-8859-1), ascii, ...
+        #[clap(long)]
+        encoding: Option<String>,
     },
     /// Initialize default configuration in the current directory
     Init {
@@ -157,6 +174,14 @@ pub enum Commands {
         /// Pass `generic` to disable fallback (chain collapses to "primary -> Generic").
         #[clap(long)]
         dialect_fallback: Option<String>,
+
+        /// Override [scan] encoding for reading scanned files (default utf-8).
+        ///
+        /// Supported labels: utf-8, gbk, gb2312, gb18030, big5, shift_jis
+        /// (sjis, cp932), euc-jp, euc-kr, utf-16le, utf-16be, utf-32le,
+        /// utf-32be, windows-1252 (latin1, iso-8859-1), ascii, ...
+        #[clap(long)]
+        encoding: Option<String>,
     },
     /// Generate backup/rollback scripts for DDL/DML files.
     ///
@@ -206,5 +231,13 @@ pub enum Commands {
         /// highlighting statements that require manual review (by risk level).
         #[clap(long)]
         review_report: bool,
+
+        /// Override [scan] encoding for reading scanned files (default utf-8).
+        ///
+        /// Supported labels: utf-8, gbk, gb2312, gb18030, big5, shift_jis
+        /// (sjis, cp932), euc-jp, euc-kr, utf-16le, utf-16be, utf-32le,
+        /// utf-32be, windows-1252 (latin1, iso-8859-1), ascii, ...
+        #[clap(long)]
+        encoding: Option<String>,
     },
 }

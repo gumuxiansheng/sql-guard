@@ -69,6 +69,15 @@ struct Cli {
     #[clap(long)]
     include_plain_xml: bool,
 
+    /// Encoding of the mapper XML files (default utf-8).
+    ///
+    /// Supported labels: utf-8, gbk, gb2312, gb18030, big5, shift_jis
+    /// (sjis, cp932), euc-jp, euc-kr, utf-16le, utf-16be, utf-32le,
+    /// utf-32be, windows-1252 (latin1, iso-8859-1), ascii, ...
+    /// Files with a BOM are decoded per the BOM regardless of this value.
+    #[clap(long, default_value = "utf-8")]
+    encoding: String,
+
     /// Output JSON path for the logical-FK catalog.
     #[clap(short = 'o', long, default_value = "relations.json")]
     output: String,
@@ -321,7 +330,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         // 单个 mapper 文件解析失败（畸形 / 非 UTF-8 XML 等）不应中断整轮扫描：
         // 跳过并告警，继续处理其余文件。
-        let results = match extract_sql_from_xmls(&[mf.clone()]) {
+        let results = match extract_sql_from_xmls(&[mf.clone()], &cli.encoding) {
             Ok(r) => r,
             Err(e) => {
                 eprintln!("Warning: skipping '{}' (parse failed): {}", mf.display(), e);

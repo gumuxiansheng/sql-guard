@@ -8,6 +8,7 @@ description = "A SQL script checking tool with customizable rules engine for CI/
 # 依赖版本锁定到 minor 版本，避免 major 版本漂移引入破坏性变更。
 # Cargo.lock 仍锁定具体 patch 版本，确保 CI 可复现。
 clap = { version = "3.2", features = ["derive"] }
+encoding_rs = "0.8"
 rhai = "1.25"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

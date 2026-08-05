@@ -7,6 +7,13 @@
 //!
 //! 产出标准 [`Violation`]，复用现有 reporter；两条检查归入 `file-format` 分组，
 //! 支持通过 `--exclude-rules FILE001` / `--exclude-groups file-format` 过滤。
+//!
+//! ## 与 `[scan] encoding` 的关系
+//! FILE001 是「必须 UTF-8 无 BOM」的**策略检查**，与读取文件使用的编码
+//! （[`crate::encoding`]）是两回事。当用户显式配置了非 UTF-8 编码
+//! （如 `[scan] encoding = "gbk"`）时，文件**预期**就是非 UTF-8，
+//! FILE001 自动跳过，避免「用户声明 GBK 却被 FILE001 全量报错」；
+//! 编码选错导致的解码失败会由读取流程报出明确错误（含修正提示）。
 
 use std::path::Path;
 
@@ -29,12 +36,15 @@ pub const RULE_GROUP: &str = "file-format";
 ///
 /// - `script_type` 仅用于报告展示（承袭该文件的分类结果）。
 /// - `filter` 用于按 CLI 的 id / 分组过滤；文件级检查也遵守同一套过滤规则。
+/// - `scan_encoding` 是扫描读取该文件所用的编码（`[scan] encoding`）；
+///   非 UTF-8 时 FILE001 跳过（文件预期非 UTF-8）。
 /// - 文件读取失败时返回空（后续读取文本流程会给出更明确的错误），不在此处报错。
 pub fn check_file(
     path: &Path,
     script_type: &str,
     config: &FileCheckConfig,
     filter: &RuleFilter,
+    scan_encoding: &str,
 ) -> Vec<Violation> {
     let mut violations = Vec::new();
     if !config.enabled {
@@ -47,7 +57,13 @@ pub fn check_file(
     };
 
     // ===== 1. 编码：UTF-8 无 BOM（必须）=====
-    if config.check_encoding && filter.matches_id_group(RULE_ID_ENCODING, Some(RULE_GROUP)) {
+    // 用户显式配置非 UTF-8 扫描编码时跳过——文件预期就是该编码，
+    // 再报「必须 UTF-8」属于自相矛盾的误报。
+    let utf8_policy_applies = crate::encoding::is_utf8(scan_encoding);
+    if utf8_policy_applies
+        && config.check_encoding
+        && filter.matches_id_group(RULE_ID_ENCODING, Some(RULE_GROUP))
+    {
         if let Some(message) = detect_encoding_issue(&bytes) {
             violations.push(Violation {
                 rule_id: RULE_ID_ENCODING.to_string(),

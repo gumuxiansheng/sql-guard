@@ -9,6 +9,7 @@ pub mod cache;
 pub mod checker;
 pub mod cli;
 pub mod config;
+pub mod encoding;
 pub mod error;
 pub mod git_diff;
 pub mod mapper;

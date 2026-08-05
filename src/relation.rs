@@ -283,7 +283,7 @@ mod tests {
         let path = std::env::temp_dir().join("sqlguard_relation_e2e.xml");
         std::fs::write(&path, xml).unwrap();
 
-        let results = extract_sql_from_xmls(&[path.clone()]).unwrap();
+        let results = extract_sql_from_xmls(std::slice::from_ref(&path), "utf-8").unwrap();
         let mut total_edges = 0usize;
         let mut saw_explicit = false;
         for (_p, sqls) in &results {
