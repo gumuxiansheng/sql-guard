@@ -232,6 +232,9 @@ fn default_formats() -> Vec<String> {
 pub struct MapperConfig {
     #[serde(default)]
     pub enabled: bool,
+    /// Mapper 扫描根目录。支持通配符：条目含 `*`/`?`/`[`/`{` 时视为 glob，
+    /// 相对扫描根（或绝对路径）匹配目录与 XML 文件（正斜杠分隔）。
+    /// 例如 `paths = ["src/**/mapper"]` 可命中任意层级的 mapper 目录。
     #[serde(default = "default_mapper_paths")]
     pub paths: Vec<String>,
     #[serde(default = "default_mapper_patterns")]

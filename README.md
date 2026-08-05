@@ -556,6 +556,24 @@ paths = ["src/main/resources/mapper"]
 patterns = ["**/*Mapper.xml", "**/*.xml"]
 ```
 
+`paths` 指定扫描根目录（相对配置文件目录或绝对路径），`patterns` 过滤目录内文件（glob）。
+`paths` 条目支持通配符：含 `*` / `?` / `[` / `{` 时按 glob 处理，相对扫描根匹配目录与 XML 文件，
+可命中任意层级的目录/文件：
+
+```toml
+[mapper]
+enabled = true
+# 命中所有模块下任意层级的 mapper 目录
+paths = ["src/**/mapper", "modules/**/resources/mapper"]
+# 或直接指定具体文件
+paths = ["**/legacy/legacy_report.xml"]
+```
+
+- glob 命中目录：按 `patterns` 递归收集其下 XML（与字面量目录语义一致）
+- glob 命中 XML 文件：直接收录，不再受 `patterns` 过滤
+- 同一文件被多个条目命中时自动去重；glob 遍历同样跳过 `exclude_dirs` 黑名单
+- 字面量路径（不含通配符）保持原语义：不存在则跳过
+
 缺省或 `enabled = false` 时仅扫描 SQL 脚本文件。
 
 ### `[output]` 输出配置

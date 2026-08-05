@@ -26,6 +26,12 @@ pub use parser::extract_sql_from_xml;
 ///
 /// `root` 用于解析相对路径；若 `mapper.enabled == false` 直接返回空。
 /// 递归时跳过 `exclude_dirs` 列出的目录名（任意层级，按名称匹配）。
+///
+/// `mapper.paths` 条目支持通配符（含 `*` / `?` / `[` / `{` 即视为 glob）：
+/// - 字面量条目：目录（相对 `root` 或绝对路径），递归收集其下 XML，保持历史语义。
+/// - glob 条目：相对 `root` 匹配（正斜杠分隔，与 `patterns` 一致），命中目录时
+///   递归收集其下 XML，命中 XML 文件时直接收录。例如 `paths = ["src/**/mapper"]`
+///   可匹配任意层级嵌套的 mapper 目录。同文件被多个条目命中时去重（保序）。
 pub fn collect_mapper_files(
     root: &Path,
     mapper: &MapperConfig,
@@ -53,17 +59,89 @@ pub fn collect_mapper_files(
 
     let mut files = Vec::new();
     for path in &mapper.paths {
-        let abs_path = if Path::new(path).is_absolute() {
-            PathBuf::from(path)
+        if has_glob_meta(path) {
+            collect_mapper_glob(root, path, &glob_set, &exclude_set, &mut files);
         } else {
-            root.join(path)
-        };
-        if !abs_path.exists() {
-            continue;
+            let abs_path = if Path::new(path).is_absolute() {
+                PathBuf::from(path)
+            } else {
+                root.join(path)
+            };
+            if !abs_path.exists() {
+                continue;
+            }
+            collect_xml_files(&abs_path, &abs_path, &glob_set, &exclude_set, &mut files);
         }
-        collect_xml_files(&abs_path, &abs_path, &glob_set, &exclude_set, &mut files);
     }
+
+    // 多个 paths 条目（字面量与 glob 混用）可能命中同一文件，去重保序
+    let mut seen = HashSet::new();
+    files.retain(|f| seen.insert(f.clone()));
     files
+}
+
+/// 判断路径条目是否含 glob 元字符（含即按通配符处理）。
+fn has_glob_meta(s: &str) -> bool {
+    s.contains('*') || s.contains('?') || s.contains('[') || s.contains('{')
+}
+
+/// 按 glob 条目收集：递归遍历 `root`（跳过 `exclude_dirs`），
+/// 目录相对路径命中则递归收集其下 XML（复用 `collect_xml_files`），
+/// 文件相对路径命中且为 XML 则直接收录。
+fn collect_mapper_glob(
+    root: &Path,
+    pattern: &str,
+    glob_set: &globset::GlobSet,
+    exclude_set: &HashSet<&str>,
+    files: &mut Vec<PathBuf>,
+) {
+    let matcher = match Glob::new(pattern) {
+        Ok(g) => g.compile_matcher(),
+        Err(e) => {
+            eprintln!("Warning: invalid mapper path glob '{}': {}", pattern, e);
+            return;
+        }
+    };
+    walk_mapper_glob(root, root, &matcher, glob_set, exclude_set, files);
+}
+
+fn walk_mapper_glob(
+    root: &Path,
+    current: &Path,
+    matcher: &globset::GlobMatcher,
+    glob_set: &globset::GlobSet,
+    exclude_set: &HashSet<&str>,
+    files: &mut Vec<PathBuf>,
+) {
+    if let Ok(entries) = std::fs::read_dir(current) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let rel = path
+                .strip_prefix(root)
+                .unwrap_or(&path)
+                .to_string_lossy()
+                .replace('\\', "/");
+            if path.is_dir() {
+                // 跳过黑名单目录（按目录名匹配，任意层级）
+                if let Some(file_name) = path.file_name().and_then(|n| n.to_str()) {
+                    if exclude_set.contains(file_name) {
+                        continue;
+                    }
+                }
+                if matcher.is_match(&rel) {
+                    // 目录命中：按 patterns 收集其下 XML（以命中目录为根递归，与字面量一致）
+                    collect_xml_files(&path, &path, glob_set, exclude_set, files);
+                }
+                walk_mapper_glob(root, &path, matcher, glob_set, exclude_set, files);
+            } else if path.is_file() {
+                if let Some(ext) = path.extension() {
+                    if ext == "xml" && matcher.is_match(&rel) {
+                        files.push(path);
+                    }
+                }
+            }
+        }
+    }
 }
 
 fn build_glob_set(patterns: &[&str]) -> Result<globset::GlobSet, globset::Error> {
@@ -164,6 +242,151 @@ mod tests {
         let mut files = collect_mapper_files(&base, &cfg, &[]);
         files.sort();
         assert_eq!(files.len(), 4, "expected 4 xml files, got {:?}", files);
+
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /// `paths` 支持 glob：`**/mapper` 命中任意层级的 mapper 目录并递归收集其下 XML。
+    #[test]
+    fn collects_glob_mapper_dir() {
+        let base = std::env::temp_dir().join("sqlguard_mapper_glob_dir_test");
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(base.join("src/main/resources/mapper/order")).unwrap();
+        fs::create_dir_all(base.join("src/module/dao/resources/mapper")).unwrap();
+        fs::create_dir_all(base.join("src/other/plain")).unwrap();
+        fs::write(base.join("src/main/resources/mapper/UserMapper.xml"), "<xml/>").unwrap();
+        fs::write(
+            base.join("src/main/resources/mapper/order/OrderMapper.xml"),
+            "<xml/>",
+        )
+        .unwrap();
+        fs::write(
+            base.join("src/module/dao/resources/mapper/ProductMapper.xml"),
+            "<xml/>",
+        )
+        .unwrap();
+        // 非 mapper 目录下的 XML 不应被 glob 命中
+        fs::write(base.join("src/other/plain/plain.xml"), "<xml/>").unwrap();
+
+        let cfg = MapperConfig {
+            enabled: true,
+            paths: vec!["**/mapper".to_string()],
+            ..Default::default()
+        };
+
+        let mut files = collect_mapper_files(&base, &cfg, &[]);
+        files.sort();
+        assert_eq!(
+            files.len(),
+            3,
+            "expected 3 xml files under **/mapper dirs, got {:?}",
+            files
+        );
+        assert!(files
+            .iter()
+            .all(|f| f.file_name().unwrap().to_string_lossy().ends_with("Mapper.xml")));
+
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /// `paths` glob 可命中具体 XML 文件（如 `**/resources/**/*Mapper.xml`），
+    /// 与目录命中并行生效。
+    #[test]
+    fn collects_glob_mapper_file() {
+        let base = std::env::temp_dir().join("sqlguard_mapper_glob_file_test");
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(base.join("src/main/resources/mapper")).unwrap();
+        fs::create_dir_all(base.join("src/other")).unwrap();
+        fs::write(base.join("src/main/resources/mapper/UserMapper.xml"), "<xml/>").unwrap();
+        fs::write(base.join("src/other/legacy_report.xml"), "<xml/>").unwrap();
+        fs::write(base.join("src/other/note.txt"), "x").unwrap();
+
+        // patterns 保留默认值，验证文件级命中不受 patterns 过滤（显式指定即收录）
+        let cfg = MapperConfig {
+            enabled: true,
+            paths: vec!["**/other/legacy_report.xml".to_string()],
+            patterns: vec!["**/*Mapper.xml".to_string()],
+            ..Default::default()
+        };
+
+        let mut files = collect_mapper_files(&base, &cfg, &[]);
+        files.sort();
+        assert_eq!(files.len(), 1, "expected legacy_report.xml, got {:?}", files);
+        assert_eq!(
+            files[0].file_name().unwrap().to_string_lossy(),
+            "legacy_report.xml"
+        );
+
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /// 字面量目录与 glob 混用 + 命中重叠时去重保序。
+    #[test]
+    fn glob_and_literal_mixed_dedupe() {
+        let base = std::env::temp_dir().join("sqlguard_mapper_glob_mixed_test");
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(base.join("src/main/resources/mapper")).unwrap();
+        fs::write(base.join("src/main/resources/mapper/UserMapper.xml"), "<xml/>").unwrap();
+
+        // 字面量目录与 glob 同时命中同一文件，最终只收录一次
+        let cfg = MapperConfig {
+            enabled: true,
+            paths: vec![
+                "src/main/resources/mapper".to_string(),
+                "**/resources/mapper".to_string(),
+                "**/main/**/UserMapper.xml".to_string(),
+            ],
+            ..Default::default()
+        };
+
+        let mut files = collect_mapper_files(&base, &cfg, &[]);
+        files.sort();
+        assert_eq!(files.len(), 1, "expected dedupe to 1 file, got {:?}", files);
+
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /// glob 遍历同样跳过 exclude_dirs 黑名单目录。
+    #[test]
+    fn glob_respects_exclude_dirs() {
+        let base = std::env::temp_dir().join("sqlguard_mapper_glob_exclude_test");
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(base.join("src/mapper")).unwrap();
+        fs::create_dir_all(base.join("target/generated/mapper")).unwrap();
+        fs::write(base.join("src/mapper/UserMapper.xml"), "<xml/>").unwrap();
+        fs::write(base.join("target/generated/mapper/GenMapper.xml"), "<xml/>").unwrap();
+
+        let cfg = MapperConfig {
+            enabled: true,
+            paths: vec!["**/mapper".to_string()],
+            ..Default::default()
+        };
+
+        let mut files = collect_mapper_files(&base, &cfg, &["target".to_string()]);
+        files.sort();
+        assert_eq!(files.len(), 1, "expected only src/mapper file, got {:?}", files);
+        assert!(files[0].to_string_lossy().contains("src"));
+
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /// 非法 glob 只打警告并跳过，不影响其他条目。
+    #[test]
+    fn invalid_glob_is_skipped_with_warning() {
+        let base = std::env::temp_dir().join("sqlguard_mapper_glob_invalid_test");
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(base.join("src/mapper")).unwrap();
+        fs::write(base.join("src/mapper/UserMapper.xml"), "<xml/>").unwrap();
+
+        let cfg = MapperConfig {
+            enabled: true,
+            paths: vec!["src/mapper".to_string(), "**/[".to_string()],
+            ..Default::default()
+        };
+
+        let mut files = collect_mapper_files(&base, &cfg, &[]);
+        files.sort();
+        assert_eq!(files.len(), 1, "expected valid entry only, got {:?}", files);
 
         let _ = fs::remove_dir_all(&base);
     }

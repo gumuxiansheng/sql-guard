@@ -76,6 +76,14 @@ formats = ["plain", "json", "html", "sarif"]
 
 # MyBatis Mapper 模式：扫描 XML 中的 <select>/<insert>/<update>/<delete>。
 # 缺省或 enabled = false 时完全保持现有行为（仅扫描 .sql/.ddl/.dml）。
+# paths：扫描根目录，支持通配符（含 * / ? / [ / { 即视为 glob，相对扫描根匹配
+#   目录与 XML 文件，正斜杠分隔）：
+#     paths = ["src/main/resources/mapper"]        # 字面量目录（原语义）
+#     paths = ["src/**/mapper"]                    # 任意层级的 mapper 目录
+#     paths = ["**/legacy/legacy_report.xml"]      # 直接指定文件
+#   glob 命中目录：按 patterns 递归收集其下 XML；命中文件：直接收录（不受 patterns 过滤）。
+#   多个条目命中同一文件自动去重；glob 遍历同样跳过 [scan] exclude_dirs 黑名单。
+# patterns：目录内文件过滤 glob，默认 ["**/*Mapper.xml"]。
 # [mapper]
 # enabled = true
 # paths = ["src/main/resources/mapper"]
