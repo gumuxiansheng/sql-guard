@@ -2,11 +2,14 @@
 # 触发：推送 v* 格式的 tag（如 v0.1.0、v0.2.0-rc1）时，
 #       交叉编译多平台二进制并上传到该 tag 对应的 Release 附件。
 #
-# 设计要点：
+# 设计要点（参考可工作的项目 cnb.yml）：
+#   - 镜像必须在 **pipeline 级别** 用 `docker: image:` 声明，所有 stage 默认在此镜像中执行。
+#     （之前放在 stage 级别被 CNB 忽略，导致脚本跑在默认环境里、找不到 rustc。）
 #   - CNB 执行机为 Linux x86_64，所有目标均在本机交叉编译（无 macOS/Windows 执行机）。
 #   - x86_64/aarch64-unknown-linux-musl 与 x86_64-pc-windows-gnu：
 #       复用项目 .cargo/config.toml 中 rust-lld + link-self-contained 的跨平台链接配置。
 #   - x86_64/aarch64-apple-darwin：用 cargo-zigbuild（Zig 自带 macOS 链接器/SDK）从 Linux 交叉编译。
+#       该步骤为 best-effort：若因网络等原因失败，会跳过 macOS 目标，但不影响 Linux/Windows 产物上传。
 #   - 构建逻辑封装在 scripts/build-release.sh，便于本地复现与调试。
 #   - 二进制先经内置任务 git:release 创建 Release，再由 cnbcool/attachments 上传为附件。
 #
@@ -16,22 +19,22 @@
   tag_push:
     - runner:
         cpus: 4
+      # ⚠️ 关键：镜像在 pipeline 级别声明，所有 stage 默认运行在 rust:1.80 里
+      docker:
+        image: rust:1.80
       stages:
         # 1) 为当前 tag 创建 Release（tag_push 下自动使用 $CNB_BRANCH 作为 tag）
         - name: 创建 Release
           type: git:release
           options:
-            title: "SqlGuard ${CNB_BRANCH}"
-            description: "SqlGuard ${CNB_BRANCH} 多平台二进制"
+            overlying: true
+            title: ${CNB_BRANCH}
+            description: "SqlGuard ${CNB_BRANCH} - 多平台二进制自动构建发布"
 
         # 2) 交叉编译全部目标到 dist/
-        #    ⚠️ 关键：stage 级别指定镜像用顶层 `image:`（即 Stage.image），
-        #       不能用 `docker: image:`（那是 pipeline 级别配置，会被忽略）。
         - name: 构建多平台二进制
-          image: rust:1.80
           script:
             - bash scripts/build-release.sh
-          timeout: 2h
 
         # 3) 将 dist/ 下全部二进制上传为 Release 附件
         - name: 上传 Release 附件

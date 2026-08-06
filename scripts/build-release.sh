@@ -31,15 +31,21 @@ rustc --version
 cargo --version
 
 # 安装 Zig（用于 macOS 目标交叉编译；Zig 自带 macOS SDK/链接器，纯 Rust crate 无需外部 SDK）
-echo "==> Installing Zig ${ZIG_VERSION}"
+# 以下两步为 best-effort：若网络受限导致安装失败，仅跳过 macOS 目标，不影响 Linux/Windows 产物。
+echo "==> Installing Zig ${ZIG_VERSION} (best-effort for macOS targets)"
 ZIG_TARBALL="zig-linux-x86_64-${ZIG_VERSION}.tar.xz"
-curl -fsSL "https://ziglang.org/download/${ZIG_VERSION}/${ZIG_TARBALL}" -o "/tmp/${ZIG_TARBALL}"
-tar -xf "/tmp/${ZIG_TARBALL}" -C /usr/local
-ln -sf "/usr/local/zig-linux-x86_64-${ZIG_VERSION}/zig" /usr/local/bin/zig
-zig version
+if curl -fsSL "https://ziglang.org/download/${ZIG_VERSION}/${ZIG_TARBALL}" -o "/tmp/${ZIG_TARBALL}" \
+   && tar -xf "/tmp/${ZIG_TARBALL}" -C /usr/local \
+   && ln -sf "/usr/local/zig-linux-x86_64-${ZIG_VERSION}/zig" /usr/local/bin/zig; then
+  zig version
+else
+  echo "warn: Zig 安装失败，macOS 目标将被跳过"
+fi
 
-echo "==> Installing cargo-zigbuild ${ZIGBUILD_VERSION}"
-cargo install "cargo-zigbuild" --version "${ZIGBUILD_VERSION}" --locked
+echo "==> Installing cargo-zigbuild ${ZIGBUILD_VERSION} (best-effort for macOS targets)"
+if ! cargo install "cargo-zigbuild" --version "${ZIGBUILD_VERSION}" --locked 2>/dev/null; then
+  echo "warn: cargo-zigbuild 安装失败，macOS 目标将被跳过"
+fi
 
 # binutils 的 strip 可处理 ELF / Mach-O / PE，统一剥离调试符号
 echo "==> Ensuring binutils (strip) + xz-utils"
@@ -58,9 +64,11 @@ for T in "${TARGETS[@]}"; do
   echo "==> Building target: ${T}"
   case "${T}" in
     *apple-darwin)
-      # macOS 目标必须用 zigbuild（提供 SDK + 链接器）
+      # macOS 目标必须用 zigbuild（提供 SDK + 链接器）。best-effort：失败则跳过该目标。
+      echo "    (best-effort) macOS target via zigbuild"
       MACOSX_DEPLOYMENT_TARGET=10.12 \
-        cargo zigbuild --release --target "${T}" --locked
+        cargo zigbuild --release --target "${T}" --locked \
+        || { echo "    warn: macOS target ${T} 构建失败，跳过（best-effort）"; continue; }
       ;;
     *)
       # musl / windows-gnu 走项目自带 rust-lld + link-self-contained 配置
