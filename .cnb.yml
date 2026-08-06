@@ -1,0 +1,41 @@
+# SqlGuard CNB 流水线配置
+# 触发：推送 v* 格式的 tag（如 v0.1.0、v0.2.0-rc1）时，
+#       交叉编译多平台二进制并上传到该 tag 对应的 Release 附件。
+#
+# 设计要点：
+#   - CNB 执行机为 Linux x86_64，所有目标均在本机交叉编译（无 macOS/Windows 执行机）。
+#   - x86_64/aarch64-unknown-linux-musl 与 x86_64-pc-windows-gnu：
+#       复用项目 .cargo/config.toml 中 rust-lld + link-self-contained 的跨平台链接配置。
+#   - x86_64/aarch64-apple-darwin：用 cargo-zigbuild（Zig 自带 macOS 链接器/SDK）从 Linux 交叉编译。
+#   - 构建逻辑封装在 scripts/build-release.sh，便于本地复现与调试。
+#   - 二进制先经内置任务 git:release 创建 Release，再由 cnbcool/attachments 上传为附件。
+#
+# 注：若需对所有 tag（不限 v 前缀）生效，将下面的 "v*" 改为 "$" 即可。
+
+"v*":
+  tag_push:
+    - runner:
+        cpus: 4
+      stages:
+        # 1) 为当前 tag 创建 Release（tag_push 下自动使用 $CNB_BRANCH 作为 tag）
+        - name: 创建 Release
+          type: git:release
+          options:
+            title: "SqlGuard ${CNB_BRANCH}"
+            description: "SqlGuard ${CNB_BRANCH} 多平台二进制"
+
+        # 2) 交叉编译全部目标到 dist/
+        - name: 构建多平台二进制
+          docker:
+            image: rust:1.80
+          script:
+            - bash scripts/build-release.sh
+          timeout: 1h
+
+        # 3) 将 dist/ 下全部二进制上传为 Release 附件
+        - name: 上传 Release 附件
+          image: cnbcool/attachments:latest
+          settings:
+            tag: ${CNB_BRANCH}
+            attachments:
+              - "./dist/*"
