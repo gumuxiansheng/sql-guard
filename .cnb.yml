@@ -32,7 +32,10 @@
             description: "SqlGuard ${CNB_BRANCH} - 多平台二进制自动构建发布"
 
         # 2) 交叉编译全部目标到 dist/
+        #    单独给本 stage 设置更长超时（下载依赖 + 5 个目标交叉编译）；
+        #    同时平台 watchdog 默认 10 分钟无输出即 kill，脚本已改为快速镜像下载避免卡死。
         - name: 构建多平台二进制
+          timeout: 60m
           script:
             - bash scripts/build-release.sh
 
