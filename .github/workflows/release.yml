@@ -59,6 +59,17 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y musl-tools
 
+      # aarch64-musl 交叉编译需要 aarch64 版 musl C 交叉编译器（psm 等 C 依赖需要）；
+      # 宿主的 musl-tools 只提供 x86_64 的 musl-gcc，故从这里拉取预构建的 aarch64 交叉工具链。
+      # 仅设置 CC（C 编译用），链接仍走 .cargo/config.toml 的 rust-lld + link-self-contained（与 CNB 一致）。
+      - name: Install aarch64-linux-musl cross toolchain (Linux only)
+        if: matrix.target == 'aarch64-unknown-linux-musl'
+        run: |
+          curl -fsSL https://musl.cc/aarch64-linux-musl-cross.tgz -o /tmp/aarch64-musl.tgz
+          tar -xf /tmp/aarch64-musl.tgz -C /opt
+          echo "/opt/aarch64-linux-musl-cross/bin" >> "$GITHUB_PATH"
+          echo "CC_aarch64_unknown_linux_musl=aarch64-linux-musl-gcc" >> "$GITHUB_ENV"
+
       - name: Build release binary
         run: cargo build --release --target ${{ matrix.target }} --locked
 
