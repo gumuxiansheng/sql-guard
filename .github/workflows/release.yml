@@ -8,6 +8,8 @@
 #   - sqlguard-aarch64-apple-darwin             (Apple Silicon macOS)
 #   - sqlguard-x86_64-pc-windows-gnu.exe        (Windows)
 #
+# 制品保留：构建产物先以 GitHub Actions Artifact 形式随运行保留（默认 90 天），
+#           随后由下方 release 作业作为「永久 Release 资产」发布，可长期下载。
 # 体积优化见 Cargo.toml [profile.release]（lto=fat / codegen-units=1 / strip / panic=abort）。
 name: release
 
@@ -73,8 +75,12 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.artifact }}
+          # 制品名带版本号，便于在不同 tag 的构建运行中区分/追溯；
+          # 该 Artifact 随工作流运行保留（retention-days 为 Free 版上限 90 天），
+          # 同时下方 release 作业会将其作为永久 Release 资产发布。
+          name: ${{ matrix.artifact }}-${{ github.ref_name }}
           path: dist/${{ matrix.artifact }}
+          retention-days: 90
 
   release:
     name: Publish GitHub Release
