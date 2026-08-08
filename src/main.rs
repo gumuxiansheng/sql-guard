@@ -406,6 +406,7 @@ fn pick_parseable_candidate(sql: &mapper::parser::ExtractedSql, config: &Config)
 
 // ===== run_check =====
 
+#[allow(clippy::too_many_arguments)]
 fn run_check(
     target_dir: &Path,
     config_path: &Path,
@@ -429,18 +430,17 @@ fn run_check(
     }
     let (mut config, config_dir) = load_config(config_path, explicit_config)?;
     if let Some(enc) = encoding_override {
-        sqlguard::encoding::validate(enc)
-            .map_err(SqlGuardError::ConfigError)?;
+        sqlguard::encoding::validate(enc).map_err(SqlGuardError::ConfigError)?;
         config.scan.encoding = enc.to_string();
         eprintln!("Scan encoding override: {}", enc);
     }
     if let Some(d) = dialect_override {
-        config.dialect = sqlguard::config::CheckDialect::from_str(d);
+        config.dialect = sqlguard::config::CheckDialect::parse_dialect(d);
         eprintln!("Dialect override: {} → {}", config.dialect.as_str(), d);
     }
     // 解析方言回退链：CLI --dialect-fallback > 配置 dialect_fallback > 主方言默认回退。
     let fallback = if let Some(fb) = dialect_fallback_override {
-        Some(sqlguard::config::CheckDialect::from_str(fb))
+        Some(sqlguard::config::CheckDialect::parse_dialect(fb))
     } else if let Some(cfg_fb) = config.dialect_fallback {
         Some(cfg_fb)
     } else {
@@ -559,9 +559,8 @@ fn progress_line(done: usize, total: usize, name: &str) -> Option<String> {
     let pct = done * 100 / total;
     let width = 20usize;
     let filled = done * width / total;
-    let bar: String = std::iter::repeat('=')
-        .take(filled)
-        .chain(std::iter::repeat('-').take(width - filled))
+    let bar: String = std::iter::repeat_n('=', filled)
+        .chain(std::iter::repeat_n('-', width - filled))
         .collect();
     let name: String = if name.chars().count() > 24 {
         let tail: String = name.chars().rev().take(24).collect();
@@ -679,7 +678,12 @@ fn run_replay_export(
             removed_count: inc.removed.len(),
             removed: inc.removed,
         };
-        (inc.manifest, Some(removed_manifest), sql_files.len(), mapper_files.len())
+        (
+            inc.manifest,
+            Some(removed_manifest),
+            sql_files.len(),
+            mapper_files.len(),
+        )
     } else {
         let manifest = replay_export::build_manifest(
             &absolute_target,
@@ -727,6 +731,7 @@ fn run_replay_export(
 
 // ===== run_check_diff =====
 
+#[allow(clippy::too_many_arguments)]
 fn run_check_diff(
     base: &str,
     target_dir: &Path,
@@ -749,12 +754,12 @@ fn run_check_diff(
         eprintln!("Scan encoding override: {}", enc);
     }
     if let Some(d) = dialect_override {
-        config.dialect = sqlguard::config::CheckDialect::from_str(d);
+        config.dialect = sqlguard::config::CheckDialect::parse_dialect(d);
         eprintln!("Dialect override: {} → {}", config.dialect.as_str(), d);
     }
     // 解析方言回退链：CLI --dialect-fallback > 配置 dialect_fallback > 主方言默认回退。
     let fallback = if let Some(fb) = dialect_fallback_override {
-        Some(sqlguard::config::CheckDialect::from_str(fb))
+        Some(sqlguard::config::CheckDialect::parse_dialect(fb))
     } else if let Some(cfg_fb) = config.dialect_fallback {
         Some(cfg_fb)
     } else {
@@ -843,7 +848,7 @@ fn run_check_diff(
 
         let is_xml = file_path
             .extension()
-            .map_or(false, |e| e.eq_ignore_ascii_case("xml"));
+            .is_some_and(|e| e.eq_ignore_ascii_case("xml"));
 
         if is_xml {
             // mapper 模式：提取所有片段，逐条跑 + 过滤
@@ -883,9 +888,8 @@ fn run_check_diff(
             // 脚本模式
             let classification_result =
                 classification::classify_file(file_path, &config.classification)?;
-            let sql_content =
-                sqlguard::encoding::read_to_string(file_path, &config.scan.encoding)
-                    .map_err(SqlGuardError::CheckError)?;
+            let sql_content = sqlguard::encoding::read_to_string(file_path, &config.scan.encoding)
+                .map_err(SqlGuardError::CheckError)?;
             let violations = engine::run_rules_for_file(
                 &engine_instance,
                 file_path,

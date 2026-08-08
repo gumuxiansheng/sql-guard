@@ -10,11 +10,13 @@
 use std::collections::HashMap;
 
 use sqlparser::ast::{BinaryOperator, Expr};
-use sqlparser::dialect::{AnsiDialect, Dialect, GenericDialect, MySqlDialect, OracleDialect, PostgreSqlDialect};
+use sqlparser::dialect::{
+    AnsiDialect, Dialect, GenericDialect, MySqlDialect, OracleDialect, PostgreSqlDialect,
+};
 use sqlparser::parser::Parser;
 
-use crate::rule::engine::ast::{SelectInfo, SqlAst};
 use crate::config::CheckDialect;
+use crate::rule::engine::ast::{SelectInfo, SqlAst};
 
 /// 将 `CheckDialect` 映射为 sqlparser 的 `Dialect` trait object。
 /// 与 `rule::engine::parser::box_dialect` 逻辑一致，这里保持独立以避免
@@ -92,7 +94,10 @@ fn extract_from_select(sel: &SelectInfo, dialect: &dyn Dialect) -> Vec<JoinEdge>
             let mut pairs = Vec::new();
             collect_equal_pairs(&expr, &mut pairs);
             for (l, r) in pairs {
-                if let (Some(le), Some(re)) = (resolve_endpoint(&l, &aliases), resolve_endpoint(&r, &aliases)) {
+                if let (Some(le), Some(re)) = (
+                    resolve_endpoint(&l, &aliases),
+                    resolve_endpoint(&r, &aliases),
+                ) {
                     edges.push(JoinEdge {
                         left_table: le.0,
                         left_column: le.1,
@@ -112,7 +117,10 @@ fn extract_from_select(sel: &SelectInfo, dialect: &dyn Dialect) -> Vec<JoinEdge>
                 let mut pairs = Vec::new();
                 collect_equal_pairs(&expr, &mut pairs);
                 for (l, r) in pairs {
-                    if let (Some(le), Some(re)) = (resolve_endpoint(&l, &aliases), resolve_endpoint(&r, &aliases)) {
+                    if let (Some(le), Some(re)) = (
+                        resolve_endpoint(&l, &aliases),
+                        resolve_endpoint(&r, &aliases),
+                    ) {
                         // 只统计跨表等值（同表自比较不是关系）。
                         if le.0 != re.0 {
                             edges.push(JoinEdge {
@@ -141,7 +149,10 @@ fn resolve_endpoint(name: &str, aliases: &HashMap<String, String>) -> Option<(St
     if qual.is_empty() || col.is_empty() {
         return None;
     }
-    let table = aliases.get(qual).cloned().unwrap_or_else(|| qual.to_string());
+    let table = aliases
+        .get(qual)
+        .cloned()
+        .unwrap_or_else(|| qual.to_string());
     Some((table, col.to_string()))
 }
 
@@ -176,9 +187,13 @@ fn collect_equal_pairs(expr: &Expr, out: &mut Vec<(String, String)>) {
 /// （如 `col`）无法确定所属表，直接返回 None 在源头过滤。
 fn qualified_name(expr: &Expr) -> Option<String> {
     match expr {
-        Expr::CompoundIdentifier(parts) if parts.len() >= 2 => {
-            Some(parts.iter().map(|i| i.value.as_str()).collect::<Vec<_>>().join("."))
-        }
+        Expr::CompoundIdentifier(parts) if parts.len() >= 2 => Some(
+            parts
+                .iter()
+                .map(|i| i.value.as_str())
+                .collect::<Vec<_>>()
+                .join("."),
+        ),
         _ => None,
     }
 }
@@ -196,9 +211,7 @@ mod tests {
 
     #[test]
     fn explicit_join_with_alias() {
-        let edges = edges_of(
-            "SELECT * FROM users u JOIN orders o ON u.id = o.user_id",
-        );
+        let edges = edges_of("SELECT * FROM users u JOIN orders o ON u.id = o.user_id");
         assert_eq!(edges.len(), 1);
         let e = &edges[0];
         assert_eq!(e.left_table, "users");
@@ -210,17 +223,13 @@ mod tests {
 
     #[test]
     fn composite_join_condition() {
-        let edges = edges_of(
-            "SELECT * FROM a JOIN b ON a.x = b.x AND a.y = b.y",
-        );
+        let edges = edges_of("SELECT * FROM a JOIN b ON a.x = b.x AND a.y = b.y");
         assert_eq!(edges.len(), 2);
     }
 
     #[test]
     fn implicit_comma_join_in_where() {
-        let edges = edges_of(
-            "SELECT * FROM a, b WHERE a.id = b.aid",
-        );
+        let edges = edges_of("SELECT * FROM a, b WHERE a.id = b.aid");
         assert_eq!(edges.len(), 1);
         let e = &edges[0];
         assert_eq!(e.left_table, "a");
@@ -232,9 +241,7 @@ mod tests {
 
     #[test]
     fn left_join_captured() {
-        let edges = edges_of(
-            "SELECT * FROM users u LEFT JOIN profiles p ON u.id = p.user_id",
-        );
+        let edges = edges_of("SELECT * FROM users u LEFT JOIN profiles p ON u.id = p.user_id");
         assert_eq!(edges.len(), 1);
         assert_eq!(edges[0].join_type, "LEFT");
     }
@@ -243,19 +250,23 @@ mod tests {
     /// `SELECT * FROM a, b WHERE x = y` 中的 `x` 和 `y` 无法确定所属表，必须跳过。
     #[test]
     fn bare_column_in_where_is_ignored() {
-        let edges = edges_of(
-            "SELECT * FROM a, b WHERE x = y",
+        let edges = edges_of("SELECT * FROM a, b WHERE x = y");
+        assert_eq!(
+            edges.len(),
+            0,
+            "bare columns without table qualifier must not produce edges"
         );
-        assert_eq!(edges.len(), 0, "bare columns without table qualifier must not produce edges");
     }
 
     /// 混合条件：`a.id = b.aid AND x = y` 应只提取限定列名的等值对。
     #[test]
     fn mixed_qualified_and_bare_in_where() {
-        let edges = edges_of(
-            "SELECT * FROM a, b WHERE a.id = b.aid AND x = y",
+        let edges = edges_of("SELECT * FROM a, b WHERE a.id = b.aid AND x = y");
+        assert_eq!(
+            edges.len(),
+            1,
+            "only qualified columns should produce edges"
         );
-        assert_eq!(edges.len(), 1, "only qualified columns should produce edges");
         assert_eq!(edges[0].left_table, "a");
         assert_eq!(edges[0].right_table, "b");
     }
@@ -302,7 +313,10 @@ mod tests {
         // findOrderWithUser: 1 (orders.user_id → users.id)
         // findOrderItems:    1 (orders.id → order_items.order_id)
         // legacyReport:      2 (a.id→b.aid, a.x→b.x)
-        assert_eq!(total_edges, 4, "expected 4 join edges (2 explicit + 2 implicit)");
+        assert_eq!(
+            total_edges, 4,
+            "expected 4 join edges (2 explicit + 2 implicit)"
+        );
         assert!(saw_explicit, "explicit JOIN edges must be mined");
     }
 }

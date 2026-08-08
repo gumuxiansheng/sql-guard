@@ -94,9 +94,8 @@ pub fn parse_dynamic_statements(
     xml_path: &std::path::Path,
     encoding: &str,
 ) -> Result<Vec<DynamicStatement>, SqlGuardError> {
-    let content = crate::encoding::read_to_string(xml_path, encoding).map_err(|e| {
-        SqlGuardError::MapperError(format!("Failed to read mapper XML: {}", e))
-    })?;
+    let content = crate::encoding::read_to_string(xml_path, encoding)
+        .map_err(|e| SqlGuardError::MapperError(format!("Failed to read mapper XML: {}", e)))?;
 
     // 第一遍：收集 <sql id="..."> 片段为 DynNode 树
     let fragments = collect_sql_fragments_dynamic(&content)?;
@@ -738,7 +737,9 @@ fn strip_token_prefix<'a>(s: &'a str, ov: &str) -> Option<&'a str> {
     }
     let rest = &s[ov_trimmed.len()..];
     let needs_boundary = ov.ends_with(char::is_whitespace)
-        || ov_trimmed.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+        || ov_trimmed
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_');
     if needs_boundary && !rest.is_empty() && !rest.starts_with(char::is_whitespace) {
         return None;
     }
@@ -845,9 +846,13 @@ pub fn repair_dynamic_artifacts(sql: &str) -> String {
                 continue;
             }
             // ', FROM/WHERE/...' → 跳掉逗号
-            if let Some(kw_end) =
-                match_keyword_after_ws(&chars, j, &["FROM", "WHERE", "GROUP", "ORDER", "HAVING", "LIMIT", "UNION", "VALUES"])
-            {
+            if let Some(kw_end) = match_keyword_after_ws(
+                &chars,
+                j,
+                &[
+                    "FROM", "WHERE", "GROUP", "ORDER", "HAVING", "LIMIT", "UNION", "VALUES",
+                ],
+            ) {
                 i = kw_end;
                 continue;
             }
@@ -903,11 +908,7 @@ pub fn repair_dynamic_artifacts(sql: &str) -> String {
 
 /// 从 `start` 起跳过空白后，是否匹配 `kw`（大小写不敏感）且其后为词边界。
 /// 命中返回 kw **起始**位置（调用方据此只跳过前导逗号、保留关键字本身），否则 `None`。
-fn match_keyword_after_ws(
-    chars: &[char],
-    start: usize,
-    kws: &[&str],
-) -> Option<usize> {
+fn match_keyword_after_ws(chars: &[char], start: usize, kws: &[&str]) -> Option<usize> {
     let mut j = start;
     while j < chars.len() && chars[j].is_whitespace() {
         j += 1;
@@ -1142,11 +1143,7 @@ fn expand_include_in_text(
                 if let Some(frag) = fragments.get(&refid) {
                     // 片段自身可能还含 <include>，递归展开（有深度上限防环）
                     if depth < MAX_INCLUDE_DEPTH {
-                        out.extend(inline_includes_depth(
-                            frag.clone(),
-                            fragments,
-                            depth + 1,
-                        )?);
+                        out.extend(inline_includes_depth(frag.clone(), fragments, depth + 1)?);
                     } else {
                         out.extend(frag.iter().cloned());
                     }
@@ -1290,15 +1287,13 @@ impl<'a> XmlScanner<'a> {
                     let node = self.parse_dynamic_element(&e, &name)?;
                     out.push(node);
                 }
-                Event::End(e) => {
-                    if e.name().as_ref().eq_ignore_ascii_case(end_bytes) {
-                        if !text_buf.is_empty() {
-                            out.push(DynNode::Text(std::mem::take(&mut text_buf)));
-                        }
-                        return Ok(out);
+                Event::End(e) if e.name().as_ref().eq_ignore_ascii_case(end_bytes) => {
+                    if !text_buf.is_empty() {
+                        out.push(DynNode::Text(std::mem::take(&mut text_buf)));
                     }
-                    // 其他 End 标签（不应出现，因为 Start 都已配对消费）：忽略
+                    return Ok(out);
                 }
+                // 其他 End 标签（不应出现，因为 Start 都已配对消费）：忽略
                 _ => {}
             }
         }

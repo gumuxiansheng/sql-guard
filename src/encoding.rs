@@ -93,10 +93,7 @@ pub fn decode(bytes: &[u8], label: &str) -> Result<String, String> {
 }
 
 /// 严格解码：任何非法字节序列都视为错误（不产生 U+FFFD 替换字符）。
-fn decode_strict(
-    enc: &'static encoding_rs::Encoding,
-    bytes: &[u8],
-) -> Result<String, String> {
+fn decode_strict(enc: &'static encoding_rs::Encoding, bytes: &[u8]) -> Result<String, String> {
     let mut decoder = enc.new_decoder_without_bom_handling();
     let capacity = decoder
         .max_utf8_buffer_length(bytes.len())
@@ -143,8 +140,7 @@ fn decode_utf32(bytes: &[u8], little_endian: bool) -> Result<String, String> {
         if raw > 0x10_FFFF || (0xD800..=0xDFFF).contains(&raw) {
             return Err(format!(
                 "invalid UTF-32 code point U+{:08X} at byte offset {}",
-                raw,
-                i
+                raw, i
             ));
         }
         // char::from_u32 对 0..=0x10FFFF 且非代理区恒为 Some
@@ -159,8 +155,8 @@ fn decode_utf32(bytes: &[u8], little_endian: bool) -> Result<String, String> {
 /// I/O 错误与解码错误都返回带路径与编码标签的描述，供调用方包装为
 /// `SqlGuardError`；解码错误附带修复提示（指定正确的 `[scan] encoding`）。
 pub fn read_to_string(path: &Path, label: &str) -> Result<String, String> {
-    let bytes = std::fs::read(path)
-        .map_err(|e| format!("Failed to read '{}': {}", path.display(), e))?;
+    let bytes =
+        std::fs::read(path).map_err(|e| format!("Failed to read '{}': {}", path.display(), e))?;
     decode(&bytes, label).map_err(|e| {
         format!(
             "Failed to decode '{}' with encoding '{}': {}\n\
@@ -297,7 +293,11 @@ mod tests {
     fn validate_unknown_label_errors_with_list() {
         let err = validate("klingon").unwrap_err();
         assert!(err.contains("Unsupported encoding"), "got: {}", err);
-        assert!(err.contains("gbk"), "err should list supported labels: {}", err);
+        assert!(
+            err.contains("gbk"),
+            "err should list supported labels: {}",
+            err
+        );
     }
 
     #[test]
@@ -336,10 +336,7 @@ mod tests {
         let path = dir.join("gbk.sql");
         std::fs::write(&path, gbk_bytes("-- 中文\nSELECT 1;")).unwrap();
 
-        assert_eq!(
-            read_to_string(&path, "gbk").unwrap(),
-            "-- 中文\nSELECT 1;"
-        );
+        assert_eq!(read_to_string(&path, "gbk").unwrap(), "-- 中文\nSELECT 1;");
         // 错误提示应包含路径与修复 hint
         let err = read_to_string(&path, "utf-8").unwrap_err();
         assert!(err.contains("gbk.sql"), "got: {}", err);

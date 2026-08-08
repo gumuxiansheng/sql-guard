@@ -26,6 +26,7 @@ const HELPERS_SCRIPT: &str = include_str!("../../../config/rules/lib/helpers.rha
 ///
 /// **方言**：使用 `config.dialect` 解析 SQL。解析失败时插入一条 `PARSE` violation
 /// （warning），并在 stderr 输出提示，避免静默跳过所有 AST 规则。
+#[allow(clippy::too_many_arguments)]
 pub fn run_rules_for_file(
     engine: &Engine,
     file_path: &Path,
@@ -502,10 +503,7 @@ pub fn build_engine() -> Engine {
     // SqlAst 方法
     // 返回 Vec<CustomType> 的闭包需显式转为 Array，否则 Rhai for 循环无法迭代
     engine.register_fn("statements", |ast: &mut SqlAst| -> Array {
-        ast.statements()
-            .into_iter()
-            .map(|s| Dynamic::from(s))
-            .collect()
+        ast.statements().into_iter().map(Dynamic::from).collect()
     });
     engine.register_fn("has_parse_error", |ast: &mut SqlAst| ast.has_parse_error());
     engine.register_fn("parse_error", |ast: &mut SqlAst| ast.parse_error());
@@ -513,22 +511,13 @@ pub fn build_engine() -> Engine {
         ast.kinds().into_iter().map(Dynamic::from).collect()
     });
     engine.register_fn("create_tables", |ast: &mut SqlAst| -> Array {
-        ast.create_tables()
-            .into_iter()
-            .map(|c| Dynamic::from(c))
-            .collect()
+        ast.create_tables().into_iter().map(Dynamic::from).collect()
     });
     engine.register_fn("drop_objects", |ast: &mut SqlAst| -> Array {
-        ast.drop_objects()
-            .into_iter()
-            .map(|d| Dynamic::from(d))
-            .collect()
+        ast.drop_objects().into_iter().map(Dynamic::from).collect()
     });
     engine.register_fn("selects", |ast: &mut SqlAst| -> Array {
-        ast.selects()
-            .into_iter()
-            .map(|s| Dynamic::from(s))
-            .collect()
+        ast.selects().into_iter().map(Dynamic::from).collect()
     });
     engine.register_fn("has_create_table", |ast: &mut SqlAst| {
         ast.has_create_table()
@@ -538,10 +527,7 @@ pub fn build_engine() -> Engine {
         ast.has_comma_join_anywhere()
     });
     engine.register_fn("comments", |ast: &mut SqlAst| -> Array {
-        ast.comments()
-            .into_iter()
-            .map(|c| Dynamic::from(c))
-            .collect()
+        ast.comments().into_iter().map(Dynamic::from).collect()
     });
 
     // StmtInfo 方法
@@ -576,10 +562,7 @@ pub fn build_engine() -> Engine {
     // CreateInfo 方法
     engine.register_fn("table_name", |c: &mut CreateInfo| c.table_name());
     engine.register_fn("columns", |c: &mut CreateInfo| -> Array {
-        c.columns()
-            .into_iter()
-            .map(|col| Dynamic::from(col))
-            .collect()
+        c.columns().into_iter().map(Dynamic::from).collect()
     });
     engine.register_fn("has_primary_key", |c: &mut CreateInfo| c.has_primary_key());
     engine.register_fn("primary_key_columns", |c: &mut CreateInfo| -> Array {
@@ -597,19 +580,16 @@ pub fn build_engine() -> Engine {
         c.column_names().into_iter().map(Dynamic::from).collect()
     });
     engine.register_fn("foreign_keys", |c: &mut CreateInfo| -> Array {
-        c.foreign_keys()
-            .into_iter()
-            .map(|x| Dynamic::from(x))
-            .collect()
+        c.foreign_keys().into_iter().map(Dynamic::from).collect()
     });
     engine.register_fn("checks", |c: &mut CreateInfo| -> Array {
-        c.checks().into_iter().map(|x| Dynamic::from(x)).collect()
+        c.checks().into_iter().map(Dynamic::from).collect()
     });
     engine.register_fn("indexes", |c: &mut CreateInfo| -> Array {
-        c.indexes().into_iter().map(|x| Dynamic::from(x)).collect()
+        c.indexes().into_iter().map(Dynamic::from).collect()
     });
     engine.register_fn("uniques", |c: &mut CreateInfo| -> Array {
-        c.uniques().into_iter().map(|x| Dynamic::from(x)).collect()
+        c.uniques().into_iter().map(Dynamic::from).collect()
     });
     engine.register_fn("has_foreign_key", |c: &mut CreateInfo| c.has_foreign_key());
     engine.register_fn("has_check", |c: &mut CreateInfo| c.has_check());
@@ -658,7 +638,7 @@ pub fn build_engine() -> Engine {
         s.has_from_table_alias()
     });
     engine.register_fn("joins", |s: &mut SelectInfo| -> Array {
-        s.joins().into_iter().map(|j| Dynamic::from(j)).collect()
+        s.joins().into_iter().map(Dynamic::from).collect()
     });
     engine.register_fn("has_joins", |s: &mut SelectInfo| s.has_joins());
     engine.register_fn("has_cross_join", |s: &mut SelectInfo| s.has_cross_join());
@@ -689,15 +669,12 @@ pub fn build_engine() -> Engine {
     engine.register_fn("has_fetch", |s: &mut SelectInfo| s.has_fetch());
     engine.register_fn("has_distinct", |s: &mut SelectInfo| s.has_distinct());
     engine.register_fn("ctes", |s: &mut SelectInfo| -> Array {
-        s.ctes().into_iter().map(|x| Dynamic::from(x)).collect()
+        s.ctes().into_iter().map(Dynamic::from).collect()
     });
     engine.register_fn("has_cte", |s: &mut SelectInfo| s.has_cte());
     engine.register_fn("is_recursive", |s: &mut SelectInfo| s.is_recursive());
     engine.register_fn("subqueries", |s: &mut SelectInfo| -> Array {
-        s.subqueries()
-            .into_iter()
-            .map(|x| Dynamic::from(x))
-            .collect()
+        s.subqueries().into_iter().map(Dynamic::from).collect()
     });
     engine.register_fn("has_subquery", |s: &mut SelectInfo| s.has_subquery());
     engine.register_fn("has_window_function", |s: &mut SelectInfo| {
@@ -706,7 +683,7 @@ pub fn build_engine() -> Engine {
     engine.register_fn("window_functions", |s: &mut SelectInfo| -> Array {
         s.window_functions()
             .into_iter()
-            .map(|x| Dynamic::from(x))
+            .map(Dynamic::from)
             .collect()
     });
     engine.register_fn("where_expr", |s: &mut SelectInfo| s.where_expr());
@@ -716,7 +693,7 @@ pub fn build_engine() -> Engine {
     engine.register_fn("projection_exprs", |s: &mut SelectInfo| -> Array {
         s.projection_exprs()
             .into_iter()
-            .map(|x| Dynamic::from(x))
+            .map(Dynamic::from)
             .collect()
     });
     engine.register_fn("has_comma_join", |s: &mut SelectInfo| s.has_comma_join());
@@ -769,10 +746,7 @@ pub fn build_engine() -> Engine {
         },
     );
     engine.register_fn("operations", |a: &mut AlterTableInfo| -> Array {
-        a.operations()
-            .into_iter()
-            .map(|x| Dynamic::from(x))
-            .collect()
+        a.operations().into_iter().map(Dynamic::from).collect()
     });
 
     // AlterOpInfo 方法

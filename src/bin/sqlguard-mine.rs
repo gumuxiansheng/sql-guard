@@ -13,10 +13,10 @@ use serde::Serialize;
 
 use sqlguard::config::{CheckDialect, MapperConfig};
 use sqlguard::git_diff::{self, FileDiff};
-use sqlguard::replay_export::intersects_hunks;
 use sqlguard::mapper::collect_mapper_files;
 use sqlguard::mapper::parser::extract_sql_from_xmls;
 use sqlguard::relation::{extract_join_edges, JoinEdge};
+use sqlguard::replay_export::intersects_hunks;
 use sqlguard::rule::engine::parser::parse_sql_to_ast_fb;
 
 #[derive(Parser, Debug)]
@@ -126,7 +126,7 @@ struct RelationKey {
 }
 
 fn relation_key(edge: &JoinEdge) -> RelationKey {
-    let mut parts = vec![
+    let mut parts = [
         format!("{}.{}", edge.left_table, edge.left_column),
         format!("{}.{}", edge.right_table, edge.right_column),
     ];
@@ -155,7 +155,7 @@ fn find_diff<'a>(file: &'a Path, diffs: &'a [FileDiff]) -> Option<&'a FileDiff> 
         if p == "/" || p == "." || p.is_empty() {
             return true; // 整个仓库范围的 diff
         }
-        f == p || f.ends_with(&format!("/{}", p)) || p.ends_with(&format!("/{}", &f))
+        f == p || f.ends_with(&format!("/{}", p)) || p.ends_with(&format!("/{}", f))
     })
 }
 
@@ -222,34 +222,42 @@ fn relation_from_edge(edge: &JoinEdge) -> Relation {
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
 
-    let dialect = CheckDialect::from_str(&cli.dialect);
+    let dialect = CheckDialect::parse_dialect(&cli.dialect);
     if dialect.as_str() != cli.dialect.as_str() && dialect == CheckDialect::Generic {
-        eprintln!("Warning: unknown dialect '{}', falling back to generic", cli.dialect);
+        eprintln!(
+            "Warning: unknown dialect '{}', falling back to generic",
+            cli.dialect
+        );
     }
     let fallback = cli
         .dialect_fallback
         .as_deref()
-        .map(CheckDialect::from_str)
+        .map(CheckDialect::parse_dialect)
         .or_else(|| dialect.default_fallback());
     if let Some(ref fb_str) = cli.dialect_fallback {
-        let fb = CheckDialect::from_str(fb_str);
+        let fb = CheckDialect::parse_dialect(fb_str);
         if fb.as_str() != fb_str.as_str() && fb == CheckDialect::Generic {
-            eprintln!("Warning: unknown dialect-fallback '{}', falling back to generic", fb_str);
+            eprintln!(
+                "Warning: unknown dialect-fallback '{}', falling back to generic",
+                fb_str
+            );
         }
     }
 
-    let mut mapper_cfg = MapperConfig::default();
-    mapper_cfg.enabled = true;
-    mapper_cfg.paths = vec![cli.path.clone()];
-    // 缺省仅匹配 `*Mapper.xml`，与 `config.rs::default_mapper_patterns` 的既定意图一致，
-    // 避免误扫 pom.xml / web.xml / target/ 等非 mapper 配置，也规避畸形 XML 中断整轮扫描。
-    // 递归覆盖子目录已由 `collect_xml_files` 保证（`collects_nested_mapper_xml_files` 验证）。
-    // 仅当用户显式传 `--include-plain-xml` 时才放开到所有 `*.xml`；这是调用方驱动的开关，
-    // 而非硬编码放宽——无 Mapper 后缀的 mapper（如 `user.xml`）需要此开关才能被扫到。
-    mapper_cfg.patterns = if cli.include_plain_xml {
-        vec!["**/*Mapper.xml".to_string(), "**/*.xml".to_string()]
-    } else {
-        vec!["**/*Mapper.xml".to_string()]
+    let mapper_cfg = MapperConfig {
+        enabled: true,
+        paths: vec![cli.path.clone()],
+        // 缺省仅匹配 `*Mapper.xml`，与 `config.rs::default_mapper_patterns` 的既定意图一致，
+        // 避免误扫 pom.xml / web.xml / target/ 等非 mapper 配置，也规避畸形 XML 中断整轮扫描。
+        // 递归覆盖子目录已由 `collect_xml_files` 保证（`collects_nested_mapper_xml_files` 验证）。
+        // 仅当用户显式传 `--include-plain-xml` 时才放开到所有 `*.xml`；这是调用方驱动的开关，
+        // 而非硬编码放宽——无 Mapper 后缀的 mapper（如 `user.xml`）需要此开关才能被扫到。
+        patterns: if cli.include_plain_xml {
+            vec!["**/*Mapper.xml".to_string(), "**/*.xml".to_string()]
+        } else {
+            vec!["**/*Mapper.xml".to_string()]
+        },
+        ..Default::default()
     };
 
     let root = std::env::current_dir()?;
@@ -330,7 +338,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         // 单个 mapper 文件解析失败（畸形 / 非 UTF-8 XML 等）不应中断整轮扫描：
         // 跳过并告警，继续处理其余文件。
-        let results = match extract_sql_from_xmls(&[mf.clone()], &cli.encoding) {
+        let results = match extract_sql_from_xmls(std::slice::from_ref(mf), &cli.encoding) {
             Ok(r) => r,
             Err(e) => {
                 eprintln!("Warning: skipping '{}' (parse failed): {}", mf.display(), e);
@@ -438,7 +446,7 @@ mod tests {
             old_hunks: vec![],
             is_new: true,
         }];
-        let m = find_diff(&file, &diffs);
+        let m = find_diff(file, &diffs);
         assert!(m.is_some(), "changed file should match");
         assert_eq!(m.unwrap().path, PathBuf::from("mapper/User.xml"));
     }
@@ -453,7 +461,7 @@ mod tests {
             is_new: true,
         }];
         assert!(
-            find_diff(&file, &diffs).is_none(),
+            find_diff(file, &diffs).is_none(),
             "unchanged file must not match a diff entry"
         );
     }
@@ -533,8 +541,7 @@ mod tests {
     fn flag_gates_plain_xml_pattern() {
         // 模拟 `main` 里设定 patterns 的两条分支，确保二者与开关严格对应。
         let default_patterns = vec!["**/*Mapper.xml".to_string()];
-        let plain_patterns =
-            vec!["**/*Mapper.xml".to_string(), "**/*.xml".to_string()];
+        let plain_patterns = vec!["**/*Mapper.xml".to_string(), "**/*.xml".to_string()];
 
         // 默认（无开关）：不含 `**/*.xml`。
         assert!(!default_patterns.iter().any(|p| p == "**/*.xml"));

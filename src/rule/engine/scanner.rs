@@ -157,6 +157,7 @@ pub(crate) fn detect_comma_join_in_sql(sql: &str) -> bool {
 ///
 /// - 行注释：`-- ...` 直到行尾
 /// - 块注释：`/* ... */` 可能跨行
+///
 /// 行号通过计数 `\n` 累计（从 1 开始）。
 pub(crate) fn collect_comments(sql: &str) -> Vec<CommentInfo> {
     let bytes = sql.as_bytes();

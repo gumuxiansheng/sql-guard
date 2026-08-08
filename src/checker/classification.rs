@@ -22,7 +22,7 @@ pub fn classify_file(
     let file_str = file_path.to_string_lossy().replace('\\', "/");
 
     let mut sorted_rules = config.rules.clone();
-    sorted_rules.sort_by(|a, b| b.priority.cmp(&a.priority));
+    sorted_rules.sort_by_key(|r| std::cmp::Reverse(r.priority));
 
     let mut builder = GlobSetBuilder::new();
     for rule in &sorted_rules {
@@ -86,14 +86,13 @@ pub fn collect_sql_files(
 
     for scan_root in &scan_roots {
         if scan_root.exists() {
-            collect_files_recursive(scan_root, scan_root, &exclude_set, &mut files);
+            collect_files_recursive(scan_root, &exclude_set, &mut files);
         }
     }
     files
 }
 
 fn collect_files_recursive(
-    root: &Path,
     current: &Path,
     exclude_set: &HashSet<String>,
     files: &mut Vec<PathBuf>,
@@ -108,7 +107,7 @@ fn collect_files_recursive(
                         continue;
                     }
                 }
-                collect_files_recursive(root, &path, exclude_set, files);
+                collect_files_recursive(&path, exclude_set, files);
             } else if path.is_file() {
                 if let Some(ext) = path.extension() {
                     let ext_lower = ext.to_string_lossy().to_lowercase();

@@ -151,7 +151,12 @@ pub fn build_manifest(
     for file_path in sql_files {
         let content = crate::encoding::read_to_string(file_path, encoding)
             .map_err(SqlGuardError::CheckError)?;
-        statements.extend(sql_file_statements(file_path, &content, target_dir, type_filter));
+        statements.extend(sql_file_statements(
+            file_path,
+            &content,
+            target_dir,
+            type_filter,
+        ));
         done += 1;
         progress(done, total, file_path);
     }
@@ -279,10 +284,8 @@ fn mapper_file_statements(
         }
         let line = stmt.raw_xml_line as i64;
         let base_id = format!("{}#{}", source, stmt.statement_id);
-        let variants = mapper::dynamic::expand_variants(
-            stmt,
-            mapper::dynamic::DEFAULT_MAX_INDEPENDENT_IFS,
-        );
+        let variants =
+            mapper::dynamic::expand_variants(stmt, mapper::dynamic::DEFAULT_MAX_INDEPENDENT_IFS);
 
         // 是否含 MyBatis `${}` 运行时文本替换（静态期不可解析）。
         let has_dollar = mapper::dynamic::contains_dollar_substitution(stmt);
@@ -308,9 +311,12 @@ fn mapper_file_statements(
                 } else {
                     // 优先保留解析器原始错误详情（tokenize 失败如 `SQL tokenize error: ...`）；
                     // PARSE_ERROR 语句无原始详情，回退通用文案。
-                    Some(parsed.parse_error.clone().unwrap_or_else(|| {
-                        "parse error in mapper variant".to_string()
-                    }))
+                    Some(
+                        parsed
+                            .parse_error
+                            .clone()
+                            .unwrap_or_else(|| "parse error in mapper variant".to_string()),
+                    )
                 }
             } else {
                 None
@@ -473,13 +479,9 @@ fn build_incremental_manifest_with_loader(
         };
         let source = display_path(file_path, target_dir);
         let change = if diff.is_new { "added" } else { "modified" };
-        for mut stmt in mapper_file_statements(
-            file_path,
-            target_dir,
-            type_filter,
-            trust_dynamic,
-            encoding,
-        ) {
+        for mut stmt in
+            mapper_file_statements(file_path, target_dir, type_filter, trust_dynamic, encoding)
+        {
             // mapper 语句锚点为标签起始行；命中 hunk 即导出该标签全部变体
             if diff.is_new || intersects_hunks(stmt.line, stmt.end_line, &diff.hunks) {
                 stmt.change = Some(change.to_string());
@@ -846,7 +848,10 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed["version"], 1);
         assert_eq!(parsed["statement_count"], 0);
-        assert!(parsed.get("base").is_none(), "full export must not set base");
+        assert!(
+            parsed.get("base").is_none(),
+            "full export must not set base"
+        );
     }
 
     #[test]
@@ -1049,7 +1054,7 @@ mod tests {
         let result = build_incremental_manifest(
             dir.path(),
             &[],
-            &[xml_path.clone()],
+            std::slice::from_ref(&xml_path),
             &[diff],
             "origin/main",
             &HashSet::new(),
@@ -1138,9 +1143,7 @@ mod tests {
             old_hunks: vec![(2, 3)],
             is_new: false,
         };
-        let old_loader = |_d: &FileDiff| {
-            Ok(Some("SELECT 1;\nSELECT 2;\nSELECT 3;\n".to_string()))
-        };
+        let old_loader = |_d: &FileDiff| Ok(Some("SELECT 1;\nSELECT 2;\nSELECT 3;\n".to_string()));
         let result = build_incremental_manifest_with_loader(
             dir.path(),
             &[sql_path],
@@ -1168,7 +1171,16 @@ mod tests {
     #[test]
     fn build_manifest_empty() {
         let dir = tempfile::tempdir().unwrap();
-        let manifest = build_manifest(dir.path(), &[], &[], &HashSet::new(), true, "utf-8", &mut |_, _, _| {}).unwrap();
+        let manifest = build_manifest(
+            dir.path(),
+            &[],
+            &[],
+            &HashSet::new(),
+            true,
+            "utf-8",
+            &mut |_, _, _| {},
+        )
+        .unwrap();
         assert_eq!(manifest.statement_count, 0);
         assert!(manifest.statements.is_empty());
     }
@@ -1179,7 +1191,16 @@ mod tests {
         let sql_path = dir.path().join("test.sql");
         std::fs::write(&sql_path, "SELECT 1;\nSELECT 2;\n").unwrap();
 
-        let manifest = build_manifest(dir.path(), &[sql_path], &[], &HashSet::new(), true, "utf-8", &mut |_, _, _| {}).unwrap();
+        let manifest = build_manifest(
+            dir.path(),
+            &[sql_path],
+            &[],
+            &HashSet::new(),
+            true,
+            "utf-8",
+            &mut |_, _, _| {},
+        )
+        .unwrap();
         assert_eq!(manifest.statement_count, 2);
         assert_eq!(manifest.statements[0].stmt_type, "select");
         assert_eq!(manifest.statements[0].source_type, "sql");
@@ -1196,7 +1217,16 @@ mod tests {
         let mut filter = HashSet::new();
         filter.insert("insert".to_string());
 
-        let manifest = build_manifest(dir.path(), &[sql_path], &[], &filter, true, "utf-8", &mut |_, _, _| {}).unwrap();
+        let manifest = build_manifest(
+            dir.path(),
+            &[sql_path],
+            &[],
+            &filter,
+            true,
+            "utf-8",
+            &mut |_, _, _| {},
+        )
+        .unwrap();
         assert_eq!(manifest.statement_count, 1);
         assert_eq!(manifest.statements[0].stmt_type, "insert");
     }
@@ -1207,7 +1237,16 @@ mod tests {
         let sql_path = dir.path().join("test.sql");
         std::fs::write(&sql_path, "START TRANSACTION;\nSELECT 1;\nCOMMIT;\n").unwrap();
 
-        let manifest = build_manifest(dir.path(), &[sql_path], &[], &HashSet::new(), true, "utf-8", &mut |_, _, _| {}).unwrap();
+        let manifest = build_manifest(
+            dir.path(),
+            &[sql_path],
+            &[],
+            &HashSet::new(),
+            true,
+            "utf-8",
+            &mut |_, _, _| {},
+        )
+        .unwrap();
         // Only SELECT 1 should be exported; START TRANSACTION and COMMIT are skipped
         assert_eq!(manifest.statement_count, 1);
         assert_eq!(manifest.statements[0].stmt_type, "select");
@@ -1226,7 +1265,16 @@ mod tests {
         std::fs::write(&xml_path, xml).unwrap();
 
         // 信任开启：解析失败标记为「动态未校验」，而非普通解析错误（Java 重放侧据此跳过，行为不变）
-        let trusted = build_manifest(dir.path(), &[], &[xml_path.clone()], &HashSet::new(), true, "utf-8", &mut |_, _, _| {}).unwrap();
+        let trusted = build_manifest(
+            dir.path(),
+            &[],
+            std::slice::from_ref(&xml_path),
+            &HashSet::new(),
+            true,
+            "utf-8",
+            &mut |_, _, _| {},
+        )
+        .unwrap();
         assert_eq!(trusted.statement_count, 1);
         let pe = trusted.statements[0]
             .parse_error
@@ -1239,7 +1287,16 @@ mod tests {
         );
 
         // 信任关闭：回退为普通解析错误文案
-        let untrusted = build_manifest(dir.path(), &[], &[xml_path], &HashSet::new(), false, "utf-8", &mut |_, _, _| {}).unwrap();
+        let untrusted = build_manifest(
+            dir.path(),
+            &[],
+            &[xml_path],
+            &HashSet::new(),
+            false,
+            "utf-8",
+            &mut |_, _, _| {},
+        )
+        .unwrap();
         let pe2 = untrusted.statements[0]
             .parse_error
             .as_deref()
@@ -1259,7 +1316,16 @@ mod tests {
         let xml_path = dir.path().join("Dyn.xml");
         std::fs::write(&xml_path, xml).unwrap();
 
-        let manifest = build_manifest(dir.path(), &[], &[xml_path], &HashSet::new(), false, "utf-8", &mut |_, _, _| {}).unwrap();
+        let manifest = build_manifest(
+            dir.path(),
+            &[],
+            &[xml_path],
+            &HashSet::new(),
+            false,
+            "utf-8",
+            &mut |_, _, _| {},
+        )
+        .unwrap();
         assert_eq!(manifest.statement_count, 1);
         let pe = manifest.statements[0]
             .parse_error

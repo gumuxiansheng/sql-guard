@@ -64,7 +64,7 @@ fn test_init_creates_config() {
     let dir = "/tmp/sqlguard-test-init";
     let _ = std::fs::remove_dir_all(dir);
 
-    let output = Command::new(&binary_abs_path())
+    let output = Command::new(binary_abs_path())
         .args(["init", dir])
         .output()
         .expect("Failed to run sqlguard init");
@@ -84,7 +84,7 @@ fn test_init_creates_config() {
     // check 应能基于拆分后的规则发现违规。
     setup_test_project(dir);
     let config_path = format!("{}/sqlguard.toml", dir);
-    let check_output = Command::new(&binary_abs_path())
+    let check_output = Command::new(binary_abs_path())
         .args(["check", dir, "-c", &config_path, "-f", "plain"])
         .output()
         .expect("Failed to run sqlguard check");
@@ -105,7 +105,7 @@ fn test_check_finds_violations() {
     let dir = "/tmp/sqlguard-test-check";
     let _ = std::fs::remove_dir_all(dir);
 
-    Command::new(&binary_abs_path())
+    Command::new(binary_abs_path())
         .args(["init", dir])
         .output()
         .expect("Failed to run sqlguard init");
@@ -114,7 +114,7 @@ fn test_check_finds_violations() {
 
     let config_path = format!("{}/sqlguard.toml", dir);
 
-    let output = Command::new(&binary_abs_path())
+    let output = Command::new(binary_abs_path())
         .args(["check", dir, "-c", &config_path, "-f", "plain"])
         .output()
         .expect("Failed to run sqlguard check");
@@ -145,7 +145,7 @@ fn test_check_gbk_encoded_sql() {
     let dir = "/tmp/sqlguard-test-gbk";
     let _ = std::fs::remove_dir_all(dir);
 
-    Command::new(&binary_abs_path())
+    Command::new(binary_abs_path())
         .args(["init", dir])
         .output()
         .expect("Failed to run sqlguard init");
@@ -160,9 +160,16 @@ fn test_check_gbk_encoded_sql() {
     let config_path = format!("{}/sqlguard.toml", dir);
 
     // --encoding gbk：正常解析并发现 DROP TABLE 违规；FILE001 自动跳过（非 UTF-8 预期）
-    let output = Command::new(&binary_abs_path())
+    let output = Command::new(binary_abs_path())
         .args([
-            "check", dir, "-c", &config_path, "-f", "plain", "--encoding", "gbk",
+            "check",
+            dir,
+            "-c",
+            &config_path,
+            "-f",
+            "plain",
+            "--encoding",
+            "gbk",
         ])
         .output()
         .expect("Failed to run sqlguard check");
@@ -182,7 +189,7 @@ fn test_check_gbk_encoded_sql() {
     );
 
     // 缺省 utf-8：解码失败，错误提示应包含修复 hint（--encoding / [scan] encoding）
-    let output = Command::new(&binary_abs_path())
+    let output = Command::new(binary_abs_path())
         .args(["check", dir, "-c", &config_path, "-f", "plain"])
         .output()
         .expect("Failed to run sqlguard check");
@@ -278,7 +285,7 @@ severity = "error"
     )
     .unwrap();
 
-    let output = Command::new(&binary_abs_path())
+    let output = Command::new(binary_abs_path())
         .args([
             "check",
             dir,
@@ -364,7 +371,7 @@ severity = "error"
     )
     .unwrap();
 
-    let output = Command::new(&binary_abs_path())
+    let output = Command::new(binary_abs_path())
         .args([
             "check",
             dir,
@@ -449,7 +456,7 @@ formats = ["json"]
         "let sql = context[\"sql_content\"];\nlet upper = sql.to_upper();\nif upper.contains(\"SELECT *\") { violations.push(\"SELECT * not allowed\"); }\n"
     ).unwrap();
 
-    let output = Command::new(&binary_abs_path())
+    let output = Command::new(binary_abs_path())
         .args([
             "check",
             dir,
@@ -538,7 +545,7 @@ formats = ["sarif"]
         "let sql = context[\"sql_content\"];\nlet upper = sql.to_upper();\nif upper.contains(\"DROP TABLE\") { violations.push(\"DROP TABLE not allowed\"); }\n"
     ).unwrap();
 
-    let output = Command::new(&binary_abs_path())
+    let output = Command::new(binary_abs_path())
         .args([
             "check",
             dir,
@@ -663,7 +670,7 @@ formats = ["json"]
     )
     .unwrap();
 
-    let output = Command::new(&binary_abs_path())
+    let output = Command::new(binary_abs_path())
         .args([
             "check",
             dir,
@@ -836,7 +843,7 @@ formats = ["json"]
     )
     .unwrap();
 
-    let output = Command::new(&binary_abs_path())
+    let output = Command::new(binary_abs_path())
         .args([
             "check",
             dir,
@@ -924,7 +931,7 @@ fn test_check_mapper_mode() {
     let _ = std::fs::remove_dir_all(dir);
 
     // 1. 初始化项目配置（生成规则脚本骨架）
-    Command::new(&binary_abs_path())
+    Command::new(binary_abs_path())
         .args(["init", dir])
         .output()
         .expect("Failed to run sqlguard init");
@@ -1004,7 +1011,7 @@ formats = ["json"]
     .unwrap();
 
     // 4. 执行 check
-    let output = Command::new(&binary_abs_path())
+    let output = Command::new(binary_abs_path())
         .args([
             "check",
             dir,
@@ -1065,7 +1072,7 @@ fn test_mapper_disabled_by_default() {
     let dir = "/tmp/sqlguard-test-mapper-disabled";
     let _ = std::fs::remove_dir_all(dir);
 
-    Command::new(&binary_abs_path())
+    Command::new(binary_abs_path())
         .args(["init", dir])
         .output()
         .expect("Failed to run sqlguard init");
@@ -1082,7 +1089,7 @@ fn test_mapper_disabled_by_default() {
     .unwrap();
 
     // 用 init 生成的默认配置（不含 [mapper] 段）跑 check
-    let output = Command::new(&binary_abs_path())
+    let output = Command::new(binary_abs_path())
         .args([
             "check",
             dir,
@@ -1142,7 +1149,7 @@ fn test_check_diff_only_changed_statements() {
         .expect("git config");
 
     // 2. 初始化 sqlguard
-    Command::new(&binary_abs_path())
+    Command::new(binary_abs_path())
         .args(["init", dir])
         .output()
         .expect("sqlguard init");
@@ -1185,7 +1192,7 @@ fn test_check_diff_only_changed_statements() {
         .expect("git commit");
 
     // 6. 跑 check-diff HEAD~1
-    let output = Command::new(&binary_abs_path())
+    let output = Command::new(binary_abs_path())
         .current_dir(dir)
         .args([
             "check-diff",
@@ -1255,7 +1262,7 @@ fn test_check_diff_detects_new_violation_in_changed_line() {
         .output()
         .expect("git config");
 
-    Command::new(&binary_abs_path())
+    Command::new(binary_abs_path())
         .args(["init", dir])
         .output()
         .expect("sqlguard init");
@@ -1291,7 +1298,7 @@ fn test_check_diff_detects_new_violation_in_changed_line() {
         .output()
         .expect("git commit");
 
-    let output = Command::new(&binary_abs_path())
+    let output = Command::new(binary_abs_path())
         .current_dir(dir)
         .args([
             "check-diff",
@@ -1357,7 +1364,7 @@ fn test_check_diff_new_file_all_checked() {
         .output()
         .expect("git config");
 
-    Command::new(&binary_abs_path())
+    Command::new(binary_abs_path())
         .args(["init", dir])
         .output()
         .expect("sqlguard init");
@@ -1392,7 +1399,7 @@ fn test_check_diff_new_file_all_checked() {
         .output()
         .expect("git commit");
 
-    let output = Command::new(&binary_abs_path())
+    let output = Command::new(binary_abs_path())
         .current_dir(dir)
         .args([
             "check-diff",
@@ -1468,7 +1475,7 @@ fn test_check_diff_with_diff_noprefix_config() {
         .output()
         .expect("git config diff.noprefix");
 
-    Command::new(&binary_abs_path())
+    Command::new(binary_abs_path())
         .args(["init", dir])
         .output()
         .expect("sqlguard init");
@@ -1504,7 +1511,7 @@ fn test_check_diff_with_diff_noprefix_config() {
         .output()
         .expect("git commit");
 
-    let output = Command::new(&binary_abs_path())
+    let output = Command::new(binary_abs_path())
         .current_dir(dir)
         .args([
             "check-diff",
@@ -1665,7 +1672,7 @@ formats = ["json"]
     )
     .unwrap();
 
-    let output = Command::new(&binary_abs_path())
+    let output = Command::new(binary_abs_path())
         .args([
             "check",
             dir,
@@ -1881,7 +1888,7 @@ formats = ["json"]
     )
     .unwrap();
 
-    let output = Command::new(&binary_abs_path())
+    let output = Command::new(binary_abs_path())
         .args([
             "check",
             dir,
@@ -1951,7 +1958,7 @@ fn test_check_diff_no_changes() {
         .output()
         .expect("git config");
 
-    Command::new(&binary_abs_path())
+    Command::new(binary_abs_path())
         .args(["init", dir])
         .output()
         .expect("sqlguard init");
@@ -1970,7 +1977,7 @@ fn test_check_diff_no_changes() {
         .expect("git commit");
 
     // 无改动直接跑 check-diff
-    let output = Command::new(&binary_abs_path())
+    let output = Command::new(binary_abs_path())
         .current_dir(dir)
         .args([
             "check-diff",
@@ -2084,7 +2091,7 @@ formats = ["json"]
     )
     .unwrap();
 
-    let output = Command::new(&binary_abs_path())
+    let output = Command::new(binary_abs_path())
         .args([
             "check",
             dir,
@@ -2287,7 +2294,7 @@ formats = ["json"]
     )
     .unwrap();
 
-    let output = Command::new(&binary_abs_path())
+    let output = Command::new(binary_abs_path())
         .args([
             "check",
             dir,
@@ -2393,7 +2400,7 @@ fn test_check_dialect_override() {
         "[structure]\npaths = [\"sql\"]\nstrict = false\nallow_extra = [\"*\"]\n[classification]\nrules = []\ndefault_type = \"other\"\n",
     ).unwrap();
 
-    let output = Command::new(&binary_abs_path())
+    let output = Command::new(binary_abs_path())
         .args([
             "check",
             dir,
@@ -2431,7 +2438,7 @@ fn test_check_parse_error_reporting() {
         "[structure]\npaths = [\"sql\"]\nstrict = false\nallow_extra = [\"*\"]\n[classification]\nrules = []\ndefault_type = \"other\"\n",
     ).unwrap();
 
-    let output = Command::new(&binary_abs_path())
+    let output = Command::new(binary_abs_path())
         .args([
             "check",
             dir,
@@ -2480,7 +2487,7 @@ fn test_init_registers_dml007() {
     let dir = "/tmp/sqlguard-test-init-dml007";
     let _ = std::fs::remove_dir_all(dir);
 
-    let output = Command::new(&binary_abs_path())
+    let output = Command::new(binary_abs_path())
         .args(["init", dir])
         .output()
         .expect("Failed to run sqlguard init");
@@ -2521,7 +2528,7 @@ fn test_gen_rollback_end_to_end() {
         "[structure]\npaths = [\"sql\"]\nstrict = false\nallow_extra = [\"*\"]\n[classification]\nrules = []\ndefault_type = \"other\"\n[rollback]\nenabled = true\ndialect = \"mysql\"\n",
     ).unwrap();
 
-    let output = Command::new(&binary_abs_path())
+    let output = Command::new(binary_abs_path())
         .args([
             "gen-rollback",
             dir,
@@ -2616,7 +2623,7 @@ fn test_gen_rollback_review_report() {
     )
     .unwrap();
 
-    let output = Command::new(&binary_abs_path())
+    let output = Command::new(binary_abs_path())
         .args([
             "gen-rollback",
             dir,
@@ -2684,7 +2691,7 @@ fn test_inline_exemption() {
     let _ = std::fs::remove_dir_all(dir);
 
     // init 生成完整规则配置
-    let init_output = Command::new(&binary_abs_path())
+    let init_output = Command::new(binary_abs_path())
         .args(["init", dir])
         .output()
         .expect("Failed to run sqlguard init");
@@ -2697,7 +2704,7 @@ fn test_inline_exemption() {
         "SELECT * FROM users;\n-- sqlguard-disable-next-line DML001\nSELECT * FROM users;\nSELECT * FROM users; -- sqlguard-disable-line DML001\n",
     ).unwrap();
 
-    let output = Command::new(&binary_abs_path())
+    let output = Command::new(binary_abs_path())
         .args([
             "check",
             dir,
@@ -2764,7 +2771,7 @@ fn test_replay_export_incremental() {
         .output()
         .expect("git config");
 
-    Command::new(&binary_abs_path())
+    Command::new(binary_abs_path())
         .args(["init", dir])
         .output()
         .expect("sqlguard init");
@@ -2807,7 +2814,7 @@ fn test_replay_export_incremental() {
 
     // 增量导出
     let out_dir = format!("{}/out", dir);
-    let output = Command::new(&binary_abs_path())
+    let output = Command::new(binary_abs_path())
         .current_dir(dir)
         .args([
             "replay-export",
@@ -2830,8 +2837,7 @@ fn test_replay_export_incremental() {
     );
 
     // 主清单：仅 001.sql#2（modified）与 002.sql#1（added）
-    let manifest_text =
-        std::fs::read_to_string(format!("{}/sql-manifest.json", out_dir)).unwrap();
+    let manifest_text = std::fs::read_to_string(format!("{}/sql-manifest.json", out_dir)).unwrap();
     let manifest: serde_json::Value = serde_json::from_str(&manifest_text).expect("manifest json");
     assert_eq!(manifest["version"], 1);
     assert_eq!(manifest["incremental"], true);
@@ -2898,7 +2904,7 @@ fn test_replay_export_incremental_no_changes() {
         .args(["config", "user.name", "T"])
         .output()
         .expect("git config");
-    Command::new(&binary_abs_path())
+    Command::new(binary_abs_path())
         .args(["init", dir])
         .output()
         .expect("sqlguard init");
@@ -2916,7 +2922,7 @@ fn test_replay_export_incremental_no_changes() {
         .expect("git commit");
 
     let out_dir = format!("{}/out", dir);
-    let output = Command::new(&binary_abs_path())
+    let output = Command::new(binary_abs_path())
         .current_dir(dir)
         .args([
             "replay-export",
@@ -2937,8 +2943,7 @@ fn test_replay_export_incremental_no_changes() {
         "应提示无改动，stderr: {}",
         stderr
     );
-    let manifest_text =
-        std::fs::read_to_string(format!("{}/sql-manifest.json", out_dir)).unwrap();
+    let manifest_text = std::fs::read_to_string(format!("{}/sql-manifest.json", out_dir)).unwrap();
     let manifest: serde_json::Value = serde_json::from_str(&manifest_text).expect("manifest json");
     assert_eq!(manifest["statement_count"], 0);
     let removed_text =
@@ -2957,7 +2962,7 @@ fn test_no_constant_where_flags_tautology() {
     // 1) 反面：恒真 / 常量条件应被拦截
     let bad_dir = "/tmp/sqlguard-test-constant-where-bad";
     let _ = std::fs::remove_dir_all(bad_dir);
-    Command::new(&binary_abs_path())
+    Command::new(binary_abs_path())
         .args(["init", bad_dir])
         .output()
         .expect("init");
@@ -2970,7 +2975,7 @@ fn test_no_constant_where_flags_tautology() {
          DELETE FROM logs WHERE true;\n",
     )
     .unwrap();
-    let out = Command::new(&binary_abs_path())
+    let out = Command::new(binary_abs_path())
         .args([
             "check",
             bad_dir,
@@ -2994,7 +2999,7 @@ fn test_no_constant_where_flags_tautology() {
     // 2) 正面：真实条件不应误报
     let good_dir = "/tmp/sqlguard-test-constant-where-good";
     let _ = std::fs::remove_dir_all(good_dir);
-    Command::new(&binary_abs_path())
+    Command::new(binary_abs_path())
         .args(["init", good_dir])
         .output()
         .expect("init");
@@ -3005,7 +3010,7 @@ fn test_no_constant_where_flags_tautology() {
          SELECT a.id FROM a JOIN b ON a.id = b.id WHERE id = 1;\n",
     )
     .unwrap();
-    let out2 = Command::new(&binary_abs_path())
+    let out2 = Command::new(binary_abs_path())
         .args([
             "check",
             good_dir,

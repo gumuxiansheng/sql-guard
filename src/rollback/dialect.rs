@@ -89,7 +89,7 @@ pub trait DialectRenderer: Sync {
 
     /// ★ DDL 回滚策略（按语句类型 + 方言决定，调用方传入语句类型辅助判断）
     /// - ALTER DROP/MODIFY COLUMN、DROP INDEX、DROP PRIMARY KEY：
-    ///     MySQL → AtomicRename，PG → Transactional
+    ///   MySQL → AtomicRename，PG → Transactional
     /// - DROP TABLE（原表已不存在）：两种方言均 → RebuildFromBackup
     fn atomic_ddl_rollback_strategy(&self, stmt_kind: &str) -> AtomicStrategy;
 

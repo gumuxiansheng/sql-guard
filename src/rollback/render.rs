@@ -53,7 +53,7 @@ pub fn render_backup(
         rc.coalesce_locks, rc.coalesce_locks_mode
     ));
     out.push_str(&format!("-- statements: {}\n", pairs.len()));
-    out.push_str("\n");
+    out.push('\n');
 
     // 2. 预检错误（防御性，调用方应先调 validate_render_prerequisites）
     let errors = validate_render_prerequisites(pairs, rc);
@@ -75,7 +75,7 @@ pub fn render_backup(
     if dialect_name == "mysql" {
         if let Some(stmt) = render_binlog_control(pairs, rc) {
             out.push_str(&stmt);
-            out.push_str("\n");
+            out.push('\n');
         }
     }
 
@@ -112,7 +112,7 @@ pub fn render_backup(
                 if !out.ends_with('\n') {
                     out.push('\n');
                 }
-                out.push_str("\n");
+                out.push('\n');
             }
         }
     }
@@ -143,7 +143,7 @@ pub fn render_rollback(
     out.push_str(&format!("-- dialect: {}\n", dialect_name));
     out.push_str(&format!("-- wrap_transaction: {}\n", rc.wrap_transaction));
     out.push_str(&format!("-- statements: {}\n", pairs.len()));
-    out.push_str("\n");
+    out.push('\n');
 
     let errors = validate_render_prerequisites(pairs, rc);
     if !errors.is_empty() {
@@ -162,7 +162,7 @@ pub fn render_rollback(
 
     // LIFO 排序：与 backup 相反顺序
     let mut sorted: Vec<&BackupRollbackPair> = pairs.iter().collect();
-    sorted.sort_by(|a, b| b.seq.cmp(&a.seq));
+    sorted.sort_by_key(|p| std::cmp::Reverse(p.seq));
 
     // P1-4/F5：MySQL DML rollback 包语句级事务（DDL 隐式提交不包）
     let mysql_dml_wrap = dialect_name == "mysql" && rc.wrap_transaction;
@@ -187,7 +187,7 @@ pub fn render_rollback(
             if mysql_dml_wrap && is_dml {
                 out.push_str("COMMIT;\n");
             }
-            out.push_str("\n");
+            out.push('\n');
         }
     }
 
@@ -218,7 +218,7 @@ pub fn render_cleanup(
         "-- cleanup_backup_tables_after_rollback: {}\n",
         rc.cleanup_backup_tables_after_rollback
     ));
-    out.push_str("\n");
+    out.push('\n');
 
     if !rc.cleanup_backup_tables_after_rollback {
         out.push_str("-- cleanup_backup_tables_after_rollback=false，本文件不执行 DROP\n");
@@ -432,7 +432,7 @@ fn render_long_transaction_check(rc: &RollbackConfig, dialect_name: &str) -> Str
             threshold
         ));
     }
-    s.push_str("\n");
+    s.push('\n');
     s
 }
 
@@ -513,12 +513,10 @@ fn render_backup_coalesced(
         }
 
         // 组尾解锁
-        if is_multi && any_backup {
-            if renderer.name() == "mysql" {
-                out.push_str("UNLOCK TABLES;\n");
-            }
+        if is_multi && any_backup && renderer.name() == "mysql" {
+            out.push_str("UNLOCK TABLES;\n");
         }
-        out.push_str("\n");
+        out.push('\n');
     }
 
     out
@@ -565,7 +563,7 @@ fn extract_bks_table_name(backup: &str) -> Option<String> {
     let rest = rest.trim_start();
     // 跳过 IF NOT EXISTS
     let rest = if rest.to_uppercase().starts_with("IF NOT EXISTS ") {
-        &rest["IF NOT EXISTS ".len()..].trim_start()
+        rest["IF NOT EXISTS ".len()..].trim_start()
     } else {
         rest
     };
@@ -1253,9 +1251,11 @@ mod tests {
         }
 
         let cfg = make_cfg();
-        let mut rc = RollbackConfig::default();
-        // 混合 DML+DDL → R4 要求显式 binlog_strategy（非 auto）
-        rc.binlog_strategy = "never".to_string();
+        let rc = RollbackConfig {
+            // 混合 DML+DDL → R4 要求显式 binlog_strategy（非 auto）
+            binlog_strategy: "never".to_string(),
+            ..Default::default()
+        };
         let mut gen = RollbackGenerator::new(&cfg, &rc, &MySqlRenderer);
 
         // 构造混合语句：CREATE TABLE → INSERT → DELETE → DROP TABLE

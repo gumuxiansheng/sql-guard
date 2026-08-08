@@ -106,7 +106,7 @@ fn collect_relative_paths(
                         paths.push(rel_str.clone());
                     }
                 }
-                let _ = collect_relative_paths(root, &path, paths, allow_extra, exclude_set);
+                collect_relative_paths(root, &path, paths, allow_extra, exclude_set);
             }
         }
     }

@@ -185,6 +185,29 @@ fn collect_xml_files(
     }
 }
 
+/// 把 MyBatis 语句标签映射到 SqlGuard 的 `script_type`。
+///
+/// 默认映射（向后兼容）：select/insert/update/delete → `"dml"`。
+/// 可通过 `[mapper.statement_type_mapping]` 配置覆盖，例如把 select 映射到 `"query"`
+/// 让 SELECT 走 query 类型规则，与 DML 分别治理。
+///
+/// 未在 mapping 中配置的标签回退到 `"other"`。
+pub fn map_statement_type<'a>(
+    stmt_type: &str,
+    mapping: &'a std::collections::HashMap<String, String>,
+) -> &'a str {
+    // 优先查配置映射（大小写不敏感：标签名转小写后匹配）
+    let lower = stmt_type.to_lowercase();
+    if let Some(t) = mapping.get(&lower) {
+        return t.as_str();
+    }
+    // 兼容旧调用方：未传 mapping 或 mapping 为空时，回退到硬编码默认
+    match lower.as_str() {
+        "select" | "insert" | "update" | "delete" => "dml",
+        _ => "other",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -202,9 +225,11 @@ mod tests {
         fs::write(base.join("sub/deep/ProductMapper.xml"), "<xml/>").unwrap();
         fs::write(base.join("ignore.txt"), "x").unwrap();
 
-        let mut cfg = MapperConfig::default();
-        cfg.enabled = true;
-        cfg.paths = vec![base.to_string_lossy().to_string()];
+        let cfg = MapperConfig {
+            enabled: true,
+            paths: vec![base.to_string_lossy().to_string()],
+            ..Default::default()
+        };
 
         let mut files = collect_mapper_files(&base, &cfg, &[]);
         files.sort();
@@ -214,9 +239,11 @@ mod tests {
             "expected 3 *Mapper.xml files, got {:?}",
             files
         );
-        assert!(files
-            .iter()
-            .all(|f| f.file_name().unwrap().to_string_lossy().ends_with("Mapper.xml")));
+        assert!(files.iter().all(|f| f
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .ends_with("Mapper.xml")));
 
         let _ = fs::remove_dir_all(&base);
     }
@@ -233,11 +260,13 @@ mod tests {
         fs::write(base.join("sub/deep/c.xml"), "<xml/>").unwrap();
         fs::write(base.join("UserMapper.xml"), "<xml/>").unwrap();
 
-        let mut cfg = MapperConfig::default();
-        cfg.enabled = true;
-        cfg.paths = vec![base.to_string_lossy().to_string()];
-        // 与 sqlguard-mine 的修复一致：同时匹配 *Mapper.xml 与任意 *.xml
-        cfg.patterns = vec!["**/*Mapper.xml".to_string(), "**/*.xml".to_string()];
+        let cfg = MapperConfig {
+            enabled: true,
+            paths: vec![base.to_string_lossy().to_string()],
+            // 与 sqlguard-mine 的修复一致：同时匹配 *Mapper.xml 与任意 *.xml
+            patterns: vec!["**/*Mapper.xml".to_string(), "**/*.xml".to_string()],
+            ..Default::default()
+        };
 
         let mut files = collect_mapper_files(&base, &cfg, &[]);
         files.sort();
@@ -254,7 +283,11 @@ mod tests {
         fs::create_dir_all(base.join("src/main/resources/mapper/order")).unwrap();
         fs::create_dir_all(base.join("src/module/dao/resources/mapper")).unwrap();
         fs::create_dir_all(base.join("src/other/plain")).unwrap();
-        fs::write(base.join("src/main/resources/mapper/UserMapper.xml"), "<xml/>").unwrap();
+        fs::write(
+            base.join("src/main/resources/mapper/UserMapper.xml"),
+            "<xml/>",
+        )
+        .unwrap();
         fs::write(
             base.join("src/main/resources/mapper/order/OrderMapper.xml"),
             "<xml/>",
@@ -282,9 +315,11 @@ mod tests {
             "expected 3 xml files under **/mapper dirs, got {:?}",
             files
         );
-        assert!(files
-            .iter()
-            .all(|f| f.file_name().unwrap().to_string_lossy().ends_with("Mapper.xml")));
+        assert!(files.iter().all(|f| f
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .ends_with("Mapper.xml")));
 
         let _ = fs::remove_dir_all(&base);
     }
@@ -297,7 +332,11 @@ mod tests {
         let _ = fs::remove_dir_all(&base);
         fs::create_dir_all(base.join("src/main/resources/mapper")).unwrap();
         fs::create_dir_all(base.join("src/other")).unwrap();
-        fs::write(base.join("src/main/resources/mapper/UserMapper.xml"), "<xml/>").unwrap();
+        fs::write(
+            base.join("src/main/resources/mapper/UserMapper.xml"),
+            "<xml/>",
+        )
+        .unwrap();
         fs::write(base.join("src/other/legacy_report.xml"), "<xml/>").unwrap();
         fs::write(base.join("src/other/note.txt"), "x").unwrap();
 
@@ -311,7 +350,12 @@ mod tests {
 
         let mut files = collect_mapper_files(&base, &cfg, &[]);
         files.sort();
-        assert_eq!(files.len(), 1, "expected legacy_report.xml, got {:?}", files);
+        assert_eq!(
+            files.len(),
+            1,
+            "expected legacy_report.xml, got {:?}",
+            files
+        );
         assert_eq!(
             files[0].file_name().unwrap().to_string_lossy(),
             "legacy_report.xml"
@@ -326,7 +370,11 @@ mod tests {
         let base = std::env::temp_dir().join("sqlguard_mapper_glob_mixed_test");
         let _ = fs::remove_dir_all(&base);
         fs::create_dir_all(base.join("src/main/resources/mapper")).unwrap();
-        fs::write(base.join("src/main/resources/mapper/UserMapper.xml"), "<xml/>").unwrap();
+        fs::write(
+            base.join("src/main/resources/mapper/UserMapper.xml"),
+            "<xml/>",
+        )
+        .unwrap();
 
         // 字面量目录与 glob 同时命中同一文件，最终只收录一次
         let cfg = MapperConfig {
@@ -364,7 +412,12 @@ mod tests {
 
         let mut files = collect_mapper_files(&base, &cfg, &["target".to_string()]);
         files.sort();
-        assert_eq!(files.len(), 1, "expected only src/mapper file, got {:?}", files);
+        assert_eq!(
+            files.len(),
+            1,
+            "expected only src/mapper file, got {:?}",
+            files
+        );
         assert!(files[0].to_string_lossy().contains("src"));
 
         let _ = fs::remove_dir_all(&base);
@@ -389,28 +442,5 @@ mod tests {
         assert_eq!(files.len(), 1, "expected valid entry only, got {:?}", files);
 
         let _ = fs::remove_dir_all(&base);
-    }
-}
-
-/// 把 MyBatis 语句标签映射到 SqlGuard 的 `script_type`。
-///
-/// 默认映射（向后兼容）：select/insert/update/delete → `"dml"`。
-/// 可通过 `[mapper.statement_type_mapping]` 配置覆盖，例如把 select 映射到 `"query"`
-/// 让 SELECT 走 query 类型规则，与 DML 分别治理。
-///
-/// 未在 mapping 中配置的标签回退到 `"other"`。
-pub fn map_statement_type<'a>(
-    stmt_type: &str,
-    mapping: &'a std::collections::HashMap<String, String>,
-) -> &'a str {
-    // 优先查配置映射（大小写不敏感：标签名转小写后匹配）
-    let lower = stmt_type.to_lowercase();
-    if let Some(t) = mapping.get(&lower) {
-        return t.as_str();
-    }
-    // 兼容旧调用方：未传 mapping 或 mapping 为空时，回退到硬编码默认
-    match lower.as_str() {
-        "select" | "insert" | "update" | "delete" => "dml",
-        _ => "other",
     }
 }

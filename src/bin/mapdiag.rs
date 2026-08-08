@@ -23,7 +23,9 @@ fn main() {
 }
 
 fn diag() {
-    let dir = std::env::args().nth(1).expect("usage: mapdiag <mapper-dir>");
+    let dir = std::env::args()
+        .nth(1)
+        .expect("usage: mapdiag <mapper-dir>");
     let show = std::env::args().nth(2).unwrap_or_default();
     let mut files: Vec<PathBuf> = Vec::new();
     for e in std::fs::read_dir(&dir).unwrap().flatten() {
@@ -69,9 +71,12 @@ fn diag() {
             }
             // 主渲染失败 → 依次尝试 ExclusiveNested / FirstBranch 备用渲染
             let mut rescued = false;
-            for cand in [s.processed_sql_alt.as_deref(), s.processed_sql_alt2.as_deref()]
-                .into_iter()
-                .flatten()
+            for cand in [
+                s.processed_sql_alt.as_deref(),
+                s.processed_sql_alt2.as_deref(),
+            ]
+            .into_iter()
+            .flatten()
             {
                 if ok(&mapper::dynamic::repair_dynamic_artifacts(cand)) {
                     rescued = true;

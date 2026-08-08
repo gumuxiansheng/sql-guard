@@ -87,7 +87,7 @@ pub(crate) fn analyze_query(q: &Query) -> SelectInfo {
     // Query 层的 ORDER BY / LIMIT / OFFSET / FETCH（无论是否集合运算都在 q 上）
     info.has_order_by = q.order_by.is_some();
     info.has_limit = q.limit_clause.is_some();
-    info.has_offset = q.limit_clause.as_ref().map_or(false, |l| match l {
+    info.has_offset = q.limit_clause.as_ref().is_some_and(|l| match l {
         LimitClause::LimitOffset { offset, .. } => offset.is_some(),
         LimitClause::OffsetCommaLimit { .. } => true,
     });
@@ -133,10 +133,11 @@ pub(crate) fn analyze_query(q: &Query) -> SelectInfo {
                 SelectItem::UnnamedExpr(expr) => {
                     let text = expr.to_string();
                     info.projection.push(text.clone());
-                    if has_multiple_tables && !text.contains('.') {
-                        if matches!(expr, Expr::Identifier(_)) {
-                            info.has_unqualified_column = true;
-                        }
+                    if has_multiple_tables
+                        && !text.contains('.')
+                        && matches!(expr, Expr::Identifier(_))
+                    {
+                        info.has_unqualified_column = true;
                     }
                     info.projection_exprs.push(analyze_expr(expr));
                     collect_window_funcs_in_expr(expr, &mut window_funcs);
@@ -420,16 +421,16 @@ pub(crate) fn collect_subqueries_in_expr(e: &Expr, out: &mut Vec<SelectInfo>, de
     }
     match e {
         Expr::Subquery(q) => {
-            out.push(analyze_query(&*q));
-            collect_subqueries_in_query(&*q, out, depth + 1);
+            out.push(analyze_query(q));
+            collect_subqueries_in_query(q, out, depth + 1);
         }
         Expr::Exists { subquery, .. } => {
-            out.push(analyze_query(&*subquery));
-            collect_subqueries_in_query(&*subquery, out, depth + 1);
+            out.push(analyze_query(subquery));
+            collect_subqueries_in_query(subquery, out, depth + 1);
         }
         Expr::InSubquery { subquery, .. } => {
-            out.push(analyze_query(&*subquery));
-            collect_subqueries_in_query(&*subquery, out, depth + 1);
+            out.push(analyze_query(subquery));
+            collect_subqueries_in_query(subquery, out, depth + 1);
         }
         // 递归下钻常见容器
         Expr::BinaryOp { left, right, .. } => {

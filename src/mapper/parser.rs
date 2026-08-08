@@ -78,7 +78,10 @@ fn render_extracted(stmt: &DynamicStatement) -> Option<ExtractedSql> {
     };
     let alt2_raw = dynamic::render_canonical(&stmt.root_nodes, RenderMode::FirstBranch);
     let alt2 = normalize_placeholders(&alt2_raw);
-    let processed_sql_alt2 = if alt2.trim().is_empty() || alt2 == processed_sql || Some(&alt2) == processed_sql_alt.as_ref() {
+    let processed_sql_alt2 = if alt2.trim().is_empty()
+        || alt2 == processed_sql
+        || Some(&alt2) == processed_sql_alt.as_ref()
+    {
         None
     } else {
         Some(alt2)
@@ -106,9 +109,8 @@ pub fn extract_sql_from_xml(
     xml_path: &Path,
     encoding: &str,
 ) -> Result<Vec<ExtractedSql>, SqlGuardError> {
-    let content = crate::encoding::read_to_string(xml_path, encoding).map_err(|e| {
-        SqlGuardError::MapperError(format!("Failed to read mapper XML: {}", e))
-    })?;
+    let content = crate::encoding::read_to_string(xml_path, encoding)
+        .map_err(|e| SqlGuardError::MapperError(format!("Failed to read mapper XML: {}", e)))?;
 
     let stmts = dynamic::parse_dynamic_statements_from_content(&content, None)?;
     Ok(stmts.iter().filter_map(render_extracted).collect())
@@ -141,10 +143,8 @@ pub fn extract_sql_from_xmls(
     let mut per_file: Vec<(PathBuf, String)> = Vec::new();
 
     for path in xml_paths {
-        let content =
-            crate::encoding::read_to_string(path, encoding).map_err(|e| {
-                SqlGuardError::MapperError(format!("Failed to read mapper XML: {}", e))
-            })?;
+        let content = crate::encoding::read_to_string(path, encoding)
+            .map_err(|e| SqlGuardError::MapperError(format!("Failed to read mapper XML: {}", e)))?;
 
         let namespace = extract_mapper_namespace(&content);
         let local_frags = dynamic::collect_fragments_from_content(&content)?;
@@ -252,7 +252,6 @@ impl<'a> XmlScanner<'a> {
             )))),
         }
     }
-
 }
 
 fn lowercased_name(e: &quick_xml::events::BytesStart<'_>) -> String {
@@ -649,10 +648,22 @@ mod tests {
         std::fs::write(&path, xml).unwrap();
         let result = extract_sql_from_xml(&path, "utf-8").unwrap();
         assert_eq!(result.len(), 2);
-        let dynamic = result.iter().find(|s| s.statement_id == "dynamicTable").unwrap();
-        let static_sql = result.iter().find(|s| s.statement_id == "staticSql").unwrap();
-        assert!(dynamic.has_dynamic, "statement with ${{}} must be flagged dynamic");
-        assert!(!static_sql.has_dynamic, "static statement must not be flagged dynamic");
+        let dynamic = result
+            .iter()
+            .find(|s| s.statement_id == "dynamicTable")
+            .unwrap();
+        let static_sql = result
+            .iter()
+            .find(|s| s.statement_id == "staticSql")
+            .unwrap();
+        assert!(
+            dynamic.has_dynamic,
+            "statement with ${{}} must be flagged dynamic"
+        );
+        assert!(
+            !static_sql.has_dynamic,
+            "static statement must not be flagged dynamic"
+        );
     }
 
     #[test]
@@ -662,19 +673,34 @@ mod tests {
         // sqlparser 不支持 INSERT 列列表中嵌套子查询表达式 → PARSE_ERROR。
         // 这是 mapper XML 本身的非标准 SQL 写法，不是 sqlguard 的 bug。
         // 保留此测试作为回归验证：确保该语句始终走 PARSE 路径而非崩溃。
-        let content = match std::fs::read_to_string("examples/mapper/mapper-full/mapper/FinwhitelistEntity.xml") {
+        let content = match std::fs::read_to_string(
+            "examples/mapper/mapper-full/mapper/FinwhitelistEntity.xml",
+        ) {
             Ok(c) => c,
-            Err(_) => { return; } // 文件不存在时静默跳过
+            Err(_) => {
+                return;
+            } // 文件不存在时静默跳过
         };
         let fragments = crate::mapper::dynamic::collect_fragments_from_content(&content).unwrap();
-        let stmts = crate::mapper::dynamic::parse_dynamic_statements_from_content(&content, Some(&fragments)).unwrap();
+        let stmts = crate::mapper::dynamic::parse_dynamic_statements_from_content(
+            &content,
+            Some(&fragments),
+        )
+        .unwrap();
         let insert = stmts.iter().find(|s| s.statement_id == "insert");
         assert!(insert.is_some(), "insert statement should exist");
         if let Some(s) = insert {
-            let rendered = crate::mapper::dynamic::render_canonical(&s.root_nodes, crate::mapper::dynamic::RenderMode::AllTrue);
+            let rendered = crate::mapper::dynamic::render_canonical(
+                &s.root_nodes,
+                crate::mapper::dynamic::RenderMode::AllTrue,
+            );
             let normalized = crate::mapper::placeholder::normalize_placeholders(&rendered);
             // INSERT 列列表中的子查询会导致 PG 解析失败，这是预期行为
-            let ast = crate::rule::engine::parser::parse_sql_to_ast_fb(&normalized, crate::config::CheckDialect::GaussDB, Some(crate::config::CheckDialect::Oracle));
+            let ast = crate::rule::engine::parser::parse_sql_to_ast_fb(
+                &normalized,
+                crate::config::CheckDialect::GaussDB,
+                Some(crate::config::CheckDialect::Oracle),
+            );
             assert!(
                 ast.statements.iter().any(|st| st.kind == "PARSE_ERROR"),
                 "INSERT with subquery in column list should be PARSE_ERROR"

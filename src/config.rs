@@ -86,7 +86,9 @@ pub struct Config {
 ///   重写后仍解析失败的语句才回退 Oracle，最终由 Generic 兜底。
 #[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
+#[derive(Default)]
 pub enum CheckDialect {
+    #[default]
     Generic,
     MySql,
     PostgreSql,
@@ -95,16 +97,10 @@ pub enum CheckDialect {
     GaussDB,
 }
 
-impl Default for CheckDialect {
-    fn default() -> Self {
-        CheckDialect::Generic
-    }
-}
-
 impl CheckDialect {
     /// 从字符串解析方言（用于 CLI `--dialect` 覆盖配置）。
     /// 不区分大小写，未知值回退到 Generic。
-    pub fn from_str(s: &str) -> Self {
+    pub fn parse_dialect(s: &str) -> Self {
         match s.trim().to_lowercase().as_str() {
             "mysql" => CheckDialect::MySql,
             "postgres" | "postgresql" | "pg" => CheckDialect::PostgreSql,
@@ -826,9 +822,15 @@ type = "sql"
 
     #[test]
     fn config_dialect_from_str_accepts_gaussdb_aliases() {
-        assert_eq!(CheckDialect::from_str("gaussdb"), CheckDialect::GaussDB);
-        assert_eq!(CheckDialect::from_str("GaussDB"), CheckDialect::GaussDB);
-        assert_eq!(CheckDialect::from_str("gauss"), CheckDialect::GaussDB);
-        assert_eq!(CheckDialect::from_str("GAUSS"), CheckDialect::GaussDB);
+        assert_eq!(
+            CheckDialect::parse_dialect("gaussdb"),
+            CheckDialect::GaussDB
+        );
+        assert_eq!(
+            CheckDialect::parse_dialect("GaussDB"),
+            CheckDialect::GaussDB
+        );
+        assert_eq!(CheckDialect::parse_dialect("gauss"), CheckDialect::GaussDB);
+        assert_eq!(CheckDialect::parse_dialect("GAUSS"), CheckDialect::GaussDB);
     }
 }

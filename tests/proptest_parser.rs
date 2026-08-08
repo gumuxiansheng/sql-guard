@@ -33,8 +33,7 @@ proptest! {
 
     #[test]
     fn parser_handles_multiple_statements(n in 1usize..20) {
-        let sql: String = std::iter::repeat("SELECT 1;")
-            .take(n)
+        let sql: String = std::iter::repeat_n("SELECT 1;", n)
             .collect();
         let ast = parse_sql_to_ast(&sql, CheckDialect::Generic);
         prop_assert_eq!(ast.statements.len(), n);
@@ -45,8 +44,7 @@ proptest! {
 
     #[test]
     fn parser_line_numbers_monotonic(n in 1usize..10) {
-        let sql: String = std::iter::repeat("SELECT 1;\n")
-            .take(n)
+        let sql: String = std::iter::repeat_n("SELECT 1;\n", n)
             .collect();
         let ast = parse_sql_to_ast(&sql, CheckDialect::Generic);
         for window in ast.statements.windows(2) {

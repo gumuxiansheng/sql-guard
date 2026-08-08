@@ -239,12 +239,10 @@ fn location_to_byte_offset(sql: &str, line: u64, column: u64) -> usize {
     for (i, l) in sql.split('\n').enumerate() {
         if i == line_idx {
             // 在本行内找第 col_idx 个字符的字节偏移
-            let mut char_count: usize = 0;
-            for (b, _ch) in l.char_indices() {
+            for (char_count, (b, _ch)) in l.char_indices().enumerate() {
                 if char_count == col_idx {
                     return byte_pos + b;
                 }
-                char_count += 1;
             }
             // column 超出本行长度：返回行尾
             return byte_pos + l.len();
@@ -742,9 +740,9 @@ pub(crate) fn convert_statement(
                                 String::new(),
                                 String::new(),
                                 format!(
-                                    "DROP COLUMN{}{}{}",
-                                    if *if_exists { " IF EXISTS" } else { "" },
-                                    format!(" {}", column_name),
+                                    "DROP COLUMN {}{}{}",
+                                    if *if_exists { "IF EXISTS " } else { "" },
+                                    column_name,
                                     if cascade { " CASCADE" } else { "" }
                                 ),
                                 false,

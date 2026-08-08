@@ -76,12 +76,13 @@ mod tests {
     use crate::rule::engine::ast::{ColumnInfo, CreateInfo, StmtInfo};
 
     fn rc_with_pk(table: &str, cols: &[&str]) -> RollbackConfig {
-        let mut rc = RollbackConfig::default();
-        rc.primary_keys = vec![PrimaryKeyDecl {
-            table: table.to_string(),
-            columns: cols.iter().map(|s| s.to_string()).collect(),
-        }];
-        rc
+        RollbackConfig {
+            primary_keys: vec![PrimaryKeyDecl {
+                table: table.to_string(),
+                columns: cols.iter().map(|s| s.to_string()).collect(),
+            }],
+            ..Default::default()
+        }
     }
 
     #[test]
