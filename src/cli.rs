@@ -240,4 +240,47 @@ pub enum Commands {
         #[clap(long)]
         encoding: Option<String>,
     },
+    /// Explain the AST structure of a SQL file or Mapper XML.
+    ///
+    /// Parses the file with the configured dialect and prints the AST in a
+    /// human-readable format. Helps rule developers understand what fields and
+    /// values are available when writing Rhai rule scripts.
+    ///
+    /// Examples:
+    ///   sqlguard explain examples/sql/ddl/create_users.sql
+    ///   sqlguard explain examples/mapper/UserMapper.xml --mapper
+    ///   sqlguard explain query.sql --dialect mysql --json
+    Explain {
+        /// Path to the SQL file (or Mapper XML with --mapper).
+        #[clap(default_value = ".")]
+        path: PathBuf,
+
+        /// Path to configuration file (for dialect / mapper settings).
+        #[clap(short, long)]
+        config: Option<PathBuf>,
+
+        /// Override [dialect] in config: generic / mysql / postgresql / ansi / oracle / gaussdb.
+        #[clap(long)]
+        dialect: Option<String>,
+
+        /// Override [dialect_fallback] in config.
+        #[clap(long)]
+        dialect_fallback: Option<String>,
+
+        /// Treat the input as a MyBatis Mapper XML file.
+        #[clap(long)]
+        mapper: bool,
+
+        /// Output AST as JSON instead of human-readable text.
+        #[clap(long)]
+        json: bool,
+
+        /// Override [scan] encoding for reading scanned files (default utf-8).
+        ///
+        /// Supported labels: utf-8, gbk, gb2312, gb18030, big5, shift_jis
+        /// (sjis, cp932), euc-jp, euc-kr, utf-16le, utf-16be, utf-32le,
+        /// utf-32be, windows-1252 (latin1, iso-8859-1), ascii, ...
+        #[clap(long)]
+        encoding: Option<String>,
+    },
 }

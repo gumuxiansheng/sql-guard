@@ -11,6 +11,7 @@ pub mod cli;
 pub mod config;
 pub mod encoding;
 pub mod error;
+pub mod explain;
 pub mod git_diff;
 pub mod mapper;
 pub mod replay_export;

@@ -10,7 +10,7 @@ use sqlguard::checker::classification;
 use sqlguard::checker::directory;
 use sqlguard::checker::encoding;
 use sqlguard::cli::{Cli, Commands};
-use sqlguard::config::Config;
+use sqlguard::config::{CheckDialect, Config};
 use sqlguard::error::{SqlGuardError, Violation};
 use sqlguard::git_diff;
 use sqlguard::mapper;
@@ -163,7 +163,80 @@ fn main_inner() -> Result<(), Box<dyn std::error::Error>> {
             )?;
             std::process::exit(code);
         }
+        Commands::Explain {
+            path,
+            config,
+            dialect,
+            dialect_fallback,
+            mapper: is_mapper,
+            json,
+            encoding,
+        } => {
+            let config_path = config
+                .clone()
+                .unwrap_or_else(|| PathBuf::from("sqlguard.toml"));
+            let explicit_config = config.is_some();
+            run_explain(
+                &path,
+                &config_path,
+                explicit_config,
+                dialect.as_deref(),
+                dialect_fallback.as_deref(),
+                is_mapper,
+                json,
+                encoding.as_deref(),
+            )?;
+        }
     }
+
+    Ok(())
+}
+
+/// `sqlguard explain` 入口：解析 SQL/Mapper 并输出 AST 结构。
+fn run_explain(
+    target_path: &Path,
+    config_path: &Path,
+    explicit_config: bool,
+    dialect_override: Option<&str>,
+    dialect_fallback_override: Option<&str>,
+    is_mapper: bool,
+    json: bool,
+    encoding_override: Option<&str>,
+) -> Result<(), SqlGuardError> {
+    // 加载配置（复用 load_config）
+    let (config, _config_dir) = load_config(config_path, explicit_config)?;
+
+    // 解析方言
+    let dialect = if let Some(d) = dialect_override {
+        CheckDialect::parse_dialect(d)
+    } else {
+        config.dialect
+    };
+
+    let fallback = if let Some(fb) = dialect_fallback_override {
+        Some(CheckDialect::parse_dialect(fb))
+    } else if let Some(cfg_fb) = config.dialect_fallback {
+        Some(cfg_fb)
+    } else {
+        dialect.default_fallback()
+    };
+
+    // 读取文件
+    let encoding = encoding_override
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| config.scan.encoding.clone());
+
+    if target_path.is_dir() {
+        return Err(SqlGuardError::CheckError(format!(
+            "explain requires a single file, got directory: '{}'",
+            target_path.display()
+        )));
+    }
+
+    let _content = sqlguard::encoding::read_to_string(target_path, &encoding)
+        .map_err(|e| SqlGuardError::CheckError(e))?;
+
+    sqlguard::explain::run_explain(target_path, dialect, fallback, is_mapper, json)?;
 
     Ok(())
 }
