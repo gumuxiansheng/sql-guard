@@ -39,7 +39,7 @@ cargo --version
 echo "==> Ensuring binutils (strip) + xz-utils + unzip + grep"
 apt-get update -qq && apt-get install -y -qq binutils xz-utils unzip grep
 
-echo "==> Installing Zig ${ZIG_VERSION} (best-effort for macOS targets)"
+echo "==> Installing Zig ${ZIG_VERSION} (必需：用作 psm/cc 的交叉 C 编译器 + macOS 目标链接器)"
 ZIG_WHEEL="ziglang-${ZIG_VERSION}-py3-none-manylinux_2_12_x86_64.manylinux2010_x86_64.musllinux_1_1_x86_64.whl"
 # 清华 PyPI simple 索引中 href 为相对路径（../../packages/...），需解析为绝对 URL
 # 注意：CI 为非 tty 环境，curl 默认静默无进度输出，极易被平台 watchdog（10 分钟无输出即 kill）误杀。
@@ -57,7 +57,8 @@ if [ -n "${ZIG_WHEEL_URL}" ] \
    && chmod +x /usr/local/bin/zig; then
   zig version
 else
-  echo "warn: Zig 安装失败，macOS 目标将被跳过"
+  echo "error: Zig 安装失败。Zig 现在既是 macOS 目标的链接器，也是各目标 psm/cc 汇编的 C 编译器，无法跳过。"
+  exit 1
 fi
 
 echo "==> Installing cargo-zigbuild ${ZIGBUILD_VERSION} (best-effort for macOS targets)"
@@ -87,6 +88,31 @@ mkdir -p dist
 
 for T in "${TARGETS[@]}"; do
   echo "==> Building target: ${T}"
+
+  # 为每个交叉编译目标设置 C 编译器，供 psm/cc crate 编译目标平台汇编使用。
+  # 项目依赖 rhai -> psm（segmented stack），psm 的 build script 通过 cc crate
+  # 编译各目标平台的 .S 汇编，而 musl/windows/macos 目标默认找不到对应的
+  # C 编译器（如 x86_64-linux-musl-gcc），导致编译失败。
+  # 这里统一用已安装的 Zig 作为交叉 C 编译器（Zig 自带 musl/mingw/macOS SDK），
+  # 让 cc crate 生成目标平台的 object 后再由 rust-lld 链接。
+  case "${T}" in
+    x86_64-unknown-linux-musl)
+      export CC_x86_64_unknown_linux_musl="zig cc -target x86_64-linux-musl"
+      ;;
+    aarch64-unknown-linux-musl)
+      export CC_aarch64_unknown_linux_musl="zig cc -target aarch64-linux-musl"
+      ;;
+    x86_64-pc-windows-gnu)
+      export CC_x86_64_pc_windows_gnu="zig cc -target x86_64-windows-gnu"
+      ;;
+    x86_64-apple-darwin)
+      export CC_x86_64_apple_darwin="zig cc -target x86_64-macos"
+      ;;
+    aarch64-apple-darwin)
+      export CC_aarch64_apple_darwin="zig cc -target aarch64-macos"
+      ;;
+  esac
+
   case "${T}" in
     *apple-darwin)
       # macOS 目标必须用 zigbuild（提供 SDK + 链接器）。best-effort：失败则跳过该目标。
