@@ -30,26 +30,47 @@ echo "==> Rust toolchain"
 rustc --version
 cargo --version
 
+# binutils 的 strip 可处理 ELF / Mach-O / PE，统一剥离调试符号；unzip 用于解压 zig wheel。
+# 提前安装，供下方 Zig / cargo-zigbuild 安装使用。
 # 安装 Zig（用于 macOS 目标交叉编译；Zig 自带 macOS SDK/链接器，纯 Rust crate 无需外部 SDK）
 # 以下两步为 best-effort：若网络受限导致安装失败，仅跳过 macOS 目标，不影响 Linux/Windows 产物。
+# 注意：Zig 官方 ziglang.org 在国内/CNB 网络下载极慢（实测约 5KB/s，曾导致任务 10 分钟
+#       无任何输出被平台强制 kill），故改用清华 PyPI 镜像（实测约 6.4MB/s，12s 完成）。
+echo "==> Ensuring binutils (strip) + xz-utils + unzip + grep"
+apt-get update -qq && apt-get install -y -qq binutils xz-utils unzip grep
+
 echo "==> Installing Zig ${ZIG_VERSION} (best-effort for macOS targets)"
-ZIG_TARBALL="zig-linux-x86_64-${ZIG_VERSION}.tar.xz"
-if curl -fsSL "https://ziglang.org/download/${ZIG_VERSION}/${ZIG_TARBALL}" -o "/tmp/${ZIG_TARBALL}" \
-   && tar -xf "/tmp/${ZIG_TARBALL}" -C /usr/local \
-   && ln -sf "/usr/local/zig-linux-x86_64-${ZIG_VERSION}/zig" /usr/local/bin/zig; then
+ZIG_WHEEL="ziglang-${ZIG_VERSION}-py3-none-manylinux_2_12_x86_64.manylinux2010_x86_64.musllinux_1_1_x86_64.whl"
+# 清华 PyPI simple 索引中 href 为相对路径（../../packages/...），需解析为绝对 URL
+ZIG_WHEEL_URL=$(curl -fsSL --connect-timeout 15 --max-time 60 --retry 3 --retry-delay 2 \
+  "https://pypi.tuna.tsinghua.edu.cn/simple/ziglang/" \
+  | grep -oE "href=\"[^\"]*${ZIG_WHEEL}[^\"]*\"" | head -1 \
+  | sed -E 's/^href="//; s/"$//; s#^\.\./\.\./#https://pypi.tuna.tsinghua.edu.cn/#') || true
+if [ -n "${ZIG_WHEEL_URL}" ] \
+   && curl -fL --connect-timeout 15 --max-time 300 --retry 3 --retry-delay 2 \
+        "${ZIG_WHEEL_URL}" -o "/tmp/${ZIG_WHEEL}" \
+   && unzip -oq "/tmp/${ZIG_WHEEL}" -d /tmp/ziglang-wheel \
+   && ln -sf "/tmp/ziglang-wheel/ziglang/zig" /usr/local/bin/zig \
+   && chmod +x /usr/local/bin/zig; then
   zig version
 else
   echo "warn: Zig 安装失败，macOS 目标将被跳过"
 fi
 
 echo "==> Installing cargo-zigbuild ${ZIGBUILD_VERSION} (best-effort for macOS targets)"
-if ! cargo install "cargo-zigbuild" --version "${ZIGBUILD_VERSION}" --locked 2>/dev/null; then
-  echo "warn: cargo-zigbuild 安装失败，macOS 目标将被跳过"
+# 优先使用 GitHub 预编译二进制（~1MB，实测秒下），避免 cargo install 长时间编译；
+# 失败时静默回退到 cargo install。
+CZB_URL="https://github.com/rust-cross/cargo-zigbuild/releases/download/v${ZIGBUILD_VERSION}/cargo-zigbuild-v${ZIGBUILD_VERSION}.x86_64-unknown-linux-musl.tar.gz"
+if curl -fL --connect-timeout 15 --max-time 120 --retry 3 --retry-delay 2 "${CZB_URL}" -o "/tmp/cargo-zigbuild.tar.gz" \
+   && tar -xzf "/tmp/cargo-zigbuild.tar.gz" -C /usr/local/bin \
+   && chmod +x /usr/local/bin/cargo-zigbuild; then
+  cargo-zigbuild --version
+else
+  # 兜底：cargo install（编译较慢，但仅在预编译二进制下载失败时执行）
+  if ! cargo install "cargo-zigbuild" --version "${ZIGBUILD_VERSION}" --locked 2>/dev/null; then
+    echo "warn: cargo-zigbuild 安装失败，macOS 目标将被跳过"
+  fi
 fi
-
-# binutils 的 strip 可处理 ELF / Mach-O / PE，统一剥离调试符号
-echo "==> Ensuring binutils (strip) + xz-utils"
-apt-get update -qq && apt-get install -y -qq binutils xz-utils
 
 # 交叉环境下 cargo 自带的 strip 找不到目标平台 strip 程序，故关闭它，
 # 改为构建后由 binutils strip 统一处理（见下方循环）。
