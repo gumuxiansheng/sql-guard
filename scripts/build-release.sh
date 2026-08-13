@@ -42,12 +42,15 @@ apt-get update -qq && apt-get install -y -qq binutils xz-utils unzip grep
 echo "==> Installing Zig ${ZIG_VERSION} (best-effort for macOS targets)"
 ZIG_WHEEL="ziglang-${ZIG_VERSION}-py3-none-manylinux_2_12_x86_64.manylinux2010_x86_64.musllinux_1_1_x86_64.whl"
 # 清华 PyPI simple 索引中 href 为相对路径（../../packages/...），需解析为绝对 URL
-ZIG_WHEEL_URL=$(curl -fsSL --connect-timeout 15 --max-time 60 --retry 3 --retry-delay 2 \
+# 注意：CI 为非 tty 环境，curl 默认静默无进度输出，极易被平台 watchdog（10 分钟无输出即 kill）误杀。
+#       故下载务必加 --progress-bar（-#），并收紧 --max-time，确保超时后能及时告警继续（macOS 为 best-effort）。
+ZIG_WHEEL_URL=$(curl -fsSL --connect-timeout 15 --max-time 60 --retry 2 --retry-delay 2 \
   "https://pypi.tuna.tsinghua.edu.cn/simple/ziglang/" \
   | grep -oE "href=\"[^\"]*${ZIG_WHEEL}[^\"]*\"" | head -1 \
   | sed -E 's/^href="//; s/"$//; s#^\.\./\.\./#https://pypi.tuna.tsinghua.edu.cn/#') || true
+echo "    wheel url: ${ZIG_WHEEL_URL:-<未解析到，跳过 macOS 目标>}"
 if [ -n "${ZIG_WHEEL_URL}" ] \
-   && curl -fL --connect-timeout 15 --max-time 300 --retry 3 --retry-delay 2 \
+   && curl -fL# --connect-timeout 15 --max-time 180 --retry 1 \
         "${ZIG_WHEEL_URL}" -o "/tmp/${ZIG_WHEEL}" \
    && unzip -oq "/tmp/${ZIG_WHEEL}" -d /tmp/ziglang-wheel \
    && ln -sf "/tmp/ziglang-wheel/ziglang/zig" /usr/local/bin/zig \
@@ -61,7 +64,8 @@ echo "==> Installing cargo-zigbuild ${ZIGBUILD_VERSION} (best-effort for macOS t
 # 优先使用 GitHub 预编译二进制（~1MB，实测秒下），避免 cargo install 长时间编译；
 # 失败时静默回退到 cargo install。
 CZB_URL="https://github.com/rust-cross/cargo-zigbuild/releases/download/v${ZIGBUILD_VERSION}/cargo-zigbuild-v${ZIGBUILD_VERSION}.x86_64-unknown-linux-musl.tar.gz"
-if curl -fL --connect-timeout 15 --max-time 120 --retry 3 --retry-delay 2 "${CZB_URL}" -o "/tmp/cargo-zigbuild.tar.gz" \
+# 加 --progress-bar 输出进度避免 watchdog 误杀；收紧 --max-time/retry 避免长时间卡在下载
+if curl -fL# --connect-timeout 15 --max-time 120 --retry 1 "${CZB_URL}" -o "/tmp/cargo-zigbuild.tar.gz" \
    && tar -xzf "/tmp/cargo-zigbuild.tar.gz" -C /usr/local/bin \
    && chmod +x /usr/local/bin/cargo-zigbuild; then
   cargo-zigbuild --version
