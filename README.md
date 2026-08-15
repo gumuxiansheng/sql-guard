@@ -730,6 +730,8 @@ sqlguard init [PATH]     # 生成默认配置与示例规则
 
 只校验自指定 git 基线以来改动的 SQL 语句（增量模式），适合 CI 中只检查 PR/push 的本次改动。
 
+**未提交改动同样覆盖**：diff 终点是工作区而非 HEAD，暂存 / 未暂存 / 未跟踪的新文件（整文件算改动）都会被检查；CI 干净检出时行为与 `git diff <base>...HEAD` 完全一致。
+
 ```
 sqlguard check-diff --base <BASE> [OPTIONS] [PATH]
 
@@ -749,7 +751,7 @@ sqlguard check-diff --base <BASE> [OPTIONS] [PATH]
 
 工作流程：
 
-1. 调用 `git diff --unified=0 <base>...HEAD -- *.sql *.ddl *.dml [mapper patterns]` 获取改动文件与 hunk 行范围
+1. 调用 `git diff --unified=0 <merge-base>（base 与 HEAD 的公共祖先）→ 工作区 -- *.sql *.ddl *.dml [mapper patterns]` 获取改动文件与 hunk 行范围（含未提交改动），并用 `git ls-files --others --exclude-standard` 补充未跟踪的新文件
 2. 对每个改动文件运行规则（规则看到全部语句，跨语句规则不破坏）
 3. 用 `[line, end_line] ∩ hunk` 语句级交集过滤 violation——只保留与改动有交集的违规
 4. 新增文件整体算改动（`is_new=true` 跳过 hunk 过滤）

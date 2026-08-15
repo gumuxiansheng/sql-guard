@@ -710,7 +710,10 @@ fn run_replay_export(
 
     // 增量导出：--base 指定 git 基线，只导出改动语句
     let (manifest, removed_manifest, sql_count, mapper_count) = if let Some(base_ref) = base {
-        eprintln!("Computing diff: {}...HEAD", base_ref);
+        eprintln!(
+            "Computing diff: {}...HEAD + working tree (uncommitted changes included)",
+            base_ref
+        );
         let mut patterns: Vec<&str> = vec!["*.sql", "*.ddl", "*.dml"];
         let mapper_patterns_owned: Vec<String> = if config.mapper.enabled {
             config.mapper.patterns.clone()
@@ -872,7 +875,10 @@ fn run_check_diff(
         patterns.push(p.as_str());
     }
 
-    eprintln!("Computing diff: {}...HEAD", base);
+    eprintln!(
+        "Computing diff: {}...HEAD + working tree (uncommitted changes included)",
+        base
+    );
     let diffs = git_diff::get_diff(base, &patterns)?;
 
     if diffs.is_empty() {

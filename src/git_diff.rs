@@ -30,13 +30,25 @@ pub struct FileDiff {
     pub is_new: bool,
 }
 
-/// 调用 `git diff --unified=0 base...HEAD` 并解析。
+/// 调用 `git diff` 计算基线到**工作区**的改动并解析（含未提交内容）。
+///
+/// 语义 = 三点 diff `base...HEAD` 再叠加未提交改动：
+/// 1. `git merge-base <base> HEAD` 求公共祖先（三点 diff 的起点）；
+/// 2. `git diff --unified=0 <merge-base>` 对比工作区——暂存 + 未暂存的改动全部覆盖；
+/// 3. `git ls-files --others --exclude-standard` 补充未跟踪的新文件（整文件算改动）。
+///
+/// CI 干净检出时工作区 == HEAD，行为与 `base...HEAD` 完全一致；
+/// 本地开发时未提交（含未跟踪）的 SQL 改动也会被检查。
 ///
 /// `path_patterns` 用于限制 diff 范围（如 `*.sql`、`src/main/resources/mapper/**/*.xml`）。
 ///
 /// 显式指定 `--src-prefix=a/ --dst-prefix=b/`，强制 `+++ b/path` 前缀格式，
 /// 不受用户 `diff.noprefix` 等配置影响——解析器依赖此前缀提取文件路径。
 pub fn get_diff(base: &str, path_patterns: &[&str]) -> Result<Vec<FileDiff>, SqlGuardError> {
+    // 三点语义 base...HEAD = merge-base(base, HEAD) → HEAD；
+    // 把对比终点从 HEAD 换成工作区，即得到"已提交 + 未提交"的全部改动。
+    let merge_base = merge_base(base)?;
+
     let mut cmd = Command::new("git");
     cmd.args([
         "diff",
@@ -44,7 +56,7 @@ pub fn get_diff(base: &str, path_patterns: &[&str]) -> Result<Vec<FileDiff>, Sql
         "--diff-filter=d",
         "--src-prefix=a/",
         "--dst-prefix=b/",
-        &format!("{}...HEAD", base),
+        &merge_base,
     ]);
     if !path_patterns.is_empty() {
         cmd.arg("--");
@@ -67,7 +79,74 @@ pub fn get_diff(base: &str, path_patterns: &[&str]) -> Result<Vec<FileDiff>, Sql
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    parse_diff_output(&stdout)
+    let mut result = parse_diff_output(&stdout)?;
+
+    // 未跟踪的新文件不出现在 git diff 输出中，单独列出并标记 is_new（整文件算改动）。
+    for path in list_untracked(path_patterns)? {
+        result.push(FileDiff {
+            path: PathBuf::from(path),
+            hunks: Vec::new(),
+            old_hunks: Vec::new(),
+            is_new: true,
+        });
+    }
+
+    Ok(result)
+}
+
+/// `git merge-base <base> HEAD`：三点 diff 的起点。
+fn merge_base(base: &str) -> Result<String, SqlGuardError> {
+    let output = Command::new("git")
+        .args(["merge-base", base, "HEAD"])
+        .output()
+        .map_err(|e| SqlGuardError::CheckError(format!("Failed to run git: {}", e)))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(SqlGuardError::CheckError(format!(
+            "git merge-base failed for base '{}' ({}): {}",
+            base,
+            output.status,
+            stderr.trim()
+        )));
+    }
+
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+/// `git ls-files --others --exclude-standard --full-name`：未跟踪文件列表（尊重 .gitignore）。
+///
+/// `-z` 用 NUL 分隔，避免路径含引号/特殊字符时被 C 转义；
+/// `--full-name` 强制输出仓库根相对路径，与 git diff 的路径风格一致。
+fn list_untracked(path_patterns: &[&str]) -> Result<Vec<String>, SqlGuardError> {
+    let mut cmd = Command::new("git");
+    cmd.args(["ls-files", "--others", "--exclude-standard", "--full-name", "-z"]);
+    if !path_patterns.is_empty() {
+        cmd.arg("--");
+        for p in path_patterns {
+            cmd.arg(p);
+        }
+    }
+
+    let output = cmd
+        .output()
+        .map_err(|e| SqlGuardError::CheckError(format!("Failed to run git: {}", e)))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(SqlGuardError::CheckError(format!(
+            "git ls-files failed ({}): {}",
+            output.status,
+            stderr.trim()
+        )));
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    Ok(stdout
+        .split('\0')
+        .filter(|s| !s.is_empty())
+        .map(String::from)
+        .collect())
 }
 
 /// 读取 `git show <base>:<path>` 的旧文件内容。

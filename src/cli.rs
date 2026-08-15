@@ -102,10 +102,11 @@ pub enum Commands {
 
         /// Export only statements changed since a git baseline (incremental mode).
         ///
-        /// Runs `git diff --unified=0 <base>...HEAD` and exports only statements
-        /// whose line range intersects a hunk (new files are fully exported).
-        /// Deleted statements are written to `sql-manifest-removed.json`.
-        /// Omit for a full export (current behavior).
+        /// Diffs from the merge-base of `<base>` and HEAD to the working tree
+        /// (uncommitted changes and untracked new files included) and exports
+        /// only statements whose line range intersects a hunk (new files are
+        /// fully exported). Deleted statements are written to
+        /// `sql-manifest-removed.json`. Omit for a full export (current behavior).
         #[clap(long)]
         base: Option<String>,
 
@@ -125,9 +126,11 @@ pub enum Commands {
     },
     /// Only check SQL statements changed since a git baseline (incremental mode).
     ///
-    /// Runs `git diff --unified=0 <base>...HEAD` to get changed hunks, then
-    /// checks each changed file and keeps only violations whose statement
-    /// range [line, end_line] intersects a hunk. Useful for CI.
+    /// Diffs from the merge-base of `<base>` and HEAD to the **working tree**,
+    /// so uncommitted changes are included: staged, unstaged, and untracked
+    /// new files (checked in full). Checks each changed file and keeps only
+    /// violations whose statement range [line, end_line] intersects a hunk.
+    /// On a clean CI checkout this equals `git diff <base>...HEAD`.
     CheckDiff {
         /// Git baseline: commit / branch / tag, e.g. `origin/main`, `HEAD~1`.
         #[clap(long)]
