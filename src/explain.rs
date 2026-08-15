@@ -70,13 +70,19 @@ fn explain_mapper(
     let stmts = mapper::parser::extract_sql_from_xml(file_path, "utf-8")?;
 
     if stmts.is_empty() {
-        eprintln!("No SQL statements found in mapper XML: {}", file_path.display());
+        eprintln!(
+            "No SQL statements found in mapper XML: {}",
+            file_path.display()
+        );
         return Ok(());
     }
 
     if json {
         println!("{{");
-        println!("  \"file\": \"{}\",", escape_json(&file_path.to_string_lossy()));
+        println!(
+            "  \"file\": \"{}\",",
+            escape_json(&file_path.to_string_lossy())
+        );
         println!("  \"dialect\": \"{}\",", dialect.as_str());
         if let Some(fb) = fallback {
             println!("  \"dialect_fallback\": \"{}\",", fb.as_str());
@@ -84,20 +90,22 @@ fn explain_mapper(
         println!("  \"statement_count\": {},", stmts.len());
         println!("  \"statements\": [");
         for (i, stmt) in stmts.iter().enumerate() {
-            let ast = parser::parse_sql_to_ast_fb(
-                &stmt.processed_sql,
-                *dialect,
-                fallback.cloned(),
-            );
+            let ast = parser::parse_sql_to_ast_fb(&stmt.processed_sql, *dialect, fallback.cloned());
             if i > 0 {
                 println!(",");
             }
             print!("    {{");
-            print!("\"statement_id\": \"{}\", ", escape_json(&stmt.statement_id));
+            print!(
+                "\"statement_id\": \"{}\", ",
+                escape_json(&stmt.statement_id)
+            );
             print!("\"statement_type\": \"{}\", ", stmt.statement_type);
             print!("\"raw_xml_line\": {}, ", stmt.raw_xml_line);
             print!("\"has_dynamic\": {}, ", stmt.has_dynamic);
-            print!("\"processed_sql\": \"{}\", ", escape_json(&stmt.processed_sql));
+            print!(
+                "\"processed_sql\": \"{}\", ",
+                escape_json(&stmt.processed_sql)
+            );
             if let Some(alt) = &stmt.processed_sql_alt {
                 print!("\"processed_sql_alt\": \"{}\", ", escape_json(alt));
             }
@@ -113,10 +121,14 @@ fn explain_mapper(
 
     // 人类可读格式
     println!("=== Mapper File: {} ===", file_path.display());
-    println!("Dialect: {}{}", dialect.as_str(), match fallback {
-        Some(fb) => format!(" → {} → generic", fb.as_str()),
-        None => " → generic".to_string(),
-    });
+    println!(
+        "Dialect: {}{}",
+        dialect.as_str(),
+        match fallback {
+            Some(fb) => format!(" → {} → generic", fb.as_str()),
+            None => " → generic".to_string(),
+        }
+    );
     println!("Statements: {}", stmts.len());
     println!();
 
@@ -132,21 +144,24 @@ fn explain_mapper(
         println!();
 
         // 先尝试主渲染
-        let ast = parser::parse_sql_to_ast_fb(
-            &stmt.processed_sql,
-            *dialect,
-            fallback.cloned(),
-        );
+        let ast = parser::parse_sql_to_ast_fb(&stmt.processed_sql, *dialect, fallback.cloned());
 
         if ast.has_parse_error() {
             // 尝试备用渲染
-            let candidates: Vec<(&str, &str)> = vec![
-                ("processed_sql", stmt.processed_sql.as_str()),
-            ]
-            .into_iter()
-            .chain(stmt.processed_sql_alt.as_deref().map(|s| ("processed_sql_alt", s)))
-            .chain(stmt.processed_sql_alt2.as_deref().map(|s| ("processed_sql_alt2", s)))
-            .collect();
+            let candidates: Vec<(&str, &str)> =
+                vec![("processed_sql", stmt.processed_sql.as_str())]
+                    .into_iter()
+                    .chain(
+                        stmt.processed_sql_alt
+                            .as_deref()
+                            .map(|s| ("processed_sql_alt", s)),
+                    )
+                    .chain(
+                        stmt.processed_sql_alt2
+                            .as_deref()
+                            .map(|s| ("processed_sql_alt2", s)),
+                    )
+                    .collect();
 
             let mut found = false;
             for (label, sql) in &candidates[1..] {
@@ -194,10 +209,14 @@ fn print_human_readable(
     let line_count = content.lines().count();
 
     println!("=== File: {} ===", file_path.display());
-    println!("Dialect: {}{}", dialect.as_str(), match fallback {
-        Some(fb) => format!(" → {} → generic", fb.as_str()),
-        None => " → generic".to_string(),
-    });
+    println!(
+        "Dialect: {}{}",
+        dialect.as_str(),
+        match fallback {
+            Some(fb) => format!(" → {} → generic", fb.as_str()),
+            None => " → generic".to_string(),
+        }
+    );
     println!("Lines: {}", line_count);
     println!("Statements: {}", ast.statements.len());
 
@@ -381,12 +400,24 @@ fn print_create_info(ct: &sql_ast::CreateInfo, indent: usize) {
         for col in &ct.columns {
             let p2 = "  ".repeat(indent + 1);
             let mut flags = Vec::new();
-            if col.is_primary_key { flags.push("pk".to_string()); }
-            if col.is_not_null { flags.push("not_null".to_string()); }
-            if col.is_unique { flags.push("unique".to_string()); }
-            if col.is_auto_increment { flags.push("auto_inc".to_string()); }
-            if col.has_check { flags.push("check".to_string()); }
-            if col.has_foreign_key { flags.push("fk".to_string()); }
+            if col.is_primary_key {
+                flags.push("pk".to_string());
+            }
+            if col.is_not_null {
+                flags.push("not_null".to_string());
+            }
+            if col.is_unique {
+                flags.push("unique".to_string());
+            }
+            if col.is_auto_increment {
+                flags.push("auto_inc".to_string());
+            }
+            if col.has_check {
+                flags.push("check".to_string());
+            }
+            if col.has_foreign_key {
+                flags.push("fk".to_string());
+            }
 
             let flags_str = if flags.is_empty() {
                 String::new()
@@ -417,9 +448,20 @@ fn print_create_info(ct: &sql_ast::CreateInfo, indent: usize) {
         println!("{}foreign_keys:", p);
         for fk in &ct.foreign_keys {
             let p2 = "  ".repeat(indent + 1);
-            println!("{}- name: {}", p2, if fk.name.is_empty() { "(unnamed)" } else { &fk.name });
+            println!(
+                "{}- name: {}",
+                p2,
+                if fk.name.is_empty() {
+                    "(unnamed)"
+                } else {
+                    &fk.name
+                }
+            );
             println!("{}  columns: {:?}", p2, fk.columns);
-            println!("{}  references: {}({:?})", p2, fk.foreign_table, fk.referred_columns);
+            println!(
+                "{}  references: {}({:?})",
+                p2, fk.foreign_table, fk.referred_columns
+            );
             if !fk.on_delete.is_empty() {
                 println!("{}  on_delete: {}", p2, fk.on_delete);
             }
@@ -439,9 +481,16 @@ fn print_create_info(ct: &sql_ast::CreateInfo, indent: usize) {
             } else {
                 ck.expr_text.clone()
             };
-            println!("{}- name: {}  expr: {}", p2,
-                if ck.name.is_empty() { "(unnamed)" } else { &ck.name },
-                expr_preview);
+            println!(
+                "{}- name: {}  expr: {}",
+                p2,
+                if ck.name.is_empty() {
+                    "(unnamed)"
+                } else {
+                    &ck.name
+                },
+                expr_preview
+            );
         }
     }
 
@@ -450,9 +499,17 @@ fn print_create_info(ct: &sql_ast::CreateInfo, indent: usize) {
         println!("{}indexes:", p);
         for idx in &ct.indexes {
             let p2 = "  ".repeat(indent + 1);
-            println!("{}- name: {}  columns: {:?}  unique: {}", p2,
-                if idx.name.is_empty() { "(unnamed)" } else { &idx.name },
-                idx.columns, idx.is_unique);
+            println!(
+                "{}- name: {}  columns: {:?}  unique: {}",
+                p2,
+                if idx.name.is_empty() {
+                    "(unnamed)"
+                } else {
+                    &idx.name
+                },
+                idx.columns,
+                idx.is_unique
+            );
         }
     }
 
@@ -461,9 +518,16 @@ fn print_create_info(ct: &sql_ast::CreateInfo, indent: usize) {
         println!("{}uniques:", p);
         for uq in &ct.uniques {
             let p2 = "  ".repeat(indent + 1);
-            println!("{}- name: {}  columns: {:?}", p2,
-                if uq.name.is_empty() { "(unnamed)" } else { &uq.name },
-                uq.columns);
+            println!(
+                "{}- name: {}  columns: {:?}",
+                p2,
+                if uq.name.is_empty() {
+                    "(unnamed)"
+                } else {
+                    &uq.name
+                },
+                uq.columns
+            );
         }
     }
 }
@@ -494,7 +558,11 @@ fn print_select_info(sel: &sql_ast::SelectInfo, indent: usize) {
 
     // FROM
     if let Some(table) = &sel.from_table {
-        let alias_str = sel.from_table_alias.as_deref().map(|a| format!(" AS {}", a)).unwrap_or_default();
+        let alias_str = sel
+            .from_table_alias
+            .as_deref()
+            .map(|a| format!(" AS {}", a))
+            .unwrap_or_default();
         println!("{}from: {}{}", p, table, alias_str);
     }
     if sel.has_subquery_in_from {
@@ -506,7 +574,11 @@ fn print_select_info(sel: &sql_ast::SelectInfo, indent: usize) {
         println!("{}joins:", p);
         for j in &sel.joins {
             let p2 = "  ".repeat(indent + 1);
-            let alias_str = j.alias.as_deref().map(|a| format!(" AS {}", a)).unwrap_or_default();
+            let alias_str = j
+                .alias
+                .as_deref()
+                .map(|a| format!(" AS {}", a))
+                .unwrap_or_default();
             println!("{}- {} {}{}", p2, j.join_type, j.table_name, alias_str);
             if j.has_condition {
                 if let Some(cond) = &j.condition_text {
@@ -543,24 +615,42 @@ fn print_select_info(sel: &sql_ast::SelectInfo, indent: usize) {
             println!("{}where: (present)", p);
         }
     }
-    if sel.has_group_by { println!("{}group_by: true", p); }
-    if sel.has_having { println!("{}having: true", p); }
-    if sel.has_qualify { println!("{}qualify: true", p); }
+    if sel.has_group_by {
+        println!("{}group_by: true", p);
+    }
+    if sel.has_having {
+        println!("{}having: true", p);
+    }
+    if sel.has_qualify {
+        println!("{}qualify: true", p);
+    }
 
     // ORDER BY / LIMIT / OFFSET / FETCH / DISTINCT
-    if sel.has_order_by { println!("{}order_by: true", p); }
-    if sel.has_limit { println!("{}limit: true", p); }
-    if sel.has_offset { println!("{}offset: true", p); }
-    if sel.has_fetch { println!("{}fetch: true", p); }
-    if sel.has_distinct { println!("{}distinct: true", p); }
+    if sel.has_order_by {
+        println!("{}order_by: true", p);
+    }
+    if sel.has_limit {
+        println!("{}limit: true", p);
+    }
+    if sel.has_offset {
+        println!("{}offset: true", p);
+    }
+    if sel.has_fetch {
+        println!("{}fetch: true", p);
+    }
+    if sel.has_distinct {
+        println!("{}distinct: true", p);
+    }
 
     // CTE
     if sel.has_cte {
         println!("{}ctes: {}", p, sel.ctes.len());
         for cte in &sel.ctes {
             let p2 = "  ".repeat(indent + 1);
-            println!("{}- name: {}  columns: {}  recursive: {}", p2,
-                cte.name, cte.column_count, cte.is_recursive);
+            println!(
+                "{}- name: {}  columns: {}  recursive: {}",
+                p2, cte.name, cte.column_count, cte.is_recursive
+            );
         }
     }
 
@@ -580,9 +670,15 @@ fn print_select_info(sel: &sql_ast::SelectInfo, indent: usize) {
         for wf in &sel.window_functions {
             let p2 = "  ".repeat(indent + 1);
             let mut parts = vec![wf.function_name.clone()];
-            if wf.has_partition_by { parts.push("PARTITION BY".to_string()); }
-            if wf.has_order_by { parts.push("ORDER BY".to_string()); }
-            if wf.has_window_frame { parts.push("frame".to_string()); }
+            if wf.has_partition_by {
+                parts.push("PARTITION BY".to_string());
+            }
+            if wf.has_order_by {
+                parts.push("ORDER BY".to_string());
+            }
+            if wf.has_window_frame {
+                parts.push("frame".to_string());
+            }
             println!("{}- {}", p2, parts.join(" "));
         }
     }
@@ -604,7 +700,10 @@ fn print_json(
 ) {
     let line_count = content.lines().count();
     println!("{{");
-    println!("  \"file\": \"{}\",", escape_json(&file_path.to_string_lossy()));
+    println!(
+        "  \"file\": \"{}\",",
+        escape_json(&file_path.to_string_lossy())
+    );
     println!("  \"dialect\": \"{}\",", dialect.as_str());
     if let Some(fb) = fallback {
         println!("  \"dialect_fallback\": \"{}\",", fb.as_str());
@@ -613,12 +712,20 @@ fn print_json(
     println!("  \"statement_count\": {},", ast.statements.len());
     println!("  \"has_parse_error\": {},", ast.has_parse_error());
     if ast.has_parse_error() {
-        println!("  \"parse_error\": \"{}\",", escape_json(&ast.parse_error()));
+        println!(
+            "  \"parse_error\": \"{}\",",
+            escape_json(&ast.parse_error())
+        );
     }
-    println!("  \"has_comma_join_anywhere\": {},", ast.has_comma_join_anywhere);
+    println!(
+        "  \"has_comma_join_anywhere\": {},",
+        ast.has_comma_join_anywhere
+    );
     println!("  \"statements\": [");
     for (i, stmt) in ast.statements.iter().enumerate() {
-        if i > 0 { println!(","); }
+        if i > 0 {
+            println!(",");
+        }
         print!("    ");
         print_stmt_json(stmt);
     }
@@ -628,9 +735,15 @@ fn print_json(
     if !ast.comments.is_empty() {
         println!(",\"comments\": [");
         for (i, c) in ast.comments.iter().enumerate() {
-            if i > 0 { println!(","); }
-            print!("    {{\"kind\": \"{}\", \"line\": {}, \"text\": \"{}\"}}",
-                c.kind, c.line, escape_json(&c.text));
+            if i > 0 {
+                println!(",");
+            }
+            print!(
+                "    {{\"kind\": \"{}\", \"line\": {}, \"text\": \"{}\"}}",
+                c.kind,
+                c.line,
+                escape_json(&c.text)
+            );
         }
         println!();
         println!("  ]");
@@ -652,8 +765,12 @@ fn print_stmt_json(stmt: &sql_ast::StmtInfo) {
     }
     if let Some(drop) = &stmt.drop_object {
         print!(", \"drop\": {{");
-        print!("\"type\": \"{}\", \"name\": \"{}\", \"if_exists\": {}}}",
-            drop.object_type, escape_json(&drop.name), drop.if_exists);
+        print!(
+            "\"type\": \"{}\", \"name\": \"{}\", \"if_exists\": {}}}",
+            drop.object_type,
+            escape_json(&drop.name),
+            drop.if_exists
+        );
     }
     if let Some(sel) = &stmt.select {
         print!(", \"select\": ");
@@ -661,27 +778,42 @@ fn print_stmt_json(stmt: &sql_ast::StmtInfo) {
     }
     if let Some(ins) = &stmt.insert {
         print!(", \"insert\": {{");
-        print!("\"table\": \"{}\", \"columns\": {:?}}}",
-            escape_json(&ins.table_name), ins.columns);
+        print!(
+            "\"table\": \"{}\", \"columns\": {:?}}}",
+            escape_json(&ins.table_name),
+            ins.columns
+        );
     }
     if let Some(upd) = &stmt.update {
         print!(", \"update\": {{");
-        print!("\"table\": \"{}\", \"where\": {}}}",
+        print!(
+            "\"table\": \"{}\", \"where\": {}}}",
             escape_json(&upd.table_name),
-            upd.where_clause.as_ref().map(|w| format!("\"{}\"", escape_json(w))).unwrap_or_else(|| "null".to_string()));
+            upd.where_clause
+                .as_ref()
+                .map(|w| format!("\"{}\"", escape_json(w)))
+                .unwrap_or_else(|| "null".to_string())
+        );
     }
     if let Some(del) = &stmt.delete {
         print!(", \"delete\": {{");
-        print!("\"table\": \"{}\", \"where\": {}}}",
+        print!(
+            "\"table\": \"{}\", \"where\": {}}}",
             escape_json(&del.table_name),
-            del.where_clause.as_ref().map(|w| format!("\"{}\"", escape_json(w))).unwrap_or_else(|| "null".to_string()));
+            del.where_clause
+                .as_ref()
+                .map(|w| format!("\"{}\"", escape_json(w)))
+                .unwrap_or_else(|| "null".to_string())
+        );
     }
     if let Some(alt) = &stmt.alter_table {
         print!(", \"alter_table\": {{");
         print!("\"table\": \"{}\", \"adds_primary_key\": {}, \"drops_primary_key\": {}, \"operations\": [",
             escape_json(&alt.table_name), alt.adds_primary_key, alt.drops_primary_key);
         for (i, op) in alt.operations.iter().enumerate() {
-            if i > 0 { print!(", "); }
+            if i > 0 {
+                print!(", ");
+            }
             print!("{{\"type\": \"{}\", \"column\": \"{}\", \"constraint\": \"{}\", \"detail\": \"{}\"}}",
                 op.operation_type,
                 escape_json(&op.column_name),
@@ -691,8 +823,11 @@ fn print_stmt_json(stmt: &sql_ast::StmtInfo) {
         print!("]}}");
     }
     if let Some(tr) = &stmt.truncate {
-        print!(", \"truncate\": {{\"table\": \"{}\", \"has_table_keyword\": {}}}",
-            escape_json(&tr.table_name), tr.has_table_keyword);
+        print!(
+            ", \"truncate\": {{\"table\": \"{}\", \"has_table_keyword\": {}}}",
+            escape_json(&tr.table_name),
+            tr.has_table_keyword
+        );
     }
     if let Some(v) = &stmt.create_view {
         print!(", \"create_view\": {{\"name\": \"{}\", \"materialized\": {}, \"is_replace\": {}, \"column_count\": {}}}",
@@ -717,7 +852,9 @@ fn print_create_json(ct: &sql_ast::CreateInfo) {
     print!("\"is_create_as\": {}, ", ct.is_create_as);
     print!("\"columns\": [");
     for (i, col) in ct.columns.iter().enumerate() {
-        if i > 0 { print!(", "); }
+        if i > 0 {
+            print!(", ");
+        }
         print!("{{\"name\": \"{}\", \"data_type\": \"{}\", \"pk\": {}, \"not_null\": {}, \"unique\": {}, \"auto_inc\": {}}}",
             escape_json(&col.name),
             escape_json(&col.data_type),
@@ -727,7 +864,9 @@ fn print_create_json(ct: &sql_ast::CreateInfo) {
     if !ct.foreign_keys.is_empty() {
         print!(", \"foreign_keys\": [");
         for (i, fk) in ct.foreign_keys.iter().enumerate() {
-            if i > 0 { print!(", "); }
+            if i > 0 {
+                print!(", ");
+            }
             print!("{{\"name\": \"{}\", \"columns\": {:?}, \"ref_table\": \"{}\", \"ref_columns\": {:?}}}",
                 escape_json(&fk.name), fk.columns,
                 escape_json(&fk.foreign_table), fk.referred_columns);
@@ -737,9 +876,14 @@ fn print_create_json(ct: &sql_ast::CreateInfo) {
     if !ct.checks.is_empty() {
         print!(", \"checks\": [");
         for (i, ck) in ct.checks.iter().enumerate() {
-            if i > 0 { print!(", "); }
-            print!("{{\"name\": \"{}\", \"expr\": \"{}\"}}",
-                escape_json(&ck.name), escape_json(&ck.expr_text));
+            if i > 0 {
+                print!(", ");
+            }
+            print!(
+                "{{\"name\": \"{}\", \"expr\": \"{}\"}}",
+                escape_json(&ck.name),
+                escape_json(&ck.expr_text)
+            );
         }
         print!("]");
     }
@@ -750,7 +894,13 @@ fn print_select_json(sel: &sql_ast::SelectInfo) {
     print!("{{");
     print!("\"has_wildcard\": {}, ", sel.has_wildcard);
     print!("\"projection\": {:?}, ", sel.projection);
-    print!("\"from_table\": {}, ", sel.from_table.as_ref().map(|t| format!("\"{}\"", escape_json(t))).unwrap_or_else(|| "null".to_string()));
+    print!(
+        "\"from_table\": {}, ",
+        sel.from_table
+            .as_ref()
+            .map(|t| format!("\"{}\"", escape_json(t)))
+            .unwrap_or_else(|| "null".to_string())
+    );
     print!("\"has_where\": {}, ", sel.has_where);
     print!("\"has_group_by\": {}, ", sel.has_group_by);
     print!("\"has_having\": {}, ", sel.has_having);
@@ -768,8 +918,11 @@ fn print_select_json(sel: &sql_ast::SelectInfo) {
 }
 
 fn print_ast_json_inline(ast: &sql_ast::SqlAst) {
-    print!("{{\"has_parse_error\": {}, \"statement_count\": {}}}",
-        ast.has_parse_error(), ast.statements.len());
+    print!(
+        "{{\"has_parse_error\": {}, \"statement_count\": {}}}",
+        ast.has_parse_error(),
+        ast.statements.len()
+    );
 }
 
 // ===== 辅助函数 =====
@@ -796,10 +949,7 @@ mod tests {
 
     #[test]
     fn explain_simple_select() {
-        let f = write_temp(
-            "SELECT id, name FROM users WHERE id = 1;\n",
-            ".sql",
-        );
+        let f = write_temp("SELECT id, name FROM users WHERE id = 1;\n", ".sql");
         let result = run_explain(f.path(), CheckDialect::Generic, None, false, false);
         assert!(result.is_ok());
     }
@@ -859,17 +1009,15 @@ mod tests {
 
     #[test]
     fn explain_dialect_mysql() {
-        let f = write_temp(
-            "SELECT id FROM users WHERE id = 1;\n",
-            ".sql",
-        );
+        let f = write_temp("SELECT id FROM users WHERE id = 1;\n", ".sql");
         let result = run_explain(f.path(), CheckDialect::MySql, None, false, false);
         assert!(result.is_ok());
     }
 
     #[test]
     fn explain_multi_statement() {
-        let sql = "CREATE TABLE t (id INT PRIMARY KEY);\nINSERT INTO t VALUES (1);\nSELECT * FROM t;\n";
+        let sql =
+            "CREATE TABLE t (id INT PRIMARY KEY);\nINSERT INTO t VALUES (1);\nSELECT * FROM t;\n";
         let f = write_temp(sql, ".sql");
         let result = run_explain(f.path(), CheckDialect::Generic, None, false, false);
         assert!(result.is_ok());
