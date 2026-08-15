@@ -59,16 +59,21 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y musl-tools
 
-      # aarch64-musl 交叉编译需要 aarch64 版 musl C 交叉编译器（psm 等 C 依赖需要）；
-      # 宿主的 musl-tools 只提供 x86_64 的 musl-gcc，故从这里拉取预构建的 aarch64 交叉工具链。
-      # 仅设置 CC（C 编译用），链接仍走 .cargo/config.toml 的 rust-lld + link-self-contained（与 CNB 一致）。
-      - name: Install aarch64-linux-musl cross toolchain (Linux only)
+      # aarch64-musl 交叉编译需要 aarch64 版 C 交叉编译器（psm 等 C 依赖需要）；
+      # 宿主的 musl-tools 只提供 x86_64 的 musl-gcc。
+      # 之前的方案从 musl.cc 拉预构建工具链，但 musl.cc 已整体屏蔽 GitHub Actions 流量
+      # （其官网公告 "GitHub Actions has been blocked wholesale"），下载必然失败。
+      # 故与 CNB 流水线 scripts/build-release.sh 保持一致：用 Zig 作为交叉 C 编译器
+      # （Zig 自带 musl SDK），构建产物由 .cargo/config.toml 的 rust-lld 链接。
+      - name: Install Zig (cross C compiler)
         if: matrix.target == 'aarch64-unknown-linux-musl'
-        run: |
-          curl -fsSL https://musl.cc/aarch64-linux-musl-cross.tgz -o /tmp/aarch64-musl.tgz
-          tar -xf /tmp/aarch64-musl.tgz -C /opt
-          echo "/opt/aarch64-linux-musl-cross/bin" >> "$GITHUB_PATH"
-          echo "CC_aarch64_unknown_linux_musl=aarch64-linux-musl-gcc" >> "$GITHUB_ENV"
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.13.0
+
+      - name: Set CC for aarch64-musl (mirror scripts/build-release.sh)
+        if: matrix.target == 'aarch64-unknown-linux-musl'
+        run: echo "CC_aarch64_unknown_linux_musl=zig cc -target aarch64-linux-musl" >> "$GITHUB_ENV"
 
       - name: Build release binary
         run: cargo build --release --target ${{ matrix.target }} --locked

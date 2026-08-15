@@ -61,6 +61,38 @@ else
   exit 1
 fi
 
+echo "==> Creating Zig C-compiler wrapper scripts for psm/cc cross-assembly"
+# psm（经 rhai -> stacker 引入）的 build script 用 cc crate 编译目标平台汇编。
+# 若把 CC 直接设为 "zig cc -target ..."，cc crate 会走它那段有缺陷的 zig 探测路径：
+# 把 cargo 的 4 段目标三元组（x86_64-unknown-linux-musl）原样丢给 zig，而 zig 0.13
+# 只认 3 段形式（x86_64-linux-musl），于是报 "unable to parse target query ...:
+# UnknownOperatingSystem" 导致构建失败。
+# 解决：用「名称不含 zig」的普通脚本封装 zig，让 cc crate 把它当普通 GCC 处理，
+# 从而绕过其 zig 探测；脚本内丢弃 cc crate 可能追加的 4 段 -target，并把正确的
+# -target 放到参数末尾以覆盖之，确保 zig 始终拿到能接受的 3 段目标。
+make_zig_cc() {
+  local name="$1" zig_target="$2"
+  cat > "/usr/local/bin/${name}" <<'ZIGWRAP'
+#!/bin/sh
+# 自动生成：将 cargo 4 段目标翻译为 zig 3 段目标（绕过 cc crate 有缺陷的 zig 探测）
+zig_args=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -target|--target)     shift 2 ;;   # 丢弃 cc crate 追加的 4 段 -target
+    -target=*|--target=*) shift ;;
+    *) zig_args="$zig_args $1"; shift ;;
+  esac
+done
+exec zig cc $zig_args -target ZIGTARGET
+ZIGWRAP
+  # heredoc 内不能安全展开变量，故用 sed 把占位符替换为真实 zig 目标
+  sed -i "s/ZIGTARGET/${zig_target}/" "/usr/local/bin/${name}"
+  chmod +x "/usr/local/bin/${name}"
+}
+make_zig_cc x86_64-linux-musl-gcc  x86_64-linux-musl
+make_zig_cc aarch64-linux-musl-gcc aarch64-linux-musl
+make_zig_cc x86_64-windows-gnu-cc  x86_64-windows-gnu
+
 echo "==> Installing cargo-zigbuild ${ZIGBUILD_VERSION} (best-effort for macOS targets)"
 # 优先使用 GitHub 预编译二进制（~1MB，实测秒下），避免 cargo install 长时间编译；
 # 失败时静默回退到 cargo install。
@@ -89,27 +121,19 @@ mkdir -p dist
 for T in "${TARGETS[@]}"; do
   echo "==> Building target: ${T}"
 
-  # 为每个交叉编译目标设置 C 编译器，供 psm/cc crate 编译目标平台汇编使用。
-  # 项目依赖 rhai -> psm（segmented stack），psm 的 build script 通过 cc crate
-  # 编译各目标平台的 .S 汇编，而 musl/windows/macos 目标默认找不到对应的
-  # C 编译器（如 x86_64-linux-musl-gcc），导致编译失败。
-  # 这里统一用已安装的 Zig 作为交叉 C 编译器（Zig 自带 musl/mingw/macOS SDK），
-  # 让 cc crate 生成目标平台的 object 后再由 rust-lld 链接。
+  # psm/cc crate 用的交叉 C 编译器：指向上面的 Zig 封装脚本（名称不含 "zig"，
+  # 让 cc crate 当普通 GCC 处理，绕过其有缺陷的 zig 探测；脚本内部已正确翻译目标）。
+  # 仅对走 `cargo build` 的 musl / windows-gnu 目标设置；macOS 目标由
+  # cargo-zigbuild 自行管理 CC，无需（也不应）在此覆盖。
   case "${T}" in
     x86_64-unknown-linux-musl)
-      export CC_x86_64_unknown_linux_musl="zig cc -target x86_64-linux-musl"
+      export CC_x86_64_unknown_linux_musl="x86_64-linux-musl-gcc"
       ;;
     aarch64-unknown-linux-musl)
-      export CC_aarch64_unknown_linux_musl="zig cc -target aarch64-linux-musl"
+      export CC_aarch64_unknown_linux_musl="aarch64-linux-musl-gcc"
       ;;
     x86_64-pc-windows-gnu)
-      export CC_x86_64_pc_windows_gnu="zig cc -target x86_64-windows-gnu"
-      ;;
-    x86_64-apple-darwin)
-      export CC_x86_64_apple_darwin="zig cc -target x86_64-macos"
-      ;;
-    aarch64-apple-darwin)
-      export CC_aarch64_apple_darwin="zig cc -target aarch64-macos"
+      export CC_x86_64_pc_windows_gnu="x86_64-windows-gnu-cc"
       ;;
   esac
 
