@@ -193,6 +193,7 @@ fn main_inner() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 /// `sqlguard explain` 入口：解析 SQL/Mapper 并输出 AST 结构。
+#[allow(clippy::too_many_arguments)]
 fn run_explain(
     target_path: &Path,
     config_path: &Path,
@@ -234,7 +235,7 @@ fn run_explain(
     }
 
     let _content = sqlguard::encoding::read_to_string(target_path, &encoding)
-        .map_err(|e| SqlGuardError::CheckError(e))?;
+        .map_err(SqlGuardError::CheckError)?;
 
     sqlguard::explain::run_explain(target_path, dialect, fallback, is_mapper, json)?;
 
