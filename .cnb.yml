@@ -19,9 +19,10 @@
   tag_push:
     - runner:
         cpus: 4
-      # ⚠️ 关键：镜像在 pipeline 级别声明，所有 stage 默认运行在 rust:1.80 里
+      # ⚠️ 关键：镜像在 pipeline 级别声明，所有 stage 默认运行在 rust:stable 里
+      #        （与 GitHub workflows 的 dtolnay/rust-toolchain@stable 对齐）
       docker:
-        image: rust:1.80
+        image: rust:stable
       stages:
         # 1) 为当前 tag 创建 Release（tag_push 下自动使用 $CNB_BRANCH 作为 tag）
         - name: 创建 Release

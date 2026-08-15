@@ -7,6 +7,8 @@
 #   - sqlguard-x86_64-apple-darwin              (Intel macOS)
 #   - sqlguard-aarch64-apple-darwin             (Apple Silicon macOS)
 #   - sqlguard-x86_64-pc-windows-gnu.exe        (Windows)
+#   （上述每个目标均同时产出 sqlguard 与 sqlguard-mine 两个二进制，与 CNB .cnb.yml 对齐；
+#     Rust 工具链与 CNB 流水线一致使用 stable。）
 #
 # 制品保留：构建产物先以 GitHub Actions Artifact 形式随运行保留（默认 90 天），
 #           随后由下方 release 作业作为「永久 Release 资产」发布，可长期下载。
@@ -98,15 +100,16 @@ jobs:
       - name: Build release binary
         run: cargo build --release --target ${{ matrix.target }} --locked
 
-      - name: Rename binary
+      - name: Rename binaries (sqlguard + sqlguard-mine)
         shell: bash
         run: |
           mkdir -p dist
+          ext=""
           if [[ "${{ matrix.target }}" == *windows* ]]; then
-            cp target/${{ matrix.target }}/release/sqlguard.exe dist/${{ matrix.artifact }}
-          else
-            cp target/${{ matrix.target }}/release/sqlguard dist/${{ matrix.artifact }}
+            ext=".exe"
           fi
+          cp "target/${{ matrix.target }}/release/sqlguard${ext}"      "dist/${{ matrix.artifact }}"
+          cp "target/${{ matrix.target }}/release/sqlguard-mine${ext}" "dist/sqlguard-mine-${{ matrix.target }}${ext}"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -114,8 +117,9 @@ jobs:
           # 制品名带版本号，便于在不同 tag 的构建运行中区分/追溯；
           # 该 Artifact 随工作流运行保留（retention-days 为 Free 版上限 90 天），
           # 同时下方 release 作业会将其作为永久 Release 资产发布。
+          # 路径为 dist/*：同一目标的两个二进制（sqlguard / sqlguard-mine）一并上传。
           name: ${{ matrix.artifact }}-${{ github.ref_name }}
-          path: dist/${{ matrix.artifact }}
+          path: dist/*
           retention-days: 90
 
   release:
