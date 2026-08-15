@@ -61,19 +61,39 @@ jobs:
 
       # aarch64-musl 交叉编译需要 aarch64 版 C 交叉编译器（psm 等 C 依赖需要）；
       # 宿主的 musl-tools 只提供 x86_64 的 musl-gcc。
-      # 之前的方案从 musl.cc 拉预构建工具链，但 musl.cc 已整体屏蔽 GitHub Actions 流量
-      # （其官网公告 "GitHub Actions has been blocked wholesale"），下载必然失败。
-      # 故与 CNB 流水线 scripts/build-release.sh 保持一致：用 Zig 作为交叉 C 编译器
-      # （Zig 自带 musl SDK），构建产物由 .cargo/config.toml 的 rust-lld 链接。
+      # 与 CNB 流水线 scripts/build-release.sh（make_zig_cc）一致的方案：
+      # 用 Zig 作交叉 C 编译器，但创建名称不含 "zig" 的 aarch64-linux-musl-gcc
+      # 封装脚本，让 cc crate 当作普通 GCC 处理，绕过其有缺陷的 zig 探测
+      # （cc crate 会追加 4 段 --target=aarch64-unknown-linux-musl，Zig 0.13
+      # 无法解析，报 UnknownOperatingSystem）。封装脚本丢弃 4 段目标参数，
+      # 末尾补上 Zig 能接受的 3 段 -target aarch64-linux-musl。
+      # 链接仍走 .cargo/config.toml 的 rust-lld + link-self-contained。
       - name: Install Zig (cross C compiler)
         if: matrix.target == 'aarch64-unknown-linux-musl'
         uses: mlugg/setup-zig@v2
         with:
           version: 0.13.0
 
-      - name: Set CC for aarch64-musl (mirror scripts/build-release.sh)
+      - name: Create aarch64-musl C compiler wrapper
         if: matrix.target == 'aarch64-unknown-linux-musl'
-        run: echo "CC_aarch64_unknown_linux_musl=zig cc -target aarch64-linux-musl" >> "$GITHUB_ENV"
+        run: |
+          cat > /usr/local/bin/aarch64-linux-musl-gcc <<'ZIGWRAP'
+          #!/bin/sh
+          zig_args=""
+          while [ $# -gt 0 ]; do
+            case "$1" in
+              -target|--target)     shift 2 ;;
+              -target=*|--target=*) shift ;;
+              *) zig_args="$zig_args $1"; shift ;;
+            esac
+          done
+          exec zig cc $zig_args -target aarch64-linux-musl
+          ZIGWRAP
+          chmod +x /usr/local/bin/aarch64-linux-musl-gcc
+
+      - name: Set CC for aarch64-musl
+        if: matrix.target == 'aarch64-unknown-linux-musl'
+        run: echo "CC_aarch64_unknown_linux_musl=aarch64-linux-musl-gcc" >> "$GITHUB_ENV"
 
       - name: Build release binary
         run: cargo build --release --target ${{ matrix.target }} --locked

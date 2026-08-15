@@ -4,12 +4,14 @@
 # 在 Linux x86_64 执行机上交叉编译以下目标：
 #   - x86_64-unknown-linux-musl     （静态链接，无 glibc 依赖）
 #   - aarch64-unknown-linux-musl    （ARM64 Linux）
-#   - x86_64-pc-windows-gnu         （Windows，自包含 mingw 导入库 + rust-lld）
+#   - x86_64-pc-windows-gnu         （Windows，mingw-w64 交叉工具链 + rust 自带 mingw 导入库）
 #   - x86_64-apple-darwin           （Intel macOS，cargo-zigbuild 交叉编译）
 #   - aarch64-apple-darwin          （Apple Silicon macOS，cargo-zigbuild 交叉编译）
 #
-# 复用项目 .cargo/config.toml 中 rust-lld + link-self-contained 的跨平台链接配置
-# 处理 musl / windows-gnu 目标；macOS 目标由 Zig 自带链接器与 SDK 完成链接。
+# 复用项目 .cargo/config.toml 中 rust-lld + link-self-contained 的链接配置：
+#   musl 目标走 rust-lld（完全自包含）；windows-gnu 走 mingw-w64 交叉工具链
+#   （rustc 的 windows-gnu 链接流程需调用 dlltool，故在脚本中 apt 安装 gcc-mingw-w64-x86-64）；
+#   macOS 目标由 Zig 自带链接器与 SDK 完成链接。
 #
 # 产物统一输出到 dist/，供 cnbcool/attachments 插件上传到 Release 附件。
 set -euo pipefail
@@ -36,10 +38,12 @@ cargo --version
 # 以下两步为 best-effort：若网络受限导致安装失败，仅跳过 macOS 目标，不影响 Linux/Windows 产物。
 # 注意：Zig 官方 ziglang.org 在国内/CNB 网络下载极慢（实测约 5KB/s，曾导致任务 10 分钟
 #       无任何输出被平台强制 kill），故改用清华 PyPI 镜像（实测约 6.4MB/s，12s 完成）。
-echo "==> Ensuring binutils (strip) + binutils-aarch64-linux-gnu + xz-utils + unzip + grep"
+echo "==> Ensuring binutils (strip) + binutils-aarch64-linux-gnu + gcc-mingw-w64 + xz-utils + unzip + grep"
 # 宿主 binutils strip 是 x86_64 版，无法识别 aarch64(ARM64) ELF，
 # 故额外安装 binutils-aarch64-linux-gnu 提供 aarch64-linux-gnu-strip 用于 ARM64 musl 目标。
-apt-get update -qq && apt-get install -y -qq binutils binutils-aarch64-linux-gnu xz-utils unzip grep
+# gcc-mingw-w64-x86-64 提供 x86_64-w64-mingw32-gcc/ld/dlltool 与 mingw CRT 启动对象，
+# 供 windows-gnu 目标交叉链接（rustc 的 windows-gnu 链接流程必须能调用 dlltool）。
+apt-get update -qq && apt-get install -y -qq binutils binutils-aarch64-linux-gnu gcc-mingw-w64-x86-64 xz-utils unzip grep
 
 echo "==> Installing Zig ${ZIG_VERSION} (必需：用作 psm/cc 的交叉 C 编译器 + macOS 目标链接器)"
 ZIG_WHEEL="ziglang-${ZIG_VERSION}-py3-none-manylinux_2_12_x86_64.manylinux2010_x86_64.musllinux_1_1_x86_64.whl"
@@ -148,7 +152,9 @@ for T in "${TARGETS[@]}"; do
         || { echo "    warn: macOS target ${T} 构建失败，跳过（best-effort）"; continue; }
       ;;
     *)
-      # musl / windows-gnu 走项目自带 rust-lld + link-self-contained 配置
+      # musl 走 rust-lld + link-self-contained（完全自包含）；
+      # windows-gnu 走 mingw-w64 交叉工具链（dlltool/gcc/ld 由脚本 apt 安装），
+      # 配合 link-self-contained=yes 使用 rust 自带的 Windows API 导入库。
       cargo build --release --target "${T}" --locked
       ;;
   esac
