@@ -120,7 +120,13 @@ fn merge_base(base: &str) -> Result<String, SqlGuardError> {
 /// `--full-name` 强制输出仓库根相对路径，与 git diff 的路径风格一致。
 fn list_untracked(path_patterns: &[&str]) -> Result<Vec<String>, SqlGuardError> {
     let mut cmd = Command::new("git");
-    cmd.args(["ls-files", "--others", "--exclude-standard", "--full-name", "-z"]);
+    cmd.args([
+        "ls-files",
+        "--others",
+        "--exclude-standard",
+        "--full-name",
+        "-z",
+    ]);
     if !path_patterns.is_empty() {
         cmd.arg("--");
         for p in path_patterns {

@@ -1371,7 +1371,11 @@ fn test_check_diff_uncommitted_modification() {
 
     // 初始：规范查询，提交
     std::fs::create_dir_all(format!("{}/sql/dml", dir)).unwrap();
-    std::fs::write(format!("{}/sql/dml/001.sql", dir), "SELECT id FROM users;\n").unwrap();
+    std::fs::write(
+        format!("{}/sql/dml/001.sql", dir),
+        "SELECT id FROM users;\n",
+    )
+    .unwrap();
     Command::new("git")
         .current_dir(dir)
         .args(["add", "."])
