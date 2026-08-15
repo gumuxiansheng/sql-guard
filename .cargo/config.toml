@@ -15,4 +15,5 @@ rustflags = ["-C", "link-self-contained=yes"]
 
 # Windows x86_64 (self-contained mingw)
 [target.x86_64-pc-windows-gnu]
+linker = "rust-lld"
 rustflags = ["-C", "link-self-contained=yes"]

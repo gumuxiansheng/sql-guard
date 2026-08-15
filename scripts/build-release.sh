@@ -36,8 +36,10 @@ cargo --version
 # 以下两步为 best-effort：若网络受限导致安装失败，仅跳过 macOS 目标，不影响 Linux/Windows 产物。
 # 注意：Zig 官方 ziglang.org 在国内/CNB 网络下载极慢（实测约 5KB/s，曾导致任务 10 分钟
 #       无任何输出被平台强制 kill），故改用清华 PyPI 镜像（实测约 6.4MB/s，12s 完成）。
-echo "==> Ensuring binutils (strip) + xz-utils + unzip + grep"
-apt-get update -qq && apt-get install -y -qq binutils xz-utils unzip grep
+echo "==> Ensuring binutils (strip) + binutils-aarch64-linux-gnu + xz-utils + unzip + grep"
+# 宿主 binutils strip 是 x86_64 版，无法识别 aarch64(ARM64) ELF，
+# 故额外安装 binutils-aarch64-linux-gnu 提供 aarch64-linux-gnu-strip 用于 ARM64 musl 目标。
+apt-get update -qq && apt-get install -y -qq binutils binutils-aarch64-linux-gnu xz-utils unzip grep
 
 echo "==> Installing Zig ${ZIG_VERSION} (必需：用作 psm/cc 的交叉 C 编译器 + macOS 目标链接器)"
 ZIG_WHEEL="ziglang-${ZIG_VERSION}-py3-none-manylinux_2_12_x86_64.manylinux2010_x86_64.musllinux_1_1_x86_64.whl"
@@ -157,12 +159,23 @@ for T in "${TARGETS[@]}"; do
     *)            BINEXT="" ;;
   esac
 
+  # 选择目标平台对应的 strip 工具：
+  #   宿主 binutils strip(x86_64) 不认 ARM64 ELF，故 aarch64 用 aarch64-linux-gnu-strip；
+  #   macOS(Mach-O) 在 Linux 下 GNU strip 无法处理，跳过（best-effort，保持未 strip）。
+  case "${T}" in
+    aarch64-unknown-linux-musl) STRIP="aarch64-linux-gnu-strip" ;;
+    *apple-darwin)             STRIP="" ;;
+    *)                         STRIP="strip" ;;
+  esac
+
   for B in "${BINS[@]}"; do
     SRC="target/${T}/release/${B}${BINEXT}"
     DST="dist/${B}-${T}${BINEXT}"
     cp "${SRC}" "${DST}"
-    # 个别目标 strip 失败不应中断整体发布（仅告警）
-    if strip "${DST}"; then
+    # 个别目标 strip 失败不应中断整体发布（仅告警）；Mach-O 直接跳过
+    if [ -z "${STRIP}" ]; then
+      echo "    -> ${DST} (strip 跳过：Mach-O 需 macOS 环境)"
+    elif ${STRIP} "${DST}"; then
       echo "    -> ${DST} (stripped)"
     else
       echo "    warn: strip failed for ${DST}, kept unstripped"
