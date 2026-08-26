@@ -226,3 +226,23 @@ enabled = true
 script_path = "config/rules/dml/no_constant_where.rhai"
 applies_to = ["dml"]
 severity = "warning"
+
+[[rules]]
+id = "DML109"
+name = "join_type_required"
+group = "dml-style"
+description = "JOIN must specify an explicit type (e.g. LEFT JOIN or INNER JOIN); bare JOIN is not allowed"
+enabled = true
+script_path = "config/rules/dml/join_type_required.rhai"
+applies_to = ["dml"]
+severity = "warning"
+
+[[rules]]
+id = "DML110"
+name = "max_join_tables"
+group = "dml-performance"
+description = "A query must not join more than 5 tables"
+enabled = true
+script_path = "config/rules/dml/max_join_tables.rhai"
+applies_to = ["dml"]
+severity = "warning"

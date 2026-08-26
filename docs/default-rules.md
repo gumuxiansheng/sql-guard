@@ -1,6 +1,6 @@
 # SqlGuard 默认规则手册
 
-SqlGuard 内置 22 条默认规则，分为 **P0（14 条，默认启用）** 和 **P1（8 条，默认禁用）** 两档（7 DDL + 15 DML）。
+SqlGuard 内置 24 条默认规则，分为 **P0（16 条，默认启用）** 和 **P1（8 条，默认禁用）** 两档（7 DDL + 17 DML）。
 
 ## 规则总览
 
@@ -28,6 +28,8 @@ SqlGuard 内置 22 条默认规则，分为 **P0（14 条，默认启用）** �
 | DML106 | `union_all_preferred` | dml-performance | warning | P1 | SQLFluff AM02 |
 | DML107 | `no_nested_case` | dml-convention | warning | P1 | SQLFluff ST04 |
 | DML108 | `no_constant_where` | dml-convention | warning | P1 | SQLFluff ST10 |
+| DML109 | `join_type_required` | dml-style | warning | P0 | — |
+| DML110 | `max_join_tables` | dml-performance | warning | P0 | — |
 
 ---
 
@@ -429,6 +431,65 @@ SELECT id FROM users OFFSET 20;           -- OFFSET 分页同样需要 ORDER BY
 SELECT id FROM users ORDER BY id LIMIT 10;
 -- RANDOM_ORDER
 SELECT id FROM users ORDER BY RANDOM() LIMIT 10;
+```
+
+---
+
+### DML109 — `join_type_required`
+
+| 字段 | 值 |
+|------|-----|
+| 文件 | `config/rules/dml/join_type_required.rhai` |
+| 分组 | `dml-style` |
+| 严重度 | `warning` |
+| 检测方式 | AST（精确，递归子查询） |
+| 对标 | — |
+
+**校验原因**：JOIN 必须显式指定类型（`LEFT` / `INNER` / `RIGHT` / `FULL` / `CROSS` 等），裸 `JOIN` 的语义（默认 INNER）不明确。显式类型让查询意图更清晰、可移植性更好。
+
+**检测逻辑**：基于 AST 的 `JoinInfo.has_explicit_join_type()`——仅 sqlparser 解析为裸 `JOIN`（`JoinOperator::Join`）时返回 false；显式 `INNER JOIN` / `LEFT JOIN` 等均放行。对子查询同样递归检查。
+
+**反面案例**：
+```sql
+SELECT u.id, o.id FROM users u JOIN orders o ON u.id = o.user_id;  -- 裸 JOIN
+```
+
+**正面案例**：
+```sql
+SELECT u.id, o.id FROM users u INNER JOIN orders o ON u.id = o.user_id;
+SELECT u.id, o.id FROM users u LEFT JOIN orders o ON u.id = o.user_id;
+```
+
+---
+
+### DML110 — `max_join_tables`
+
+| 字段 | 值 |
+|------|-----|
+| 文件 | `config/rules/dml/max_join_tables.rhai` |
+| 分组 | `dml-performance` |
+| 严重度 | `warning` |
+| 检测方式 | AST（精确，含隐式逗号 JOIN 与递归子查询） |
+| 对标 | — |
+
+**校验原因**：单条查询关联表数过多会显著增加优化器开销与阅读成本，难以调优。上限为 **5 张表**（FROM 主表 + 各 JOIN 表，含隐式逗号 JOIN 的表），超出即报违规。
+
+**检测逻辑**：基于 AST 的 `SelectInfo.table_count()` 统计每个查询层的总表数，对子查询递归检查。`FROM a JOIN b JOIN c` 计 3 张表；`FROM a, b, c`（隐式逗号 JOIN）同样计 3 张表。
+
+**反面案例**：
+```sql
+-- 6 张表，超过上限
+SELECT a.id, b.col, c.col, d.col, e.col, f.col
+FROM t1 a JOIN t2 b ON a.id = b.a_id JOIN t3 c ON b.id = c.b_id
+JOIN t4 d ON c.id = d.c_id JOIN t5 e ON d.id = e.d_id JOIN t6 f ON e.id = f.e_id;
+```
+
+**正面案例**：
+```sql
+-- 恰好 5 张表
+SELECT a.id, b.col, c.col, d.col, e.col
+FROM t1 a JOIN t2 b ON a.id = b.a_id JOIN t3 c ON b.id = c.b_id
+JOIN t4 d ON c.id = d.c_id JOIN t5 e ON d.id = e.d_id;
 ```
 
 ---

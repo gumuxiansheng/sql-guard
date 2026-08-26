@@ -261,6 +261,9 @@ pub struct JoinInfo {
     pub alias: Option<String>,
     /// ON 子句文本（`JOIN ... ON expr` 中的 expr 文本），便于规则判断 ON 是否引用 JOIN 表。
     pub condition_text: Option<String>,
+    /// JOIN 关键字是否显式指定了类型（LEFT / INNER / RIGHT / FULL / CROSS 等）。
+    /// 仅裸 `JOIN`（sqlparser 的 `JoinOperator::Join`）为 false，供"必须显式指定 JOIN 类型"规则判断。
+    pub explicit_join_type: bool,
     /// 预留位置信息（sqlparser 0.45 AST 节点不带位置，故保持 None）。
     pub line: Option<i64>,
     pub column: Option<i64>,
@@ -347,6 +350,9 @@ pub struct SelectInfo {
     pub projection_exprs: Vec<ExprInfo>,
     // 隐式逗号 JOIN（FROM a, b）
     pub has_comma_join: bool,
+    /// 本查询层 FROM 主表 + 各 JOIN 表 + 隐式逗号 JOIN 表的总表数。
+    /// 供"单条查询 JOIN 表数上限"规则使用。
+    pub table_count: i64,
 }
 
 /// INSERT 语句信息。
@@ -835,6 +841,10 @@ impl SelectInfo {
     pub fn has_comma_join(&self) -> bool {
         self.has_comma_join
     }
+    /// 本查询层 FROM + JOIN（含隐式逗号 JOIN 的表）的总表数。
+    pub fn table_count(&self) -> i64 {
+        self.table_count
+    }
 }
 
 impl JoinInfo {
@@ -858,6 +868,11 @@ impl JoinInfo {
     }
     pub fn has_condition_text(&self) -> bool {
         self.condition_text.is_some()
+    }
+    /// JOIN 关键字是否显式指定了类型（LEFT JOIN / INNER JOIN / CROSS JOIN 等）。
+    /// 裸 `JOIN` 返回 false。
+    pub fn has_explicit_join_type(&self) -> bool {
+        self.explicit_join_type
     }
     pub fn line(&self) -> i64 {
         self.line.unwrap_or(0)

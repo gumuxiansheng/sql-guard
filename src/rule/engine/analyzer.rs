@@ -170,6 +170,12 @@ pub(crate) fn analyze_query(q: &Query) -> SelectInfo {
         }
 
         // 分析 FROM 子句
+        // 总表数 = 每个 TableWithJoins 的主表(1) + 其 JOIN 表数；s.from.len()>1 表示隐式逗号 JOIN
+        info.table_count = s
+            .from
+            .iter()
+            .map(|twj| 1 + twj.joins.len())
+            .sum::<usize>() as i64;
         for table_with_joins in &s.from {
             // 分析主表
             match &table_with_joins.relation {
@@ -202,6 +208,7 @@ pub(crate) fn analyze_query(q: &Query) -> SelectInfo {
                     has_condition,
                     alias,
                     condition_text,
+                    explicit_join_type: join_has_explicit_type(&join.join_operator),
                     line: None,
                     column: None,
                 });
@@ -269,6 +276,13 @@ pub(crate) fn analyze_join_operator(
         JoinOperator::CrossJoin(_) => (table_name, "CROSS".to_string(), true, alias, None),
         _ => (table_name, "OTHER".to_string(), false, alias, None),
     }
+}
+
+/// 判断 JOIN 关键字是否显式指定了类型（LEFT / INNER / RIGHT / FULL / CROSS 等）。
+/// sqlparser 中裸 `JOIN` 解析为 `JoinOperator::Join`，`INNER JOIN` 等显式类型解析为各自的变体，
+/// 因此仅裸 `JOIN` 返回 false。供"JOIN 必须显式指定类型"规则使用。
+pub(crate) fn join_has_explicit_type(op: &JoinOperator) -> bool {
+    !matches!(op, JoinOperator::Join(_))
 }
 
 /// 从 TableFactor 提取表名（或派生表的字符串形式）与别名。
@@ -871,6 +885,69 @@ mod tests {
         let info = analyze_query(&q);
         assert!(!info.joins.is_empty(), "joins should not be empty");
         assert!(info.joins[0].has_condition);
+    }
+
+    // ===== explicit_join_type =====
+
+    #[test]
+    fn test_explicit_join_type_bare_join() {
+        let q = parse_query("SELECT id FROM a JOIN b ON a.id = b.id");
+        let info = analyze_query(&q);
+        assert!(!info.joins[0].explicit_join_type, "bare JOIN has no explicit type");
+    }
+
+    #[test]
+    fn test_explicit_join_type_inner_left() {
+        let q = parse_query(
+            "SELECT id FROM a INNER JOIN b ON a.id = b.id LEFT JOIN c ON b.id = c.id",
+        );
+        let info = analyze_query(&q);
+        assert!(info.joins[0].explicit_join_type, "INNER JOIN is explicit");
+        assert!(info.joins[1].explicit_join_type, "LEFT JOIN is explicit");
+    }
+
+    #[test]
+    fn test_explicit_join_type_cross() {
+        let q = parse_query("SELECT id FROM a CROSS JOIN b");
+        let info = analyze_query(&q);
+        assert!(info.joins[0].explicit_join_type, "CROSS JOIN is explicit");
+    }
+
+    // ===== table_count =====
+
+    #[test]
+    fn test_table_count_single_table() {
+        let q = parse_query("SELECT id FROM users");
+        let info = analyze_query(&q);
+        assert_eq!(info.table_count, 1);
+    }
+
+    #[test]
+    fn test_table_count_with_joins() {
+        let q = parse_query(
+            "SELECT id FROM a JOIN b ON a.id = b.id JOIN c ON b.id = c.id",
+        );
+        let info = analyze_query(&q);
+        assert_eq!(info.table_count, 3);
+    }
+
+    #[test]
+    fn test_table_count_comma_join() {
+        // 隐式逗号 JOIN：a, b, c 共 3 张表
+        let q = parse_query("SELECT a.id, b.id, c.id FROM a, b, c WHERE a.id = b.id");
+        let info = analyze_query(&q);
+        assert_eq!(info.table_count, 3);
+    }
+
+    #[test]
+    fn test_table_count_exceeds_five() {
+        let q = parse_query(
+            "SELECT a.id, b.id, c.id, d.id, e.id, f.id FROM a \
+             JOIN b ON a.id = b.id JOIN c ON b.id = c.id JOIN d ON c.id = d.id \
+             JOIN e ON d.id = e.id JOIN f ON e.id = f.id",
+        );
+        let info = analyze_query(&q);
+        assert_eq!(info.table_count, 6);
     }
 
     #[test]

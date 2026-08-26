@@ -697,6 +697,7 @@ pub fn build_engine() -> Engine {
             .collect()
     });
     engine.register_fn("has_comma_join", |s: &mut SelectInfo| s.has_comma_join());
+    engine.register_fn("table_count", |s: &mut SelectInfo| s.table_count());
 
     // JoinInfo 方法
     engine.register_fn("table_name", |j: &mut JoinInfo| j.table_name());
@@ -707,6 +708,9 @@ pub fn build_engine() -> Engine {
     engine.register_fn("condition_text", |j: &mut JoinInfo| j.condition_text());
     engine.register_fn("has_condition_text", |j: &mut JoinInfo| {
         j.has_condition_text()
+    });
+    engine.register_fn("has_explicit_join_type", |j: &mut JoinInfo| {
+        j.has_explicit_join_type()
     });
     engine.register_fn("line", |j: &mut JoinInfo| j.line());
     engine.register_fn("column", |j: &mut JoinInfo| j.column());
