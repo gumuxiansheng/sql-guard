@@ -246,3 +246,13 @@ enabled = true
 script_path = "config/rules/dml/max_join_tables.rhai"
 applies_to = ["dml"]
 severity = "warning"
+
+[[rules]]
+id = "DML111"
+name = "no_or_in_where"
+group = "dml-performance"
+description = "Do not use OR to combine conditions in WHERE; prefer IN, UNION ALL, or splitting the query"
+enabled = true
+script_path = "config/rules/dml/no_or_in_where.rhai"
+applies_to = ["dml"]
+severity = "warning"

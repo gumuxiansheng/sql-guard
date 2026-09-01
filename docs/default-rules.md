@@ -1,6 +1,6 @@
 # SqlGuard 默认规则手册
 
-SqlGuard 内置 24 条默认规则，分为 **P0（16 条，默认启用）** 和 **P1（8 条，默认禁用）** 两档（7 DDL + 17 DML）。
+SqlGuard 内置 25 条默认规则，分为 **P0（17 条，默认启用）** 和 **P1（8 条，默认禁用）** 两档（7 DDL + 18 DML）。
 
 ## 规则总览
 
@@ -30,6 +30,7 @@ SqlGuard 内置 24 条默认规则，分为 **P0（16 条，默认启用）** �
 | DML108 | `no_constant_where` | dml-convention | warning | P1 | SQLFluff ST10 |
 | DML109 | `join_type_required` | dml-style | warning | P0 | — |
 | DML110 | `max_join_tables` | dml-performance | warning | P0 | — |
+| DML111 | `no_or_in_where` | dml-performance | warning | P0 | — |
 
 ---
 
@@ -490,6 +491,38 @@ JOIN t4 d ON c.id = d.c_id JOIN t5 e ON d.id = e.d_id JOIN t6 f ON e.id = f.e_id
 SELECT a.id, b.col, c.col, d.col, e.col
 FROM t1 a JOIN t2 b ON a.id = b.a_id JOIN t3 c ON b.id = c.b_id
 JOIN t4 d ON c.id = d.c_id JOIN t5 e ON d.id = e.d_id;
+```
+
+---
+
+### DML111 — `no_or_in_where`
+
+| 字段 | 值 |
+|------|-----|
+| 文件 | `config/rules/dml/no_or_in_where.rhai` |
+| 分组 | `dml-performance` |
+| 严重度 | `warning` |
+| 检测方式 | AST WHERE 文本 token 扫描（字符串字面量 / 标识符含 `or` 不误报；递归子查询） |
+| 对标 | — |
+
+**校验原因**：WHERE 中用 `OR` 连接多个条件时，优化器通常无法对单个列走索引——同一列的 `col = 1 OR col = 2` 应改写为 `col IN (1, 2)`；不同列的 `a = 1 OR b = 2` 属"析取扫描"，一般只能分别扫描索引再合并（Index Merge 非所有引擎/版本支持），或直接放弃索引退化为全表扫描。替代写法见 [`docs/sql-guidelines/avoid-or-in-where.md`](sql-guidelines/avoid-or-in-where.md)。
+
+**检测逻辑**：对 SELECT（含递归子查询）、UPDATE、DELETE 的 WHERE 子句文本做 token 扫描，命中独立 `OR` 关键字即报。字符串值内的 `OR`（`WHERE note = 'pending or done'`）与标识符中的 `or`（`WHERE normal_flag = 1`）不会误报。
+
+**反面案例**：
+```sql
+SELECT * FROM users WHERE status = 'active' OR status = 'pending';
+SELECT * FROM users WHERE (a = 1 OR b = 2) AND c = 3;
+SELECT * FROM (SELECT id FROM users WHERE x = 1 OR y = 2) t;   -- 子查询 WHERE
+UPDATE users SET flag = 1 WHERE id = 1 OR id = 2;
+DELETE FROM logs WHERE created_at < '2024-01-01' OR type = 'debug';
+```
+
+**正面案例**：
+```sql
+SELECT * FROM users WHERE status IN ('active', 'pending');    -- 同列多值 → IN
+SELECT * FROM users WHERE a = 1 AND b = 2;                    -- 纯 AND，无 OR
+SELECT * FROM users WHERE note = 'pending or done';           -- 字符串内含 OR，不误报
 ```
 
 ---

@@ -1488,6 +1488,11 @@ fn run_init(target_dir: &Path) -> Result<(), SqlGuardError> {
             "dml",
             include_str!("../config/rules/dml/order_by_required_for_pagination.rhai"),
         ),
+        (
+            "no_or_in_where",
+            "dml",
+            include_str!("../config/rules/dml/no_or_in_where.rhai"),
+        ),
     ];
 
     for (name, rule_type, content) in rules {
@@ -1506,7 +1511,7 @@ fn run_init(target_dir: &Path) -> Result<(), SqlGuardError> {
     println!("  - sqlguard.toml          # 主配置（结构/分类/输出/扫描/文件检查）");
     println!("  - sqlguard.rules.toml    # 规则配置（[[rules]] 单独拆分，避免文件过长）");
     println!("  - config/rules/ddl/ (7 rule files)");
-    println!("  - config/rules/dml/ (15 rule files)");
+    println!("  - config/rules/dml/ (16 rule files)");
     println!();
     println!("Run: sqlguard check <project_path>");
     Ok(())
@@ -1760,6 +1765,16 @@ fn generate_default_config() -> Config {
                 description: Some("Avoid constant conditions in WHERE clause".to_string()),
                 enabled: false,
                 script_path: "config/rules/dml/no_constant_where.rhai".into(),
+                applies_to: vec!["dml".to_string()],
+                severity: "warning".to_string(),
+            },
+            sqlguard::config::RuleConfig {
+                id: "DML111".to_string(),
+                name: "no_or_in_where".to_string(),
+                group: Some("dml-performance".to_string()),
+                description: Some("Do not use OR to combine conditions in WHERE; prefer IN, UNION ALL, or splitting the query".to_string()),
+                enabled: true,
+                script_path: "config/rules/dml/no_or_in_where.rhai".into(),
                 applies_to: vec!["dml".to_string()],
                 severity: "warning".to_string(),
             },
@@ -2127,6 +2142,16 @@ group = "dml-convention"
 description = "Avoid constant/tautology conditions in WHERE clause (e.g. 1=1, 2=2, 'a'='a', TRUE)"
 enabled = true
 script_path = "config/rules/dml/no_constant_where.rhai"
+applies_to = ["dml"]
+severity = "warning"
+
+[[rules]]
+id = "DML111"
+name = "no_or_in_where"
+group = "dml-performance"
+description = "Do not use OR to combine conditions in WHERE; prefer IN, UNION ALL, or splitting the query"
+enabled = true
+script_path = "config/rules/dml/no_or_in_where.rhai"
 applies_to = ["dml"]
 severity = "warning"
 "#

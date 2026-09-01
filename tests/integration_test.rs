@@ -3215,3 +3215,180 @@ fn test_no_constant_where_flags_tautology() {
     );
     let _ = std::fs::remove_dir_all(good_dir);
 }
+
+#[test]
+fn test_check_no_or_in_where() {
+    // DML111 no_or_in_where：WHERE 子句禁用 OR 连接条件
+    //   A. SELECT WHERE 含 OR（同列）        → 触发
+    //   B. SELECT WHERE 含 OR（跨列、括号）   → 触发
+    //   C. SELECT 子查询 WHERE 含 OR          → 触发（递归子查询）
+    //   D. UPDATE WHERE 含 OR                 → 触发
+    //   E. DELETE WHERE 含 OR                 → 触发
+    //   F. IN 列表（无 OR）                    → 不触发
+    //   G. 纯 AND                             → 不触发
+    //   H. 字符串值内含 OR                     → 不触发（token 精确匹配）
+    //   I. 标识符含 or（normal_flag）          → 不触发
+    let dir = "/tmp/sqlguard-test-no-or-in-where";
+    let _ = std::fs::remove_dir_all(dir);
+
+    std::fs::create_dir_all(format!("{}/sql/dml", dir)).unwrap();
+    std::fs::create_dir_all(format!("{}/config/rules/dml", dir)).unwrap();
+
+    // 从仓库复制规则脚本
+    let rule_dir = std::env::current_dir().unwrap().join("config/rules/dml");
+    std::fs::write(
+        format!("{}/config/rules/dml/no_or_in_where.rhai", dir),
+        std::fs::read_to_string(rule_dir.join("no_or_in_where.rhai")).unwrap(),
+    )
+    .unwrap();
+
+    // A: 同列 OR（应触发 DML111）
+    std::fs::write(
+        format!("{}/sql/dml/a_same_col_or.sql", dir),
+        "SELECT * FROM users WHERE status = 'active' OR status = 'pending';\n",
+    )
+    .unwrap();
+    // B: 跨列 OR + 括号（应触发 DML111）
+    std::fs::write(
+        format!("{}/sql/dml/b_cross_col_or.sql", dir),
+        "SELECT * FROM users WHERE (a = 1 OR b = 2) AND c = 3;\n",
+    )
+    .unwrap();
+    // C: 子查询 WHERE 含 OR（应触发 DML111）
+    std::fs::write(
+        format!("{}/sql/dml/c_subquery_or.sql", dir),
+        "SELECT * FROM (SELECT id FROM users WHERE x = 1 OR y = 2) t;\n",
+    )
+    .unwrap();
+    // D: UPDATE WHERE 含 OR（应触发 DML111）
+    std::fs::write(
+        format!("{}/sql/dml/d_update_or.sql", dir),
+        "UPDATE users SET flag = 1 WHERE id = 1 OR id = 2;\n",
+    )
+    .unwrap();
+    // E: DELETE WHERE 含 OR（应触发 DML111）
+    std::fs::write(
+        format!("{}/sql/dml/e_delete_or.sql", dir),
+        "DELETE FROM logs WHERE created_at < '2024-01-01' OR type = 'debug';\n",
+    )
+    .unwrap();
+    // F: IN 列表（不应触发 DML111）
+    std::fs::write(
+        format!("{}/sql/dml/f_in_list.sql", dir),
+        "SELECT * FROM users WHERE status IN ('active', 'pending');\n",
+    )
+    .unwrap();
+    // G: 纯 AND（不应触发 DML111）
+    std::fs::write(
+        format!("{}/sql/dml/g_and_only.sql", dir),
+        "SELECT * FROM users WHERE a = 1 AND b = 2;\n",
+    )
+    .unwrap();
+    // H: 字符串值内含 OR（不应触发 DML111）
+    std::fs::write(
+        format!("{}/sql/dml/h_string_or.sql", dir),
+        "SELECT * FROM users WHERE note = 'pending or done';\n",
+    )
+    .unwrap();
+    // I: 标识符含 or（不应触发 DML111）
+    std::fs::write(
+        format!("{}/sql/dml/i_ident_or.sql", dir),
+        "SELECT * FROM users WHERE normal_flag = 1;\n",
+    )
+    .unwrap();
+
+    std::fs::write(
+        format!("{}/sqlguard.toml", dir),
+        r#"
+[structure]
+paths = ["sql/dml"]
+strict = false
+
+[classification]
+default_type = "sql"
+
+[[classification.rules]]
+name = "dml-by-dir"
+pattern = "**/dml/**"
+type = "dml"
+priority = 10
+
+[[rules]]
+id = "DML111"
+name = "no_or_in_where"
+group = "dml-performance"
+enabled = true
+script_path = "config/rules/dml/no_or_in_where.rhai"
+applies_to = ["dml"]
+severity = "warning"
+
+[output]
+formats = ["json"]
+"#,
+    )
+    .unwrap();
+
+    let output = Command::new(binary_abs_path())
+        .args([
+            "check",
+            dir,
+            "-c",
+            &format!("{}/sqlguard.toml", dir),
+            "-f",
+            "json",
+            "-o",
+            dir,
+        ])
+        .output()
+        .expect("Failed to run sqlguard check");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("JSON report saved"),
+        "JSON report should be saved: {}",
+        stderr
+    );
+
+    let report_path = format!("{}/sqlguard-report.json", dir);
+    let content = std::fs::read_to_string(&report_path).unwrap();
+    let report: serde_json::Value = serde_json::from_str(&content).unwrap();
+
+    // 收集 文件 -> 触发规则集合
+    let mut by_file: std::collections::HashMap<String, std::collections::HashSet<String>> =
+        std::collections::HashMap::new();
+    if let Some(violations) = report["violations"].as_array() {
+        for v in violations {
+            let f = v["file"].as_str().unwrap().to_string();
+            let rid = v["rule_id"].as_str().unwrap().to_string();
+            by_file.entry(f).or_default().insert(rid);
+        }
+    }
+    let rules_of = |name: &str| -> std::collections::HashSet<String> {
+        by_file
+            .iter()
+            .find(|(f, _)| f.contains(name))
+            .map(|(_, s)| s.clone())
+            .unwrap_or_default()
+    };
+
+    // A-E: WHERE 含 OR → 应有 DML111
+    for case in ["a_same_col_or", "b_cross_col_or", "c_subquery_or", "d_update_or", "e_delete_or"] {
+        assert!(
+            rules_of(&format!("{}.sql", case)).contains("DML111"),
+            "{} should trigger DML111: {:?}",
+            case,
+            rules_of(&format!("{}.sql", case))
+        );
+    }
+    // F-I: 无 OR → 不应有 DML111
+    for case in ["f_in_list", "g_and_only", "h_string_or", "i_ident_or"] {
+        assert!(
+            !rules_of(&format!("{}.sql", case)).contains("DML111"),
+            "{} should NOT trigger DML111: {:?}",
+            case,
+            rules_of(&format!("{}.sql", case))
+        );
+    }
+
+    let _ = std::fs::remove_dir_all(dir);
+}

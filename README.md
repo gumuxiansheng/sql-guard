@@ -160,7 +160,7 @@ sqlguard --help
 sqlguard init .
 ```
 
-生成 `sqlguard.toml`（主配置）+ `sqlguard.rules.toml`（规则配置）+ 22 条内置规则脚本（7 DDL + 15 DML）+ 示例 SQL 目录结构。规则配置单独拆分到 `sqlguard.rules.toml`，避免主配置文件随规则增多而过长。
+生成 `sqlguard.toml`（主配置）+ `sqlguard.rules.toml`（规则配置）+ 25 条内置规则脚本（7 DDL + 18 DML）+ 示例 SQL 目录结构。规则配置单独拆分到 `sqlguard.rules.toml`，避免主配置文件随规则增多而过长。
 
 ### 编写 SQL 脚本
 
