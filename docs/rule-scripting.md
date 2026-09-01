@@ -201,7 +201,10 @@ AST 包装类型定义于 [`src/rule/engine/ast.rs`](../src/rule/engine/ast.rs)�
 | 方法 | 返回类型 | 说明 |
 |------|----------|------|
 | `has_wildcard()` | bool | 是否含 `*` 或 `table.*`（递归覆盖顶层、UNION/集合运算分支、FROM/JOIN 子查询） |
-| `projection()` | Array&lt;String&gt; | 顶层投影项文本表示 |
+| `has_bare_wildcard()` | bool | 本层是否含**裸** `SELECT *`（`t1.*` 这类限定通配符不算）。出现裸星号时无法判断各 JOIN 表是否被使用，规则应跳过 |
+| `referenced_qualifiers()` | Array&lt;String&gt; | 查询体真实引用到的表限定符（大写、去重），来源：投影（含 `t.*`）、WHERE、GROUP BY、HAVING、QUALIFY、ORDER BY；**不含 JOIN 的 ON 条件** |
+| `is_qualifier_referenced(name)` | bool | 某个别名/表名是否在查询体中被引用（大小写不敏感），等价于 `referenced_qualifiers()` 的包含判断 |
+| `projection()` | Array&lt;String&gt; | 顶层投影项文本表示（**含 `*` 与 `t1.*` 通配符项**） |
 | `has_from_table()` | bool | 是否含 FROM 表 |
 | `from_table()` | String | 第一张 FROM 表名（无则空串） |
 | `from_table_alias()` | String | 主表别名（`FROM users u` 中的 `u`，无则空串） |
@@ -246,6 +249,7 @@ AST 包装类型定义于 [`src/rule/engine/ast.rs`](../src/rule/engine/ast.rs)�
 | 方法 | 返回类型 | 说明 |
 |------|----------|------|
 | `table_name()` | String | JOIN 的目标表名（不含别名） |
+| `table_name_leaf()` | String | 去掉 schema 限定的表名（`ofsm.cdeorg` → `cdeorg`），用于匹配不带 schema 的列引用（`cdeorg.col`） |
 | `join_type()` | String | `INNER` / `LEFT` / `RIGHT` / `FULL` / `CROSS` / `OTHER` |
 | `has_condition()` | bool | 是否带 ON/USING 条件（CROSS JOIN 恒为 true） |
 | `alias()` | String | JOIN 目标表别名（`JOIN orders o` 中的 `o`，无则空串） |

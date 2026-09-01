@@ -508,9 +508,11 @@ JOIN t4 d ON c.id = d.c_id JOIN t5 e ON d.id = e.d_id;
 
 **校验原因**：未使用的 JOIN 表不必要地消耗数据库资源，可能是重构遗留。
 
-**检测逻辑**：基于 `JoinInfo.alias()` 与 `JoinInfo.table_name()` 两个 needle，检查是否在 `SelectInfo.projection()` 或 `SelectInfo.where_clause()` 中被引用。**别名优先**——`JOIN orders o` 时优先匹配 `o`，无别名才匹配 `orders`，修复了旧版"投影 `o.id` 但用 `orders` 匹配失败"的误报。
+**检测逻辑**：基于 AST 限定符精确匹配。规则用 `SelectInfo.is_qualifier_referenced()` 判断 JOIN 的表（**别名优先**，无别名回退 `table_name()` / `table_name_leaf()`）是否在查询体中被引用。引用范围由引擎的 `SelectInfo.referenced_qualifiers` 提供，覆盖：**投影（含 `t.*` 限定通配符）、WHERE、GROUP BY、HAVING、QUALIFY、ORDER BY**；JOIN 的 ON 条件刻意不计入（右表通常只在 ON 出现一次，那样仍属"未被使用"）。裸 `SELECT *`（`has_bare_wildcard()`）引用了所有表，整体跳过。
 
-**注意**：仍是启发式，可能漏报仅用于 HAVING / GROUP BY 的 JOIN；JOIN 仅在 WHERE 过滤的情况已通过把 `where_clause()` 一并加入可见文本来缓解。
+**误判修复记录**：早期版本用"投影文本子串 contains"匹配且投影列表不含通配符项，导致 `SELECT t1.* ... LEFT JOIN ... t1`、`SELECT * ... JOIN ...`、`... ORDER BY o.created_at` 三类真实引用被误报；现已全部修复。
+
+**注意**：仍是启发式；限定符按"最后一个点之前"对齐，故 `ofsm.cdeorg.col`（三段式）与 `cdeorg.col`（两段式）均可命中 `JOIN ofsm.cdeorg t1`。
 
 **反面案例**：
 ```sql
@@ -521,6 +523,10 @@ SELECT u.id, u.name FROM users u JOIN unused_table t ON u.id = t.user_id;
 ```sql
 SELECT u.id, u.name FROM users u;
 SELECT o.id FROM orders o JOIN users u ON o.user_id = u.id;  -- u 通过 ON 引用
+SELECT t1.* FROM ofsm.cdeusr t2 LEFT JOIN ofsm.cdeorg t1
+    ON t2.ibkcde = t1.orgno WHERE t2.usr_uid = :usrUid;      -- t1.* 已使用 t1
+SELECT * FROM users u JOIN orders o ON u.id = o.user_id;     -- 裸 * 使用了所有表
+SELECT u.id FROM users u JOIN orders o ON u.id = o.user_id ORDER BY o.created_at;
 ```
 
 ---

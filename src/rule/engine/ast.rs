@@ -308,6 +308,13 @@ pub struct ExprInfo {
 #[derive(Debug, Clone, Default)]
 pub struct SelectInfo {
     pub has_wildcard: bool,
+    /// 是否存在"裸" `SELECT *`（相对 `t.*` 这类带表限定的通配符）。
+    /// 出现裸星号时无法判断各 JOIN 表是否被使用，规则应跳过。
+    pub has_bare_wildcard: bool,
+    /// 本查询层真实引用到的表限定符（大写、去重）。
+    /// 来源：投影（含 `t.*` 限定通配符）、WHERE、GROUP BY、HAVING、QUALIFY、ORDER BY。
+    /// 不含 JOIN 的 ON 条件——右表通常只在 ON 里出现，按 SQLFluff ST11 语义视为"未被使用"。
+    pub referenced_qualifiers: Vec<String>,
     pub projection: Vec<String>,
     pub from_table: Option<String>,
     /// 主表别名（`FROM users u` 中的 `u`）。
@@ -727,6 +734,23 @@ impl SelectInfo {
     pub fn projection(&self) -> Vec<String> {
         self.projection.clone()
     }
+    /// 是否存在裸 `SELECT *`（`t.*` 这类限定通配符不算）。
+    pub fn has_bare_wildcard(&self) -> bool {
+        self.has_bare_wildcard
+    }
+    /// 本查询层引用到的表限定符（大写、去重）。
+    pub fn referenced_qualifiers(&self) -> Vec<String> {
+        self.referenced_qualifiers.clone()
+    }
+    /// 判断某个别名/表名是否在本查询体中被真实引用（大小写不敏感）。
+    /// 用于 no_unused_join 判断 JOIN 的表是否出现在 SELECT/WHERE/GROUP BY/HAVING/ORDER BY 中。
+    pub fn is_qualifier_referenced(&self, name: &str) -> bool {
+        if name.is_empty() {
+            return false;
+        }
+        let upper = name.to_uppercase();
+        self.referenced_qualifiers.iter().any(|q| q == &upper)
+    }
     pub fn has_from_table(&self) -> bool {
         self.from_table.is_some()
     }
@@ -850,6 +874,15 @@ impl SelectInfo {
 impl JoinInfo {
     pub fn table_name(&self) -> String {
         self.table_name.clone()
+    }
+    /// 去掉 schema 限定的表名（`ofsm.cdeorg` → `cdeorg`）。
+    /// 供规则在"列引用不带 schema"（`cdeorg.col`）时也能匹配到该表。
+    pub fn table_name_leaf(&self) -> String {
+        self.table_name
+            .rsplit('.')
+            .next()
+            .unwrap_or(&self.table_name)
+            .to_string()
     }
     pub fn join_type(&self) -> String {
         self.join_type.clone()

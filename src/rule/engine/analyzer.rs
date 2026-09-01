@@ -116,6 +116,10 @@ pub(crate) fn analyze_query(q: &Query) -> SelectInfo {
             match item {
                 SelectItem::Wildcard(_) => {
                     info.has_wildcard = true;
+                    info.has_bare_wildcard = true;
+                    // 裸星号也要进入 projection，否则依赖投影文本的规则（如 no_unused_join）
+                    // 会拿到一个空投影，把"用了所有表"误判成"所有 JOIN 都没用"。
+                    info.projection.push("*".to_string());
                     info.projection_exprs.push(ExprInfo {
                         kind: "WILDCARD".to_string(),
                         text: "*".to_string(),
@@ -124,9 +128,15 @@ pub(crate) fn analyze_query(q: &Query) -> SelectInfo {
                 }
                 SelectItem::QualifiedWildcard(obj, _) => {
                     info.has_wildcard = true;
+                    // sqlparser 0.60 的 ObjectName Display 已带 `.*`（如 `t1.*`），
+                    // 不能再拼一次，否则会得到 `t1.*.*`。
+                    // `t1.*` 是"引用了 t1 的所有列"，必须进 projection 文本，
+                    // 否则规则看不到 t1，会把它当成未使用的 JOIN 误报。
+                    let text = obj.to_string();
+                    info.projection.push(text.clone());
                     info.projection_exprs.push(ExprInfo {
                         kind: "WILDCARD".to_string(),
-                        text: obj.to_string() + ".*",
+                        text,
                         ..Default::default()
                     });
                 }
@@ -221,6 +231,40 @@ pub(crate) fn analyze_query(q: &Query) -> SelectInfo {
         }
     }
 
+    // 引用限定符收集（供 DML101 no_unused_join 判断 JOIN 表是否真的被使用）
+    // 只有"真正使用了表的列"才算引用：投影 + WHERE + GROUP BY + HAVING + QUALIFY + ORDER BY。
+    // 刻意不含 JOIN 的 ON 条件——右表通常只在 ON 条件里出现一次，那样仍属"未被使用"。
+    let mut qualifiers: Vec<String> = Vec::new();
+    for text in &info.projection {
+        collect_qualifiers_from_text(text, &mut qualifiers);
+    }
+    if let Some(w) = &info.where_clause {
+        collect_qualifiers_from_text(w, &mut qualifiers);
+    }
+    if let SetExpr::Select(s) = &*q.body {
+        if let GroupByExpr::Expressions(exprs, _) = &s.group_by {
+            for e in exprs {
+                collect_qualifiers_from_text(&e.to_string(), &mut qualifiers);
+            }
+        }
+        if let Some(h) = &s.having {
+            collect_qualifiers_from_text(&h.to_string(), &mut qualifiers);
+        }
+        if let Some(ql) = &s.qualify {
+            collect_qualifiers_from_text(&ql.to_string(), &mut qualifiers);
+        }
+    }
+    // ORDER BY 在 Query 层（集合运算整体排序）。sqlparser 0.60：OrderBy { kind, interpolate }，
+    // 表达式在 OrderByKind::Expressions 中。
+    if let Some(ob) = &q.order_by {
+        if let sqlparser::ast::OrderByKind::Expressions(exprs) = &ob.kind {
+            for o in exprs {
+                collect_qualifiers_from_text(&o.expr.to_string(), &mut qualifiers);
+            }
+        }
+    }
+    info.referenced_qualifiers = qualifiers;
+
     // 子查询递归收集（FROM 子查询 / WHERE 子查询 / EXISTS / 集合运算的括号分支）
     let mut subs = Vec::new();
     collect_subqueries_in_query(q, &mut subs, 0);
@@ -230,6 +274,48 @@ pub(crate) fn analyze_query(q: &Query) -> SelectInfo {
     }
 
     info
+}
+
+/// 从一段 SQL 文本中抽取"表限定符"（`t1.col` / `t1.*` / `SUM(t2.amt)` 中的 `t1`/`t2`）。
+///
+/// 用于判断某张表是否真的被查询体引用（DML101 no_unused_join）。实现要点：
+/// - 取标识符中**最后一个点之前**的部分：`t1.col`/`t1.*` → `T1`，
+///   `ofsm.cdeorg.col`（三段式）→ `OFSM.CDEORG`，与表名/别名对齐；
+/// - 单引号字符串字面量内部整体跳过，避免 `'a.b'` 被误当成列引用；
+/// - 纯数字字面量（如 `1.5`）不产生限定符；
+/// - 结果统一大写并去重，便于大小写不敏感比较。
+pub(crate) fn collect_qualifiers_from_text(text: &str, out: &mut Vec<String>) {
+    let mut token = String::new();
+    let mut in_string = false;
+
+    let flush = |token: &mut String, out: &mut Vec<String>| {
+        let t = token.trim().trim_matches('"').trim_matches('\'');
+        if let Some(pos) = t.rfind('.') {
+            let q = t[..pos].trim().trim_matches('"').to_uppercase();
+            let is_numeric = q.chars().next().is_some_and(|c| c.is_ascii_digit());
+            if !q.is_empty() && !is_numeric && !out.contains(&q) {
+                out.push(q);
+            }
+        }
+        token.clear();
+    };
+
+    for c in text.chars() {
+        if c == '\'' {
+            flush(&mut token, out);
+            in_string = !in_string;
+            continue;
+        }
+        if in_string {
+            continue;
+        }
+        if c.is_alphanumeric() || c == '_' || c == '$' || c == '.' || c == '"' {
+            token.push(c);
+        } else {
+            flush(&mut token, out);
+        }
+    }
+    flush(&mut token, out);
 }
 
 /// 分析一个 JOIN 的操作符与目标表，返回
@@ -1232,5 +1318,100 @@ mod tests {
         let q = parse_query("SELECT x IS NULL FROM t");
         let info = analyze_expr(first_proj_expr(&q));
         assert!(info.has_null_test);
+    }
+
+    // ---- 限定符抽取（no_unused_join DML101 误判修复）----
+
+    #[test]
+    fn test_collect_qualifiers_from_text() {
+        let mut out = Vec::new();
+        collect_qualifiers_from_text("t1.*", &mut out);
+        assert_eq!(out, vec!["T1".to_string()]);
+
+        let mut out = Vec::new();
+        collect_qualifiers_from_text("SUM(t2.amt) AS total", &mut out);
+        assert_eq!(out, vec!["T2".to_string()]);
+
+        // 三段式：限定符保留 schema，与 JOIN 表名 ofsm.cdeorg 对齐
+        let mut out = Vec::new();
+        collect_qualifiers_from_text("ofsm.cdeorg.orgno", &mut out);
+        assert_eq!(out, vec!["OFSM.CDEORG".to_string()]);
+
+        // 字符串字面量内的点号不算列引用
+        let mut out = Vec::new();
+        collect_qualifiers_from_text("t1.code = 'a.b'", &mut out);
+        assert_eq!(out, vec!["T1".to_string()]);
+
+        // 纯数字字面量不产生限定符
+        let mut out = Vec::new();
+        collect_qualifiers_from_text("t1.amt > 1.5", &mut out);
+        assert_eq!(out, vec!["T1".to_string()]);
+    }
+
+    /// 回归用例：SELECT t1.* ... LEFT JOIN ofsm.cdeorg t1
+    /// 限定通配符必须进入 projection，且 t1 被视为"已引用"，否则 DML101 误报。
+    #[test]
+    fn test_qualified_wildcard_is_referenced() {
+        let q = parse_query(
+            "SELECT t1.* FROM ofsm.cdeusr t2 LEFT JOIN ofsm.cdeorg t1 ON t2.ibkcde = t1.orgno WHERE t2.usr_uid = :usrUid",
+        );
+        let info = analyze_query(&q);
+        assert!(
+            info.projection.contains(&"t1.*".to_string()),
+            "限定通配符 t1.* 必须进入 projection：{:?}",
+            info.projection
+        );
+        assert!(!info.has_bare_wildcard);
+        assert!(info.is_qualifier_referenced("t1"));
+        assert!(info.is_qualifier_referenced("T1"));
+        assert!(info.is_qualifier_referenced("t2"));
+        assert!(!info.is_qualifier_referenced("t3"));
+        // JOIN 表名（含/不含 schema）都可匹配
+        assert_eq!(info.joins[0].table_name, "ofsm.cdeorg");
+        assert_eq!(info.joins[0].alias, Some("t1".to_string()));
+        assert_eq!(info.joins[0].table_name_leaf(), "cdeorg");
+    }
+
+    /// 裸 SELECT *：所有表都被引用，规则应跳过（has_bare_wildcard = true）。
+    #[test]
+    fn test_bare_wildcard_flag() {
+        let q = parse_query("SELECT * FROM users u JOIN orders o ON u.id = o.user_id");
+        let info = analyze_query(&q);
+        assert!(info.has_bare_wildcard);
+        assert!(info.projection.contains(&"*".to_string()));
+    }
+
+    /// ORDER BY / GROUP BY / HAVING 中的列引用也算"使用"该表。
+    #[test]
+    fn test_order_by_and_group_by_qualifiers() {
+        let q = parse_query(
+            "SELECT u.id FROM users u JOIN orders o ON u.id = o.user_id ORDER BY o.created_at",
+        );
+        let info = analyze_query(&q);
+        assert!(
+            info.is_qualifier_referenced("o"),
+            "ORDER BY o.created_at 应视为引用了 o：{:?}",
+            info.referenced_qualifiers
+        );
+
+        let q = parse_query(
+            "SELECT u.id FROM users u JOIN orders o ON u.id = o.user_id GROUP BY u.id HAVING COUNT(o.id) > 1",
+        );
+        let info = analyze_query(&q);
+        assert!(info.is_qualifier_referenced("o"));
+        assert!(info.is_qualifier_referenced("u"));
+    }
+
+    /// JOIN 的 ON 条件不算引用：右表只在 ON 中出现时仍应判为未使用。
+    #[test]
+    fn test_on_condition_is_not_a_reference() {
+        let q = parse_query("SELECT u.id FROM users u JOIN orders o ON u.id = o.user_id");
+        let info = analyze_query(&q);
+        assert!(info.is_qualifier_referenced("u"));
+        assert!(
+            !info.is_qualifier_referenced("o"),
+            "o 只出现在 ON 条件，不应算被引用：{:?}",
+            info.referenced_qualifiers
+        );
     }
 }

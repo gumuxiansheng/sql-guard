@@ -629,6 +629,20 @@ pub fn build_engine() -> Engine {
     engine.register_fn("projection", |s: &mut SelectInfo| -> Array {
         s.projection().into_iter().map(Dynamic::from).collect()
     });
+    // 裸 `SELECT *`（`t.*` 不算）——出现时无法判断各表是否被使用
+    engine.register_fn("has_bare_wildcard", |s: &mut SelectInfo| {
+        s.has_bare_wildcard()
+    });
+    // 查询体真实引用到的表限定符（投影/WHERE/GROUP BY/HAVING/QUALIFY/ORDER BY，不含 ON）
+    engine.register_fn("referenced_qualifiers", |s: &mut SelectInfo| -> Array {
+        s.referenced_qualifiers()
+            .into_iter()
+            .map(Dynamic::from)
+            .collect()
+    });
+    engine.register_fn("is_qualifier_referenced", |s: &mut SelectInfo, name: String| {
+        s.is_qualifier_referenced(&name)
+    });
     engine.register_fn("has_from_table", |s: &mut SelectInfo| s.has_from_table());
     engine.register_fn("from_table", |s: &mut SelectInfo| s.from_table());
     engine.register_fn("from_table_alias", |s: &mut SelectInfo| {
@@ -705,6 +719,10 @@ pub fn build_engine() -> Engine {
     engine.register_fn("has_condition", |j: &mut JoinInfo| j.has_condition());
     engine.register_fn("alias", |j: &mut JoinInfo| j.alias());
     engine.register_fn("has_alias", |j: &mut JoinInfo| j.has_alias());
+    // 去掉 schema 前缀的表名（`ofsm.cdeorg` → `cdeorg`）
+    engine.register_fn("table_name_leaf", |j: &mut JoinInfo| {
+        j.table_name_leaf()
+    });
     engine.register_fn("condition_text", |j: &mut JoinInfo| j.condition_text());
     engine.register_fn("has_condition_text", |j: &mut JoinInfo| {
         j.has_condition_text()
