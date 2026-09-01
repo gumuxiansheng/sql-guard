@@ -448,10 +448,12 @@ impl Config {
         //   2) 同级 `sqlguard.rules.toml` 存在 -> 从该文件加载
         //   3) 否则沿用主配置内联的 `[[rules]]`（保持向后兼容）
         if let Some(rf) = &config.rules_file {
+            // P2-2：绝对路径保持允许（兼容现有用法）；
+            // 相对路径必须解析到 config 目录内，拦截 `../../xxx` 之类的目录逃逸。
             let rules_path = if rf.is_absolute() {
                 rf.clone()
             } else {
-                config_dir.join(rf)
+                Self::sanitize_relative_rules_path(&config_dir.join(rf), &config_dir)?
             };
             let loaded = Self::load_rules_file(&rules_path)?;
             config.rules = loaded;
@@ -479,6 +481,42 @@ impl Config {
                 self.scan.encoding, e
             ))
         })
+    }
+
+    /// P2-2：校验相对 `rules_file` 路径不逃逸 config 目录（拦截 `..` 组件与符号链接）。
+    ///
+    /// canonicalize 成功（文件存在）时要求解析结果仍在 config 目录内；
+    /// canonicalize 失败（文件不存在）时退化为组件检查，拒绝显式 `..` 逃逸，
+    /// 其余情形交由后续 `load_rules_file` 给出更友好的「文件读取失败」错误。
+    fn sanitize_relative_rules_path(
+        rules_path: &Path,
+        config_dir: &Path,
+    ) -> Result<PathBuf, SqlGuardError> {
+        use std::path::Component;
+        if let Ok(canonical) = rules_path.canonicalize() {
+            let config_canonical = config_dir
+                .canonicalize()
+                .unwrap_or_else(|_| config_dir.to_path_buf());
+            if canonical.starts_with(&config_canonical) {
+                return Ok(canonical);
+            }
+            return Err(SqlGuardError::ConfigError(format!(
+                "rules_file '{}' resolves outside the config directory '{}'",
+                rules_path.display(),
+                config_dir.display()
+            )));
+        }
+        if rules_path
+            .components()
+            .any(|c| matches!(c, Component::ParentDir))
+        {
+            return Err(SqlGuardError::ConfigError(format!(
+                "rules_file '{}' escapes the config directory '{}'",
+                rules_path.display(),
+                config_dir.display()
+            )));
+        }
+        Ok(rules_path.to_path_buf())
     }
 
     /// 从独立的规则文件（仅含 `[[rules]]` 数组）加载规则列表。
@@ -832,5 +870,86 @@ type = "sql"
         );
         assert_eq!(CheckDialect::parse_dialect("gauss"), CheckDialect::GaussDB);
         assert_eq!(CheckDialect::parse_dialect("GAUSS"), CheckDialect::GaussDB);
+    }
+
+    // ===== rules_file 路径校验（P2-2） =====
+
+    /// 生成一个最小可解析的主配置文本（classification.rules 为必填项）。
+    fn minimal_config(rules_file: &str) -> String {
+        format!(
+            "rules_file = \"{}\"\n\n\
+             [structure]\n\
+             paths = [\"x\"]\n\n\
+             [classification]\n\
+             default_type = \"other\"\n\n\
+             [[classification.rules]]\n\
+             name = \"sql-by-ext\"\n\
+             pattern = \"*.sql\"\n\
+             type = \"sql\"\n",
+            rules_file
+        )
+    }
+
+    #[test]
+    fn config_rules_file_escaping_rejected() {
+        let dir = std::env::temp_dir().join("sqlguard_cfg_escape_test");
+        let _ = std::fs::remove_dir_all(&dir);
+        let cfg_dir = dir.join("cfg");
+        std::fs::create_dir_all(&cfg_dir).unwrap();
+        // 逃逸目标文件放在 cfg 目录之外、dir 之内：确保 canonicalize 能解析，
+        // 走「规范化后越界」分支而非「文件不存在」的组件检查分支。
+        let outside = dir.join("outside_rules.toml");
+        std::fs::write(&outside, "[[rules]]\nid = \"X1\"\nname = \"x\"\nscript_path = \"x.rhai\"\napplies_to = [\"ddl\"]\n").unwrap();
+
+        let cfg_path = cfg_dir.join("sqlguard.toml");
+        std::fs::write(&cfg_path, minimal_config("../outside_rules.toml")).unwrap();
+
+        let result = Config::load(&cfg_path);
+        assert!(
+            result.is_err(),
+            "rules_file escaping the config dir must be rejected"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn config_rules_file_missing_with_parent_dir_rejected() {
+        // 文件不存在 + 显式 `..`：走组件检查分支，同样拒绝
+        let dir = std::env::temp_dir().join("sqlguard_cfg_escape_missing_test");
+        let _ = std::fs::remove_dir_all(&dir);
+        let cfg_dir = dir.join("cfg");
+        std::fs::create_dir_all(&cfg_dir).unwrap();
+
+        let cfg_path = cfg_dir.join("sqlguard.toml");
+        std::fs::write(&cfg_path, minimal_config("../no_such_rules.toml")).unwrap();
+
+        let result = Config::load(&cfg_path);
+        assert!(result.is_err(), "rules_file with '..' must be rejected");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn config_rules_file_relative_inside_loaded() {
+        let dir = std::env::temp_dir().join("sqlguard_cfg_relative_test");
+        let _ = std::fs::remove_dir_all(&dir);
+        let cfg_dir = dir.join("cfg");
+        std::fs::create_dir_all(&cfg_dir).unwrap();
+        std::fs::write(
+            cfg_dir.join("my.rules.toml"),
+            "[[rules]]\nid = \"DDL001\"\nname = \"r\"\nscript_path = \"x.rhai\"\napplies_to = [\"ddl\"]\n",
+        )
+        .unwrap();
+
+        let cfg_path = cfg_dir.join("sqlguard.toml");
+        std::fs::write(&cfg_path, minimal_config("my.rules.toml")).unwrap();
+
+        let cfg = Config::load(&cfg_path).expect("rules_file inside config dir should load");
+        assert_eq!(cfg.rules.len(), 1);
+        assert_eq!(cfg.rules[0].id, "DDL001");
+        // rules_dir 应指向规则文件所在目录（即 config 目录），
+        // 与 canonicalize 后的实际路径比较（canonicalize 可能带 \\?\ 前缀）
+        let expected_dir = cfg_dir.canonicalize().unwrap();
+        assert_eq!(cfg.rules_dir, expected_dir);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

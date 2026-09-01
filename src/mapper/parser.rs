@@ -38,6 +38,12 @@ pub struct ExtractedSql {
     /// `"select"` / `"insert"` / `"update"` / `"delete"`。
     pub statement_type: String,
     /// `<select>` 标签在 XML 文件中的起始行号（1-indexed）。
+    ///
+    /// **近似值说明**：违规行号由「渲染后 SQL 的行号 + `raw_xml_line - 1`」映射而来。
+    /// 渲染会把 `<if>`/`<where>` 等动态标签本身占用的行删除、把分支文本拼入，
+    /// 因此含**多行**动态标签的语句，其违规行号可能与 XML 实际行有 ± 几行偏差；
+    /// 单个标签起始行（即本字段所指位置）附近是准确的。此误差只影响展示行号，
+    /// 不影响违规判定本身。
     pub raw_xml_line: usize,
     /// 标签内原始文本（含占位符和已剥离的动态标签文本）。
     pub raw_sql: String,
@@ -706,5 +712,62 @@ mod tests {
                 "INSERT with subquery in column list should be PARSE_ERROR"
             );
         }
+    }
+
+    /// 安全回归（P3）：DTD / 外部实体不得被解析或展开。
+    ///
+    /// quick-xml 是非验证解析器，不解析 DTD 内部子集、不加载外部实体——
+    /// `<!ENTITY xxe SYSTEM "file:///...">` 只会作为 DocType 事件被忽略，
+    /// 文本中的 `&xxe;` 引用不会有任何文件被读取。
+    ///
+    /// 断言语义：
+    /// - DOCTYPE（含 SYSTEM 外部实体声明）不应中断正常语句提取；
+    /// - 「DTD 声明实体 + 文本引用该实体」的经典 XXE 攻击输入，结果要么
+    ///   解析报错（攻击失败），要么内容中绝不含外部文件特征（未展开）。
+    #[test]
+    fn xxe_doctype_and_entity_are_safe() {
+        // 1) 简单外部 DTD 引用：被忽略，SQL 正常提取
+        let xml = r#"<?xml version="1.0"?>
+<!DOCTYPE mapper SYSTEM "file:///etc/evil.dtd">
+<mapper namespace="com.example.UserMapper">
+  <select id="q">
+    SELECT 1
+  </select>
+</mapper>"#;
+        let path = std::env::temp_dir().join("sqlguard_parser_xxe_doctype.xml");
+        std::fs::write(&path, xml).unwrap();
+        let stmts = extract_sql_from_xml(&path, "utf-8")
+            .expect("DOCTYPE must be ignored, SQL should still extract");
+        assert_eq!(stmts.len(), 1);
+        let _ = std::fs::remove_file(&path);
+
+        // 2) 经典 XXE：DOCTYPE 内部子集声明实体 + SQL 文本中引用该实体。
+        //    无论 quick-xml 对内部子集支持程度如何，攻击都必须失败：
+        //    Err（解析报错）或 Ok 但内容不含外部文件特征。
+        let attack = r#"<?xml version="1.0"?>
+<!DOCTYPE mapper [
+  <!ENTITY xxe SYSTEM "file:///etc/passwd">
+]>
+<mapper>
+  <select id="q">
+    &xxe; SELECT 1
+  </select>
+</mapper>"#;
+        let path = std::env::temp_dir().join("sqlguard_parser_xxe_attack.xml");
+        std::fs::write(&path, attack).unwrap();
+        match extract_sql_from_xml(&path, "utf-8") {
+            Err(_) => {} // 解析报错 = 攻击失败，可接受
+            Ok(stmts) => {
+                for s in &stmts {
+                    assert!(
+                        !s.processed_sql.contains("root:")
+                            && !s.processed_sql.contains("/etc/passwd"),
+                        "external entity must never expand to file content: {}",
+                        s.processed_sql
+                    );
+                }
+            }
+        }
+        let _ = std::fs::remove_file(&path);
     }
 }

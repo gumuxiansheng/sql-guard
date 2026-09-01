@@ -405,6 +405,10 @@ fn check_files(
                     &sql.statement_type,
                     &config.mapper.statement_type_mapping,
                 );
+                // 行号映射基准：规则产出的行号是「渲染后 SQL 内行号」，加上
+                // `<select>` 标签起始行偏移即得 XML 行号。注意这是**近似值**——
+                // 渲染压缩了 `<if>`/`<where>` 等动态标签行，含多行动态标签的语句
+                // 违规行号会有 ± 几行偏差（详见 `ExtractedSql::raw_xml_line`）。
                 let line_offset = sql.raw_xml_line.saturating_sub(1);
                 // 主渲染（所有 <if> 取真，覆盖面最大）若解析不过，按
                 // ExclusiveNested → FirstBranch 顺序尝试备用渲染（互斥 if 折叠），
@@ -948,6 +952,10 @@ fn run_check_diff(
                     &sql.statement_type,
                     &config.mapper.statement_type_mapping,
                 );
+                // 行号映射基准：规则产出的行号是「渲染后 SQL 内行号」，加上
+                // `<select>` 标签起始行偏移即得 XML 行号。注意这是**近似值**——
+                // 渲染压缩了 `<if>`/`<where>` 等动态标签行，含多行动态标签的语句
+                // 违规行号会有 ± 几行偏差（详见 `ExtractedSql::raw_xml_line`）。
                 let line_offset = sql.raw_xml_line.saturating_sub(1);
                 let chosen = pick_parseable_candidate(&sql, &config);
                 let violations = engine::run_rules_for_file(
@@ -1012,6 +1020,8 @@ fn run_check_diff(
 /// 语句级交集过滤：保留 violation 的 [line, end_line] 与任一 hunk [s, e] 有交集的违规。
 /// - 新增文件：全保留
 /// - violation 无 line：保守保留（可能是规则脚本错误，宁可误报）
+/// - violation 有 line 但无 end_line：保守保留（无法确定语句行范围，
+///   「语句跨多行但只带了起始行」时按单点判断会误删，宁可误报）
 fn filter_violations_by_diff(
     violations: Vec<Violation>,
     file_diff: &git_diff::FileDiff,
@@ -1026,7 +1036,10 @@ fn filter_violations_by_diff(
                 Some(l) => l,
                 None => return true, // 无行号，保守保留
             };
-            let end_line = v.end_line.unwrap_or(line);
+            let end_line = match v.end_line {
+                Some(e) => e,
+                None => return true, // 无行号范围，保守保留
+            };
             // 与任一 hunk 有交集：[line, end_line] ∩ [s, e] != ∅
             file_diff
                 .hunks
@@ -2340,6 +2353,22 @@ mod tests {
         let diff = FileDiff {
             path: PathBuf::from("test.sql"),
             hunks: vec![(15, 25)],
+            old_hunks: vec![],
+            is_new: false,
+        };
+        let result = filter_violations_by_diff(vec![v], &diff);
+        assert_eq!(result.len(), 1);
+    }
+
+    #[test]
+    fn filter_violations_line_no_endline_kept() {
+        // P1-2：只有 line、无 end_line 的违规保守保留——无法确定语句行范围，
+        // 「语句跨多行但只带起始行」时按单点判断会误删，宁可误报。
+        let mut v = make_violation("R1", Some(100));
+        v.end_line = None;
+        let diff = FileDiff {
+            path: PathBuf::from("test.sql"),
+            hunks: vec![(8, 15)],
             old_hunks: vec![],
             is_new: false,
         };

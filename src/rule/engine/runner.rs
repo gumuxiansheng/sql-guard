@@ -474,6 +474,14 @@ pub fn build_engine() -> Engine {
     // 提高表达式深度限制（Rhai 默认 40），避免 "Expression exceeds maximum complexity" 错误。
     engine.set_max_expr_depths(64, 64);
 
+    // 资源限制（P1-1）：规则脚本虽然来自本地可信配置，但脚本 bug（如无意死循环）
+    // 不应卡死整个检查进程。Rhai 默认对操作数/模块导入均无限制：
+    // - `set_max_operations`：限制单脚本运行总操作数，超出即抛错，
+    //   抵御无限循环 / 爆炸式展开（DoS 防护）。
+    // - `set_max_modules(0)`：完全禁用 `import` 加载 Rhai 模块，保持脚本执行面最小。
+    engine.set_max_operations(1_000_000);
+    engine.set_max_modules(0);
+
     // 注册所有自定义类型，使 Rhai 能正确识别和迭代包含它们的 Array
     engine.register_type_with_name::<SqlAst>("SqlAst");
     engine.register_type_with_name::<StmtInfo>("StmtInfo");
@@ -1072,5 +1080,52 @@ mod tests {
         assert!(f.matches_id_group("DML001", None));
         assert!(f.matches_id_group("DML002", None));
         assert!(!f.matches_id_group("DDL001", None));
+    }
+
+    // ===== 引擎资源限制（P1-1） =====
+
+    #[test]
+    fn engine_limits_infinite_loop_operations() {
+        // 循环体含真实运算（x += 1），保证每轮迭代都消耗操作计数。
+        // 2M 次迭代 > 1M 操作上限，脚本必须在有限时间内被中止并报错；
+        // 即使限制失效也只是脚本跑完断言失败，不会永久挂起。
+        let engine = build_engine();
+        let script = "let x = 0; while x < 2_000_000 { x += 1; }";
+        let result = engine.eval::<Dynamic>(script);
+        assert!(
+            result.is_err(),
+            "operation limit must abort loops exceeding max_operations"
+        );
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("limit") || err.contains("operation"),
+            "unexpected error (want operation-limit message): {}",
+            err
+        );
+    }
+
+    #[test]
+    fn engine_disallows_module_import() {
+        // `import` 加载 Rhai 模块应被禁用（脚本执行面最小化）。
+        let engine = build_engine();
+        let result = engine.eval::<Dynamic>(r#"import "math" as m;"#);
+        assert!(
+            result.is_err(),
+            "module import must be disabled by set_max_modules(0)"
+        );
+    }
+
+    #[test]
+    fn engine_rejects_unknown_foreign_functions() {
+        // P3-3：规则脚本调用未注册的函数（如想借脚本访问文件系统）必须报错。
+        // 引擎只注册了 AST 只读方法，任何文件/进程/网络能力都不存在，脚本
+        // 无法越出「基于已注入 SQL 内容做检查」的执行面。
+        let engine = build_engine();
+        let result = engine.eval::<Dynamic>(r#"read_file("/etc/passwd")"#);
+        assert!(
+            result.is_err(),
+            "calls to unregistered functions must fail, got: {:?}",
+            result
+        );
     }
 }

@@ -94,8 +94,28 @@ pub fn get_diff(base: &str, path_patterns: &[&str]) -> Result<Vec<FileDiff>, Sql
     Ok(result)
 }
 
+/// P2-1：校验 git base 参数。拒绝空串或以 `-` 开头的值——后者会被 git 当作
+/// 选项而非 ref（如 `--help` 会改变命令语义）。`Command` 以 args 数组传参，
+/// 无 shell 注入风险，这里防的是「base 被解析成 git 选项」导致行为被带偏。
+pub fn validate_base(base: &str) -> Result<(), SqlGuardError> {
+    if base.trim().is_empty() {
+        return Err(SqlGuardError::CheckError(
+            "git base must not be empty".to_string(),
+        ));
+    }
+    if base.starts_with('-') {
+        return Err(SqlGuardError::CheckError(format!(
+            "git base '{}' must not start with '-' (would be parsed as a git option)",
+            base
+        )));
+    }
+    Ok(())
+}
+
 /// `git merge-base <base> HEAD`：三点 diff 的起点。
 fn merge_base(base: &str) -> Result<String, SqlGuardError> {
+    validate_base(base)?;
+
     let output = Command::new("git")
         .args(["merge-base", base, "HEAD"])
         .output()
@@ -160,6 +180,7 @@ fn list_untracked(path_patterns: &[&str]) -> Result<Vec<String>, SqlGuardError> 
 /// 返回 `Ok(None)` 表示 base 中不存在该文件（如本次新增的文件）。
 /// 供 `replay-export --base` 对旧文件内容解析，识别被删除的语句。
 pub fn git_show(base: &str, path: &Path) -> Result<Option<String>, SqlGuardError> {
+    validate_base(base)?;
     let mut cmd = Command::new("git");
     cmd.args(["show", &format!("{}:{}", base, path.to_string_lossy())]);
 
@@ -426,5 +447,29 @@ index 000..abc
     fn parse_empty_diff() {
         let result = parse_diff_output("").unwrap();
         assert!(result.is_empty());
+    }
+
+    // === validate_base（P2-1） ===
+
+    #[test]
+    fn validate_base_rejects_empty() {
+        assert!(validate_base("").is_err());
+        assert!(validate_base("  ").is_err());
+    }
+
+    #[test]
+    fn validate_base_rejects_option_prefix() {
+        // 以 `-` 开头的值会被 git 当作选项而非 ref，必须拒绝
+        let err = validate_base("--help").unwrap_err();
+        assert!(err.to_string().contains('-'), "got: {}", err);
+        assert!(validate_base("-d").is_err());
+    }
+
+    #[test]
+    fn validate_base_accepts_plain_ref() {
+        assert!(validate_base("main").is_ok());
+        assert!(validate_base("origin/develop").is_ok());
+        assert!(validate_base("0abc1234").is_ok());
+        assert!(validate_base("HEAD~3").is_ok());
     }
 }
