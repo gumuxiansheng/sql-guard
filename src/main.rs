@@ -71,8 +71,8 @@ fn main_inner() -> Result<(), Box<dyn std::error::Error>> {
                 encoding.as_deref(),
             )?;
         }
-        Commands::Init { path } => {
-            run_init(&path)?;
+        Commands::Init { path, force } => {
+            run_init(&path, force)?;
         }
         Commands::CheckDiff {
             base,
@@ -1376,155 +1376,211 @@ fn extract_sql_lines(content: &str, start_line: usize, end_line: usize) -> Strin
 
 // ===== run_init =====
 
-fn run_init(target_dir: &Path) -> Result<(), SqlGuardError> {
+/// `init` 写入的规则脚本清单：(文件名, 子目录, 内容)——content 通过 include_str! 编译时嵌入。
+/// 约束：`sqlguard.rules.toml.example` 声明的每个 script_path 必须出现在本清单中
+/// （超集允许，有测试守护），否则 init 出的规则文件会引用到不存在的脚本。
+const INIT_RULE_SCRIPTS: &[(&str, &str, &str)] = &[
+    (
+        "no_drop_table",
+        "ddl",
+        include_str!("../config/rules/ddl/no_drop_table.rhai"),
+    ),
+    (
+        "primary_key_required",
+        "ddl",
+        include_str!("../config/rules/ddl/primary_key_required.rhai"),
+    ),
+    (
+        "no_reserved_keyword_naming",
+        "ddl",
+        include_str!("../config/rules/ddl/no_reserved_keyword_naming.rhai"),
+    ),
+    (
+        "backup_table_naming",
+        "ddl",
+        include_str!("../config/rules/ddl/backup_table_naming.rhai"),
+    ),
+    (
+        "index_naming_convention",
+        "ddl",
+        include_str!("../config/rules/ddl/index_naming_convention.rhai"),
+    ),
+    (
+        "no_redundant_index",
+        "ddl",
+        include_str!("../config/rules/ddl/no_redundant_index.rhai"),
+    ),
+    (
+        "table_name_naming",
+        "ddl",
+        include_str!("../config/rules/ddl/table_name_naming.rhai"),
+    ),
+    (
+        "no_select_all",
+        "dml",
+        include_str!("../config/rules/dml/no_select_all.rhai"),
+    ),
+    (
+        "no_delete_update_without_where",
+        "dml",
+        include_str!("../config/rules/dml/no_delete_update_without_where.rhai"),
+    ),
+    (
+        "insert_columns_required",
+        "dml",
+        include_str!("../config/rules/dml/insert_columns_required.rhai"),
+    ),
+    (
+        "subquery_alias_required",
+        "dml",
+        include_str!("../config/rules/dml/subquery_alias_required.rhai"),
+    ),
+    (
+        "column_references_qualified",
+        "dml",
+        include_str!("../config/rules/dml/column_references_qualified.rhai"),
+    ),
+    (
+        "no_join_without_condition",
+        "dml",
+        include_str!("../config/rules/dml/no_join_without_condition.rhai"),
+    ),
+    (
+        "no_unused_join",
+        "dml",
+        include_str!("../config/rules/dml/no_unused_join.rhai"),
+    ),
+    (
+        "no_unused_cte",
+        "dml",
+        include_str!("../config/rules/dml/no_unused_cte.rhai"),
+    ),
+    (
+        "use_is_null",
+        "dml",
+        include_str!("../config/rules/dml/use_is_null.rhai"),
+    ),
+    (
+        "use_coalesce",
+        "dml",
+        include_str!("../config/rules/dml/use_coalesce.rhai"),
+    ),
+    (
+        "no_order_by_in_subquery",
+        "dml",
+        include_str!("../config/rules/dml/no_order_by_in_subquery.rhai"),
+    ),
+    (
+        "union_all_preferred",
+        "dml",
+        include_str!("../config/rules/dml/union_all_preferred.rhai"),
+    ),
+    (
+        "no_nested_case",
+        "dml",
+        include_str!("../config/rules/dml/no_nested_case.rhai"),
+    ),
+    (
+        "no_constant_where",
+        "dml",
+        include_str!("../config/rules/dml/no_constant_where.rhai"),
+    ),
+    (
+        "order_by_required_for_pagination",
+        "dml",
+        include_str!("../config/rules/dml/order_by_required_for_pagination.rhai"),
+    ),
+    (
+        "join_type_required",
+        "dml",
+        include_str!("../config/rules/dml/join_type_required.rhai"),
+    ),
+    (
+        "max_join_tables",
+        "dml",
+        include_str!("../config/rules/dml/max_join_tables.rhai"),
+    ),
+    (
+        "no_or_in_where",
+        "dml",
+        include_str!("../config/rules/dml/no_or_in_where.rhai"),
+    ),
+];
+
+///
+/// 幂等 init：默认只补缺失文件，已存在的原样保留——防止内嵌默认配置覆盖
+/// gates-toolkit 等工具链按模板渲染过的定制配置（历史行为是无条件覆盖）。
+/// `force = true` 时恢复旧的覆盖语义，整体重写全部文件。
+fn run_init(target_dir: &Path, force: bool) -> Result<(), SqlGuardError> {
+    let mut written: Vec<String> = Vec::new();
+    let mut skipped: Vec<String> = Vec::new();
+
     let rules_dir = target_dir.join("config").join("rules");
     for dir in &[rules_dir.join("ddl"), rules_dir.join("dml")] {
         fs::create_dir_all(dir).map_err(SqlGuardError::IoError)?;
     }
 
-    let config_content = get_default_config_content();
-    fs::write(target_dir.join("sqlguard.toml"), config_content).map_err(SqlGuardError::IoError)?;
-
-    let rules_content = get_default_rules_content();
-    fs::write(target_dir.join("sqlguard.rules.toml"), rules_content)
-        .map_err(SqlGuardError::IoError)?;
-
-    // (name, subdir, content) — content 通过 include_str! 编译时嵌入
-    let rules: &[(&str, &str, &str)] = &[
+    let mut files: Vec<(String, &'static str)> = vec![
         (
-            "no_drop_table",
-            "ddl",
-            include_str!("../config/rules/ddl/no_drop_table.rhai"),
+            "sqlguard.toml".to_string(),
+            get_default_config_content(),
         ),
         (
-            "primary_key_required",
-            "ddl",
-            include_str!("../config/rules/ddl/primary_key_required.rhai"),
-        ),
-        (
-            "no_reserved_keyword_naming",
-            "ddl",
-            include_str!("../config/rules/ddl/no_reserved_keyword_naming.rhai"),
-        ),
-        (
-            "backup_table_naming",
-            "ddl",
-            include_str!("../config/rules/ddl/backup_table_naming.rhai"),
-        ),
-        (
-            "index_naming_convention",
-            "ddl",
-            include_str!("../config/rules/ddl/index_naming_convention.rhai"),
-        ),
-        (
-            "no_redundant_index",
-            "ddl",
-            include_str!("../config/rules/ddl/no_redundant_index.rhai"),
-        ),
-        (
-            "table_name_naming",
-            "ddl",
-            include_str!("../config/rules/ddl/table_name_naming.rhai"),
-        ),
-        (
-            "no_select_all",
-            "dml",
-            include_str!("../config/rules/dml/no_select_all.rhai"),
-        ),
-        (
-            "no_delete_update_without_where",
-            "dml",
-            include_str!("../config/rules/dml/no_delete_update_without_where.rhai"),
-        ),
-        (
-            "insert_columns_required",
-            "dml",
-            include_str!("../config/rules/dml/insert_columns_required.rhai"),
-        ),
-        (
-            "subquery_alias_required",
-            "dml",
-            include_str!("../config/rules/dml/subquery_alias_required.rhai"),
-        ),
-        (
-            "column_references_qualified",
-            "dml",
-            include_str!("../config/rules/dml/column_references_qualified.rhai"),
-        ),
-        (
-            "no_join_without_condition",
-            "dml",
-            include_str!("../config/rules/dml/no_join_without_condition.rhai"),
-        ),
-        (
-            "no_unused_join",
-            "dml",
-            include_str!("../config/rules/dml/no_unused_join.rhai"),
-        ),
-        (
-            "no_unused_cte",
-            "dml",
-            include_str!("../config/rules/dml/no_unused_cte.rhai"),
-        ),
-        (
-            "use_is_null",
-            "dml",
-            include_str!("../config/rules/dml/use_is_null.rhai"),
-        ),
-        (
-            "use_coalesce",
-            "dml",
-            include_str!("../config/rules/dml/use_coalesce.rhai"),
-        ),
-        (
-            "no_order_by_in_subquery",
-            "dml",
-            include_str!("../config/rules/dml/no_order_by_in_subquery.rhai"),
-        ),
-        (
-            "union_all_preferred",
-            "dml",
-            include_str!("../config/rules/dml/union_all_preferred.rhai"),
-        ),
-        (
-            "no_nested_case",
-            "dml",
-            include_str!("../config/rules/dml/no_nested_case.rhai"),
-        ),
-        (
-            "no_constant_where",
-            "dml",
-            include_str!("../config/rules/dml/no_constant_where.rhai"),
-        ),
-        (
-            "order_by_required_for_pagination",
-            "dml",
-            include_str!("../config/rules/dml/order_by_required_for_pagination.rhai"),
-        ),
-        (
-            "no_or_in_where",
-            "dml",
-            include_str!("../config/rules/dml/no_or_in_where.rhai"),
+            "sqlguard.rules.toml".to_string(),
+            get_default_rules_content(),
         ),
     ];
-
-    for (name, rule_type, content) in rules {
-        let path = target_dir
-            .join("config")
-            .join("rules")
-            .join(rule_type)
-            .join(format!("{}.rhai", name));
-        fs::write(&path, content).map_err(SqlGuardError::IoError)?;
+    for (name, rule_type, content) in INIT_RULE_SCRIPTS {
+        files.push((
+            format!("config/rules/{}/{}.rhai", rule_type, name),
+            content,
+        ));
     }
 
-    println!(
-        "Initialized SqlGuard configuration in {}",
-        target_dir.display()
-    );
-    println!("  - sqlguard.toml          # 主配置（结构/分类/输出/扫描/文件检查）");
-    println!("  - sqlguard.rules.toml    # 规则配置（[[rules]] 单独拆分，避免文件过长）");
-    println!("  - config/rules/ddl/ (7 rule files)");
-    println!("  - config/rules/dml/ (16 rule files)");
+    for (rel, content) in &files {
+        let path = target_dir.join(rel);
+        if path.exists() && !force {
+            skipped.push(rel.clone());
+        } else {
+            fs::write(&path, content).map_err(SqlGuardError::IoError)?;
+            written.push(rel.clone());
+        }
+    }
+
+    let (ddl_count, dml_count) = INIT_RULE_SCRIPTS
+        .iter()
+        .fold((0usize, 0usize), |(d, m), (_, t, _)| {
+            if *t == "ddl" {
+                (d + 1, m)
+            } else {
+                (d, m + 1)
+            }
+        });
+
+    if skipped.is_empty() {
+        println!(
+            "Initialized SqlGuard configuration in {}",
+            target_dir.display()
+        );
+        println!("  - sqlguard.toml          # 主配置（结构/分类/输出/扫描/文件检查）");
+        println!("  - sqlguard.rules.toml    # 规则配置（[[rules]] 单独拆分，避免文件过长）");
+        println!("  - config/rules/ddl/ ({} rule files)", ddl_count);
+        println!("  - config/rules/dml/ ({} rule files)", dml_count);
+    } else {
+        println!(
+            "Initialized SqlGuard configuration in {} (幂等模式：保留已存在文件)",
+            target_dir.display()
+        );
+        for rel in &written {
+            println!("  written: {}", rel);
+        }
+        for rel in &skipped {
+            println!(
+                "  skipped: {} (already exists; rerun with --force to overwrite)",
+                rel
+            );
+        }
+    }
     println!();
     println!("Run: sqlguard check <project_path>");
     Ok(())
@@ -1809,371 +1865,116 @@ fn generate_default_config() -> Config {
     }
 }
 
+/// 默认主配置内容——单一事实来源为仓库根的 `sqlguard.toml.example`，
+/// 编译期嵌入；修改默认配置请直接编辑该文件（勿在本文件内再维护一份副本）。
 fn get_default_config_content() -> &'static str {
-    r#"[structure]
-paths = [
-  "sql/ddl",
-  "sql/dml",
-  "sql/others",
-]
-strict = true
-allow_extra = [".gitkeep", "config/"]
-
-[classification]
-default_type = "other"
-
-[[classification.rules]]
-name = "ddl-by-dir"
-pattern = "**/ddl/**"
-type = "ddl"
-priority = 10
-
-[[classification.rules]]
-name = "dml-by-dir"
-pattern = "**/dml/**"
-type = "dml"
-priority = 10
-
-[[classification.rules]]
-name = "other-by-others-dir"
-pattern = "**/others/**"
-type = "other"
-priority = 10
-
-[[classification.rules]]
-name = "sql-by-ext"
-pattern = "*.sql"
-type = "sql"
-priority = 0
-
-# ================================================================================
-# 规则配置：单独拆分到 sqlguard.rules.toml，避免主配置文件随规则增多而过长。
-# 不写本行时，工具也会自动在同目录查找 sqlguard.rules.toml。
-# ================================================================================
-rules_file = "sqlguard.rules.toml"
-
-[output]
-# 可用格式：plain（控制台）/ json / html / sarif（接 GitHub/Azure/GitLab code scanning）
-formats = ["plain", "json", "html", "sarif"]
-
-# MyBatis Mapper 模式：扫描 XML 中的 <select>/<insert>/<update>/<delete>。
-# 缺省或 enabled = false 时完全保持现有行为（仅扫描 .sql/.ddl/.dml）。
-# [mapper]
-# enabled = true
-# paths = ["src/main/resources/mapper"]
-# patterns = ["**/*Mapper.xml", "**/*.xml"]
-
-# ================================================================================
-# 文件扫描行为配置 [scan]
-# ================================================================================
-# 控制白名单扫描根与黑名单跳过目录，避免递归进入 .git/target/node_modules 等大目录。
-#
-# exclude_dirs：递归扫描时跳过的目录名（按名称匹配，任意层级生效）。
-#   默认值见下，未配置 [scan] 段时也按默认黑名单生效。
-#   适用于：SQL 脚本扫描、Mapper XML 扫描、目录结构校验三个场景。
-#
-# paths：SQL 脚本扫描白名单（相对配置文件目录或绝对路径）。
-#   为空时回退到 [structure].paths，仍为空则扫描整个 target_dir（兜底）。
-#   指定后只扫描这些目录下的 .sql/.ddl/.dml，散落在白名单外的 SQL 会被忽略。
-#
-# encoding：扫描文件的编码格式（SQL 脚本 + Mapper XML 统一使用），默认 utf-8。
-#   历史项目（如 Windows 老系统导出）的脚本可能是 GBK / GB18030 / UTF-16 等，
-#   可用 WHATWG 编码标签指定，如 encoding = "gbk"（等效 --encoding gbk）。
-#   文件带 BOM 时按 BOM 判定编码并剥离 BOM（BOM 优先于本配置）。
-#   配置非 UTF-8 编码时，FILE001「必须 UTF-8 无 BOM」策略检查自动跳过。
-#   支持的标签：utf-8 / gbk / gb2312 / gb18030 / big5 / shift_jis（sjis, cp932）
-#   / euc-jp / euc-kr / utf-16le / utf-16be / utf-32le / utf-32be
-#   / windows-1252（latin1, iso-8859-1）/ ascii 等。
-#
-# [scan]
-# paths = []
-# exclude_dirs = [
-#   ".git", ".svn", ".hg", ".bzr",       # 版本控制元数据
-#   "target", "node_modules", "build", "dist", "out",  # 构建产物
-#   ".idea", ".vscode",                   # IDE 配置
-# ]
-# encoding = "utf-8"
-
-# ================================================================================
-# 文件格式检查 [file_check]
-# ================================================================================
-# 对扫描到的每个文件做字节级检查（独立于 SQL 语法规则）：
-#   FILE001  编码必须为 UTF-8 且不带 BOM（severity = error，必须）
-#   FILE002  换行符应为 LF（severity = warning，提示）
-# 两条检查归入 file-format 分组，可用 --exclude-rules FILE001,FILE002
-# 或 --exclude-groups file-format 临时关闭。
-# 缺省（未写 [file_check] 段）时按下方默认值启用。
-# 注：当 [scan] encoding 配置为非 UTF-8（如 gbk）时，FILE001 自动跳过——
-#   文件预期就是该编码，不再执行「必须 UTF-8」策略检查。
-
-[file_check]
-enabled = true
-check_encoding = true               # UTF-8 无 BOM 检查（FILE001）
-check_line_ending = true            # 换行符 LF 检查（FILE002）
-encoding_severity = "error"         # 编码违规级别（必须）
-line_ending_severity = "warning"    # 换行符违规级别（提示）
-"#
+    include_str!("../sqlguard.toml.example")
 }
 
-/// 默认规则配置内容（独立文件 sqlguard.rules.toml）。
-///
+/// 默认规则配置内容（独立文件 sqlguard.rules.toml）——单一事实来源为
+/// 仓库根的 `sqlguard.rules.toml.example`，编译期嵌入。
 /// 仅含 `[[rules]]` 数组；脚本路径（script_path）相对本文件所在目录解析。
 fn get_default_rules_content() -> &'static str {
-    r#"# ================================================================================
-# 规则配置（独立文件）
-#
-# 每条 [[rules]] 对应一个 Rhai 脚本。脚本路径（script_path）相对本文件
-# 所在目录解析，也支持绝对路径。
-#
-# 在 sqlguard.toml 中用 rules_file = "sqlguard.rules.toml" 引用本文件；
-# 不写该行时，工具也会自动在同目录查找 sqlguard.rules.toml。
-# ================================================================================
-
-# ================================================================================
-# P0 规则：默认启用，建议 CI 中保持开启
-# ================================================================================
-
-[[rules]]
-id = "DDL001"
-name = "no_drop_table"
-group = "ddl-safety"
-description = "Disallow DROP TABLE in DDL scripts"
-enabled = true
-script_path = "config/rules/ddl/no_drop_table.rhai"
-applies_to = ["ddl"]
-severity = "error"
-
-[[rules]]
-id = "DDL002"
-name = "primary_key_required"
-group = "ddl-safety"
-description = "CREATE TABLE must have a PRIMARY KEY"
-enabled = true
-script_path = "config/rules/ddl/primary_key_required.rhai"
-applies_to = ["ddl"]
-severity = "warning"
-
-[[rules]]
-id = "DDL003"
-name = "no_reserved_keyword_naming"
-group = "ddl-safety"
-description = "Database object names must not use SQL reserved keywords"
-enabled = true
-script_path = "config/rules/ddl/no_reserved_keyword_naming.rhai"
-applies_to = ["ddl"]
-severity = "error"
-
-[[rules]]
-id = "DDL004"
-name = "backup_table_naming"
-group = "ddl-convention"
-description = "Backup tables created via CREATE TABLE AS SELECT must be prefixed with 'bks_'"
-enabled = true
-script_path = "config/rules/ddl/backup_table_naming.rhai"
-applies_to = ["ddl"]
-severity = "warning"
-
-[[rules]]
-id = "DDL005"
-name = "index_naming_convention"
-group = "ddl-convention"
-description = "Indexes follow idx_/uk_/pk_ naming convention based on type and columns"
-enabled = true
-script_path = "config/rules/ddl/index_naming_convention.rhai"
-applies_to = ["ddl"]
-severity = "warning"
-
-[[rules]]
-id = "DDL006"
-name = "no_redundant_index"
-group = "ddl-performance"
-description = "Avoid redundant indexes (duplicate PK indexes and leftmost-prefix duplicates)"
-enabled = true
-script_path = "config/rules/ddl/no_redundant_index.rhai"
-applies_to = ["ddl"]
-severity = "warning"
-
-[[rules]]
-id = "DDL007"
-name = "table_name_naming"
-group = "ddl-convention"
-description = "Table names must contain only lowercase letters, digits, and underscores, and must not start with a digit"
-enabled = true
-script_path = "config/rules/ddl/table_name_naming.rhai"
-applies_to = ["ddl"]
-severity = "warning"
-
-[[rules]]
-id = "DML001"
-name = "no_select_all"
-group = "dml-safety"
-description = "Disallow SELECT * in DML scripts"
-enabled = true
-script_path = "config/rules/dml/no_select_all.rhai"
-applies_to = ["dml"]
-severity = "error"
-
-[[rules]]
-id = "DML002"
-name = "no_delete_update_without_where"
-group = "dml-safety"
-description = "DELETE/UPDATE must have a WHERE clause"
-enabled = true
-script_path = "config/rules/dml/no_delete_update_without_where.rhai"
-applies_to = ["dml"]
-severity = "error"
-
-[[rules]]
-id = "DML003"
-name = "insert_columns_required"
-group = "dml-safety"
-description = "INSERT must specify target columns"
-enabled = true
-script_path = "config/rules/dml/insert_columns_required.rhai"
-applies_to = ["dml"]
-severity = "error"
-
-[[rules]]
-id = "DML004"
-name = "subquery_alias_required"
-group = "dml-style"
-description = "Subqueries in FROM must have an alias"
-enabled = true
-script_path = "config/rules/dml/subquery_alias_required.rhai"
-applies_to = ["dml"]
-severity = "error"
-
-[[rules]]
-id = "DML005"
-name = "column_references_qualified"
-group = "dml-style"
-description = "Qualify column references with table name in multi-table queries"
-enabled = true
-script_path = "config/rules/dml/column_references_qualified.rhai"
-applies_to = ["dml"]
-severity = "warning"
-
-[[rules]]
-id = "DML006"
-name = "no_join_without_condition"
-group = "dml-safety"
-description = "JOIN must have ON or USING condition"
-enabled = true
-script_path = "config/rules/dml/no_join_without_condition.rhai"
-applies_to = ["dml"]
-severity = "error"
-
-[[rules]]
-id = "DML007"
-name = "order_by_required_for_pagination"
-group = "dml-safety"
-description = "Pagination queries (LIMIT/OFFSET/FETCH) must have ORDER BY for deterministic results"
-enabled = true
-script_path = "config/rules/dml/order_by_required_for_pagination.rhai"
-applies_to = ["dml"]
-severity = "error"
-
-# ================================================================================
-# P1 规则：默认禁用，建议评估后启用
-# 在 sqlguard.rules.toml 中将 enabled = false 改为 true 即可启用
-# ================================================================================
-
-[[rules]]
-id = "DML101"
-name = "no_unused_join"
-group = "dml-performance"
-description = "Detect potentially unused JOINs"
-enabled = false
-script_path = "config/rules/dml/no_unused_join.rhai"
-applies_to = ["dml"]
-severity = "warning"
-
-[[rules]]
-id = "DML102"
-name = "no_unused_cte"
-group = "dml-performance"
-description = "Detect unused CTEs (WITH clauses)"
-enabled = false
-script_path = "config/rules/dml/no_unused_cte.rhai"
-applies_to = ["dml"]
-severity = "warning"
-
-[[rules]]
-id = "DML103"
-name = "use_is_null"
-group = "dml-convention"
-description = "Use IS NULL instead of = NULL"
-enabled = false
-script_path = "config/rules/dml/use_is_null.rhai"
-applies_to = ["dml"]
-severity = "error"
-
-[[rules]]
-id = "DML104"
-name = "use_coalesce"
-group = "dml-convention"
-description = "Use standard COALESCE instead of NVL/ISNULL"
-enabled = false
-script_path = "config/rules/dml/use_coalesce.rhai"
-applies_to = ["dml"]
-severity = "warning"
-
-[[rules]]
-id = "DML105"
-name = "no_order_by_in_subquery"
-group = "dml-performance"
-description = "ORDER BY in subquery is typically ignored"
-enabled = false
-script_path = "config/rules/dml/no_order_by_in_subquery.rhai"
-applies_to = ["dml"]
-severity = "warning"
-
-[[rules]]
-id = "DML106"
-name = "union_all_preferred"
-group = "dml-performance"
-description = "Prefer UNION ALL over UNION unless dedup needed"
-enabled = false
-script_path = "config/rules/dml/union_all_preferred.rhai"
-applies_to = ["dml"]
-severity = "warning"
-
-[[rules]]
-id = "DML107"
-name = "no_nested_case"
-group = "dml-convention"
-description = "Avoid nested CASE expressions"
-enabled = false
-script_path = "config/rules/dml/no_nested_case.rhai"
-applies_to = ["dml"]
-severity = "warning"
-
-[[rules]]
-id = "DML108"
-name = "no_constant_where"
-group = "dml-convention"
-description = "Avoid constant/tautology conditions in WHERE clause (e.g. 1=1, 2=2, 'a'='a', TRUE)"
-enabled = true
-script_path = "config/rules/dml/no_constant_where.rhai"
-applies_to = ["dml"]
-severity = "warning"
-
-[[rules]]
-id = "DML111"
-name = "no_or_in_where"
-group = "dml-performance"
-description = "Do not use OR to combine conditions in WHERE; prefer IN, UNION ALL, or splitting the query"
-enabled = true
-script_path = "config/rules/dml/no_or_in_where.rhai"
-applies_to = ["dml"]
-severity = "warning"
-"#
+    include_str!("../sqlguard.rules.toml.example")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use sqlguard::git_diff::FileDiff;
+
+    // === run_init（幂等 init / --force） ===
+
+    #[test]
+    fn init_fresh_writes_all_files() {
+        let dir = tempfile::tempdir().unwrap();
+        run_init(dir.path(), false).unwrap();
+        assert!(dir.path().join("sqlguard.toml").exists());
+        assert!(dir.path().join("sqlguard.rules.toml").exists());
+        let ddl = dir.path().join("config/rules/ddl");
+        let dml = dir.path().join("config/rules/dml");
+        let ddl_n = std::fs::read_dir(&ddl).unwrap().count();
+        let dml_n = std::fs::read_dir(&dml).unwrap().count();
+        assert_eq!(
+            ddl_n,
+            INIT_RULE_SCRIPTS.iter().filter(|(_, t, _)| *t == "ddl").count()
+        );
+        assert_eq!(
+            dml_n,
+            INIT_RULE_SCRIPTS.iter().filter(|(_, t, _)| *t == "dml").count()
+        );
+    }
+
+    #[test]
+    fn init_is_idempotent_keeps_existing_files() {
+        let dir = tempfile::tempdir().unwrap();
+        run_init(dir.path(), false).unwrap();
+        let rules_path = dir.path().join("sqlguard.rules.toml");
+        // 模拟用户/工具链（如 gates-toolkit 模板）定制过的配置
+        std::fs::write(&rules_path, "# customized").unwrap();
+        let script = dir.path().join("config/rules/dml/no_select_all.rhai");
+        std::fs::write(&script, "// customized").unwrap();
+
+        // 无 --force 重跑：已存在文件原样保留
+        run_init(dir.path(), false).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&rules_path).unwrap(),
+            "# customized",
+            "重跑 init 不得覆盖已存在的规则文件"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&script).unwrap(),
+            "// customized",
+            "重跑 init 不得覆盖已存在的规则脚本"
+        );
+        // 缺失文件仍会被补齐
+        std::fs::remove_file(&script).unwrap();
+        run_init(dir.path(), false).unwrap();
+        assert!(script.exists(), "缺失的脚本应被补写");
+    }
+
+    #[test]
+    fn init_force_overwrites_existing_files() {
+        let dir = tempfile::tempdir().unwrap();
+        run_init(dir.path(), false).unwrap();
+        let rules_path = dir.path().join("sqlguard.rules.toml");
+        std::fs::write(&rules_path, "# customized").unwrap();
+        run_init(dir.path(), true).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&rules_path).unwrap(),
+            get_default_rules_content(),
+            "--force 应恢复为内嵌默认内容"
+        );
+    }
+
+    #[test]
+    fn default_contents_parse_as_toml() {
+        let cfg: toml::Value = toml::from_str(get_default_config_content())
+            .expect("sqlguard.toml.example 必须是合法 TOML");
+        let rules: toml::Value = toml::from_str(get_default_rules_content())
+            .expect("sqlguard.rules.toml.example 必须是合法 TOML");
+        assert!(cfg.get("structure").is_some());
+        assert!(rules.get("rules").and_then(|r| r.as_array()).map(|a| !a.is_empty()).unwrap_or(false));
+    }
+
+    #[test]
+    fn init_rule_scripts_cover_example_declarations() {
+        // example 声明的每个 script_path 必须能由 init 落盘，否则 init 出的
+        // 规则文件会引用不存在的脚本（表现为运行时 "Rule script not found"）。
+        for line in get_default_rules_content().lines() {
+            if let Some(rest) = line.trim().strip_prefix("script_path = ") {
+                let declared = rest.trim().trim_matches('"');
+                let covered = INIT_RULE_SCRIPTS
+                    .iter()
+                    .any(|(name, ty, _)| format!("config/rules/{}/{}.rhai", ty, name) == declared);
+                assert!(
+                    covered,
+                    "sqlguard.rules.toml.example 声明的脚本 {} 不在 init 写入清单中",
+                    declared
+                );
+            }
+        }
+    }
 
     // === progress_line ===
 

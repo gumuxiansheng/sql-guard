@@ -35,7 +35,8 @@ paths = [
   "sql/others",
 ]
 strict = true
-allow_extra = [".gitkeep"]
+# init 子命令会在项目内创建 config/rules/（规则脚本），strict 结构校验时放行
+allow_extra = [".gitkeep", "config/"]
 
 [classification]
 default_type = "other"

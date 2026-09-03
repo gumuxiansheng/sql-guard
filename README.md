@@ -723,8 +723,14 @@ sqlguard check [OPTIONS] [PATH]
 ### `sqlguard init`
 
 ```bash
-sqlguard init [PATH]     # 生成默认配置与示例规则
+sqlguard init [PATH]           # 生成默认配置与示例规则（幂等）
+sqlguard init [PATH] --force   # 覆盖已存在的配置与规则文件
 ```
+
+> **幂等语义（v0.2.5 起）**：默认只补缺失文件，已存在的 `sqlguard.toml` / `sqlguard.rules.toml` /
+> 规则脚本**原样保留**并逐项提示 `skipped`——防止覆盖 gates-toolkit 等工具链按模板渲染过的定制配置。
+> 确需整体重写时显式传 `--force`。
+> 默认配置的单一事实来源为仓库根的 `sqlguard.toml.example` / `sqlguard.rules.toml.example`（编译期嵌入）。
 
 ### `sqlguard check-diff`
 

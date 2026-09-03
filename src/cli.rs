@@ -123,6 +123,14 @@ pub enum Commands {
         /// Target directory
         #[clap(default_value = ".")]
         path: PathBuf,
+
+        /// Overwrite existing files (sqlguard.toml / sqlguard.rules.toml / rule scripts).
+        ///
+        /// Default is idempotent init: only missing files are written, existing
+        /// files are kept untouched and reported as skipped. Pass --force to
+        /// restore the old overwrite-everything behavior.
+        #[clap(long)]
+        force: bool,
     },
     /// Only check SQL statements changed since a git baseline (incremental mode).
     ///
