@@ -86,6 +86,23 @@ pub(crate) fn analyze_query(q: &Query) -> SelectInfo {
 
     // Query 层的 ORDER BY / LIMIT / OFFSET / FETCH（无论是否集合运算都在 q 上）
     info.has_order_by = q.order_by.is_some();
+    // ORDER BY 逐项明细（含 ASC/DESC 与 NULLS FIRST/LAST 的显式性），
+    // 供 GaussDB「ORDER BY 必须显式指定排序方式与 NULL 排序方式」类规则使用。
+    // sqlparser 0.60：`OrderBy { kind, interpolate }`，表达式在 `OrderByKind::Expressions`；
+    // `OrderByKind::All`（DuckDB/ClickHouse 的 `ORDER BY ALL`）没有逐项明细，此时留空列表，
+    // 规则应以 `has_order_by` 为准。
+    if let Some(ob) = &q.order_by {
+        if let sqlparser::ast::OrderByKind::Expressions(exprs) = &ob.kind {
+            info.order_by_items = exprs
+                .iter()
+                .map(|o| OrderByItemInfo {
+                    expr_text: o.expr.to_string(),
+                    asc: o.options.asc,
+                    nulls_first: o.options.nulls_first,
+                })
+                .collect();
+        }
+    }
     info.has_limit = q.limit_clause.is_some();
     info.has_offset = q.limit_clause.as_ref().is_some_and(|l| match l {
         LimitClause::LimitOffset { offset, .. } => offset.is_some(),
@@ -511,6 +528,16 @@ pub(crate) fn collect_subqueries_in_set_expr(e: &SetExpr, out: &mut Vec<SelectIn
         }
         _ => {}
     }
+}
+
+/// 判断单个表达式中是否含任意子查询（Subquery / Exists / InSubquery / ArraySubquery）。
+///
+/// 供 UPDATE / DELETE 的 `WHERE` 判定使用（GaussDB 规范：`UPDATE ... WHERE` 含子查询
+/// 宜改写为 JOIN）。内部复用 [`collect_subqueries_in_expr`]，只是不关心结果内容。
+pub(crate) fn expr_has_subquery(e: &Expr) -> bool {
+    let mut subs = Vec::new();
+    collect_subqueries_in_expr(e, &mut subs, 0);
+    !subs.is_empty()
 }
 
 /// 递归遍历表达式，把所有遇到的子查询（Subquery / Exists / InSubquery / ArraySubquery）
@@ -1413,5 +1440,106 @@ mod tests {
             "o 只出现在 ON 条件，不应算被引用：{:?}",
             info.referenced_qualifiers
         );
+    }
+
+    // ===== C2-a：ORDER BY 逐项明细（ASC/DESC 与 NULLS FIRST/LAST 的显式性）=====
+
+    /// 取查询的 WHERE 表达式。
+    fn parse_where_expr(sql: &str) -> Expr {
+        let q = parse_query(sql);
+        if let SetExpr::Select(s) = &*q.body {
+            return s.selection.clone().expect("expected WHERE");
+        }
+        panic!("expected a Select body");
+    }
+
+    #[test]
+    fn test_order_by_items_capture_direction_and_nulls() {
+        let q = parse_query("SELECT id FROM t ORDER BY a ASC NULLS LAST, b DESC NULLS FIRST, c");
+        let info = analyze_query(&q);
+        assert!(info.has_order_by);
+        assert_eq!(info.order_by_items.len(), 3);
+
+        let a = &info.order_by_items[0];
+        assert_eq!(a.expr_text, "a");
+        assert!(a.has_direction() && a.is_asc() && !a.is_desc());
+        assert_eq!(a.direction(), "ASC");
+        assert!(a.has_nulls_spec() && a.has_nulls_last() && !a.has_nulls_first());
+        assert_eq!(a.nulls(), "LAST");
+
+        let b = &info.order_by_items[1];
+        assert!(b.has_direction() && b.is_desc() && !b.is_asc());
+        assert_eq!(b.direction(), "DESC");
+        assert!(b.has_nulls_first() && !b.has_nulls_last());
+        assert_eq!(b.nulls(), "FIRST");
+
+        // 未显式指定：方向与 NULL 排序都应为"未指定"（这是 GaussDB 规范的违规点）
+        let c = &info.order_by_items[2];
+        assert!(!c.has_direction());
+        assert_eq!(c.direction(), "");
+        assert!(!c.has_nulls_spec());
+        assert_eq!(c.nulls(), "");
+    }
+
+    #[test]
+    fn test_order_by_unspecified_helpers_and_text() {
+        let q = parse_query("SELECT id FROM t ORDER BY a ASC NULLS LAST");
+        let info = analyze_query(&q);
+        assert!(!info.has_order_by_without_direction());
+        assert!(!info.has_order_by_without_nulls_spec());
+        assert_eq!(info.order_by_text(), "a ASC NULLS LAST");
+
+        let q2 = parse_query("SELECT id FROM t ORDER BY a, b DESC");
+        let info2 = analyze_query(&q2);
+        assert!(info2.has_order_by_without_direction());
+        assert!(info2.has_order_by_without_nulls_spec());
+        assert_eq!(info2.order_by_text(), "a, b DESC");
+    }
+
+    #[test]
+    fn test_order_by_absent_yields_empty_items_and_no_false_positive() {
+        let q = parse_query("SELECT id FROM t");
+        let info = analyze_query(&q);
+        assert!(!info.has_order_by);
+        assert!(info.order_by_items.is_empty());
+        // 无 ORDER BY 时不应把"缺方向/缺 NULLS"当成违规
+        assert!(!info.has_order_by_without_direction());
+        assert!(!info.has_order_by_without_nulls_spec());
+        assert_eq!(info.order_by_text(), "");
+    }
+
+    #[test]
+    fn test_order_by_items_survive_union_branch() {
+        // ORDER BY 在 Query 层，集合运算整体排序也应能取到明细
+        let q = parse_query("SELECT a FROM t1 UNION ALL SELECT a FROM t2 ORDER BY a DESC");
+        let info = analyze_query(&q);
+        assert!(info.is_union() && info.is_union_all());
+        assert_eq!(info.order_by_items.len(), 1);
+        assert!(info.order_by_items[0].is_desc());
+    }
+
+    // ===== C2-b 支撑：单个表达式的子查询判定 =====
+
+    #[test]
+    fn test_expr_has_subquery_detects_all_forms() {
+        assert!(expr_has_subquery(&parse_where_expr(
+            "SELECT 1 FROM t WHERE a IN (SELECT x FROM y)"
+        )));
+        assert!(expr_has_subquery(&parse_where_expr(
+            "SELECT 1 FROM t WHERE EXISTS (SELECT 1 FROM y)"
+        )));
+        assert!(expr_has_subquery(&parse_where_expr(
+            "SELECT 1 FROM t WHERE a = (SELECT MAX(x) FROM y)"
+        )));
+    }
+
+    #[test]
+    fn test_expr_has_subquery_rejects_plain_predicates() {
+        assert!(!expr_has_subquery(&parse_where_expr(
+            "SELECT 1 FROM t WHERE a > 1 AND b IS NOT NULL"
+        )));
+        assert!(!expr_has_subquery(&parse_where_expr(
+            "SELECT 1 FROM t WHERE a IN (1, 2, 3)"
+        )));
     }
 }

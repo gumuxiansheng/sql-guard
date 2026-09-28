@@ -379,6 +379,7 @@ mod tests {
                 table_name: "users".to_string(),
                 columns: vec!["email".to_string()],
                 is_unique: false,
+                ..Default::default()
             }),
         };
         let pair = gen_create_index(
@@ -416,6 +417,7 @@ mod tests {
                 materialized: false,
                 is_replace: false,
                 column_count: 0,
+                ..Default::default()
             }),
         };
         let pair = gen_create_view(

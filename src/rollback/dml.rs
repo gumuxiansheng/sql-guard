@@ -1132,6 +1132,7 @@ mod tests {
             update: Some(UpdateInfo {
                 table_name: table.to_string(),
                 where_clause: where_clause.map(|s| s.to_string()),
+                ..Default::default()
             }),
             delete: None,
             alter_table: None,
@@ -1156,6 +1157,7 @@ mod tests {
             delete: Some(DeleteInfo {
                 table_name: table.to_string(),
                 where_clause: where_clause.map(|s| s.to_string()),
+                ..Default::default()
             }),
             alter_table: None,
             truncate: None,

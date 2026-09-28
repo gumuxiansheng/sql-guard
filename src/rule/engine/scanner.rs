@@ -272,9 +272,168 @@ pub(crate) fn collect_comments(sql: &str) -> Vec<CommentInfo> {
     comments
 }
 
+/// 提取 SQL 文本中**顶层**（括号深度 0）的标识符词序列（统一 ASCII 大写）。
+///
+/// 跳过：单/双引号/反引号字符串、行注释、块注释；丢弃非标识符字符
+/// （标点、数字开头的串只保留其字母数字下划线部分）。
+///
+/// 用途：为 [`has_top_level_clause`] 提供"不受括号内子查询干扰"的词序列。
+/// 之所以按**词序列**而非直接子串匹配，是为了容忍关键字之间的任意空白与换行
+/// （`ORDER\n  BY`、`ORDER /* c */ BY` 都能命中）。
+pub(crate) fn top_level_words(sql: &str) -> Vec<String> {
+    let bytes = sql.as_bytes();
+    let n = bytes.len();
+    let mut i = 0;
+    let mut depth: i32 = 0;
+    let mut words = Vec::new();
+
+    while i < n {
+        let b = bytes[i];
+
+        // 行注释 --...
+        if b == b'-' && i + 1 < n && bytes[i + 1] == b'-' {
+            while i < n && bytes[i] != b'\n' {
+                i += 1;
+            }
+            continue;
+        }
+        // 块注释 /* ... */
+        if b == b'/' && i + 1 < n && bytes[i + 1] == b'*' {
+            i += 2;
+            while i + 1 < n && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
+                i += 1;
+            }
+            i = (i + 2).min(n);
+            continue;
+        }
+        // 单引号字符串（含 '' 转义）
+        if b == b'\'' {
+            i += 1;
+            while i < n {
+                if bytes[i] == b'\'' {
+                    if i + 1 < n && bytes[i + 1] == b'\'' {
+                        i += 2;
+                        continue;
+                    }
+                    i += 1;
+                    break;
+                }
+                i += 1;
+            }
+            continue;
+        }
+        // 双引号 / 反引号（标识符或字符串，整体跳过）
+        if b == b'"' || b == b'`' {
+            let q = b;
+            i += 1;
+            while i < n {
+                if bytes[i] == q {
+                    if i + 1 < n && bytes[i + 1] == q {
+                        i += 2;
+                        continue;
+                    }
+                    i += 1;
+                    break;
+                }
+                i += 1;
+            }
+            continue;
+        }
+
+        if b == b'(' {
+            depth += 1;
+            i += 1;
+            continue;
+        }
+        if b == b')' {
+            depth -= 1;
+            i += 1;
+            continue;
+        }
+
+        // 词边界：仅收集括号深度 0 处的词，且词的**首字符**必须是字母或下划线，
+        // 避免把 `1.5` / `123` 这类数字字面量当成关键字候选。
+        if depth == 0 && (b.is_ascii_alphabetic() || b == b'_') {
+            let prev_ok = i == 0
+                || !(bytes[i - 1].is_ascii_alphanumeric()
+                    || bytes[i - 1] == b'_'
+                    || bytes[i - 1] == b'.');
+            if prev_ok {
+                let start = i;
+                while i < n && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
+                    i += 1;
+                }
+                words.push(
+                    std::str::from_utf8(&bytes[start..i])
+                        .unwrap_or("")
+                        .to_ascii_uppercase(),
+                );
+                continue;
+            }
+        }
+        i += 1;
+    }
+
+    words
+}
+
+/// 判断语句原文中是否存在**顶层**的子句关键字（如 `"ORDER BY"`、`"GROUP BY"`）。
+///
+/// 用于 sqlparser 未建模的子句（UPDATE 的 `ORDER BY`/`GROUP BY`、
+/// DELETE 的 `GROUP BY`）做原文兜底判定。跟踪括号深度，`OVER (ORDER BY ...)`
+/// 这类子查询/窗口定义内部的同名子句不会被误判为顶层。
+///
+/// 关键字之间允许任意空白、换行与注释（基于词序列匹配）。
+pub(crate) fn has_top_level_clause(sql: &str, keyword: &str) -> bool {
+    let want: Vec<String> = keyword
+        .split_whitespace()
+        .map(|w| w.to_ascii_uppercase())
+        .collect();
+    if want.is_empty() {
+        return false;
+    }
+    let words = top_level_words(sql);
+    if words.len() < want.len() {
+        return false;
+    }
+    words.windows(want.len()).any(|w| w == want.as_slice())
+}
+
+/// 按行区间 `[start_line, end_line]`（**1-based、闭区间**）切出整行文本，以 `\n` 连接。
+///
+/// 与 `SqlAst::slice` 的差别：本函数不看列号，整行取，专供"按语句行区间取原文"使用。
+/// 兼容 LF/CRLF（`\r` 会保留在行尾）。越界按"取到边界为止"处理，不 panic。
+pub(crate) fn line_range_text(sql: &str, start_line: i64, end_line: i64) -> String {
+    if sql.is_empty() {
+        return String::new();
+    }
+    let l1 = start_line.max(1) as usize;
+    let l2 = end_line.max(1) as usize;
+    if l2 < l1 {
+        return String::new();
+    }
+    let mut out = String::new();
+    for (idx, line_text) in sql.split('\n').enumerate() {
+        let line_no = idx + 1;
+        if line_no < l1 {
+            continue;
+        }
+        if line_no > l2 {
+            break;
+        }
+        if line_no > l1 {
+            out.push('\n');
+        }
+        out.push_str(line_text);
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ===== top_level_words / has_top_level_clause =====
 
     // ===== detect_comma_join_in_sql =====
 
@@ -435,5 +594,126 @@ mod tests {
         assert_eq!(comments[1].line, 2);
         assert_eq!(comments[2].kind, "LINE");
         assert_eq!(comments[2].line, 3);
+    }
+
+    #[test]
+    fn test_top_level_words_skips_strings_and_nested_parens() {
+        let words = top_level_words("UPDATE t SET a = 'ORDER BY' WHERE b IN (SELECT ORDER FROM x)");
+        assert_eq!(words[0], "UPDATE");
+        assert!(words.contains(&"SET".to_string()));
+        assert!(words.contains(&"WHERE".to_string()));
+        // 括号内的 ORDER 被丢弃（深度 1）
+        assert!(!words.contains(&"ORDER".to_string()));
+        // 字符串里的 ORDER 被丢弃
+        assert_eq!(words.iter().filter(|w| *w == "ORDER").count(), 0);
+    }
+
+    #[test]
+    fn test_top_level_words_drops_numeric_literals() {
+        let words = top_level_words("UPDATE t SET a = 1.5, b = 2 WHERE c = 3");
+        assert_eq!(words, vec!["UPDATE", "T", "SET", "A", "B", "WHERE", "C"]);
+    }
+
+    #[test]
+    fn test_has_top_level_clause_basic() {
+        assert!(has_top_level_clause(
+            "UPDATE t SET a = 1 WHERE b = 2 ORDER BY c",
+            "ORDER BY"
+        ));
+        assert!(has_top_level_clause(
+            "UPDATE t SET a = 1 WHERE b = 2 GROUP BY c",
+            "GROUP BY"
+        ));
+        assert!(!has_top_level_clause(
+            "UPDATE t SET a = 1 WHERE b = 2",
+            "ORDER BY"
+        ));
+        assert!(!has_top_level_clause(
+            "DELETE FROM t WHERE b = 2",
+            "GROUP BY"
+        ));
+    }
+
+    #[test]
+    fn test_has_top_level_clause_tolerates_whitespace_and_comments() {
+        // 关键字被换行 / 块注释分隔，仍应命中
+        assert!(has_top_level_clause(
+            "UPDATE t SET a=1 WHERE b=2 ORDER\n  BY c",
+            "ORDER BY"
+        ));
+        assert!(has_top_level_clause(
+            "UPDATE t SET a=1 WHERE b=2 ORDER /* c */ BY c",
+            "ORDER BY"
+        ));
+    }
+
+    #[test]
+    fn test_has_top_level_clause_ignores_nested_and_quoted() {
+        // 子查询 / 窗口定义里的 ORDER BY 不算顶层
+        assert!(!has_top_level_clause(
+            "UPDATE t SET a = (SELECT x FROM y ORDER BY x LIMIT 1) WHERE b = 2",
+            "ORDER BY"
+        ));
+        assert!(!has_top_level_clause(
+            "SELECT ROW_NUMBER() OVER (ORDER BY c) FROM t",
+            "ORDER BY"
+        ));
+        // 字符串与注释里的 ORDER BY 不算
+        assert!(!has_top_level_clause(
+            "UPDATE t SET a = 'ORDER BY' WHERE b = 2",
+            "ORDER BY"
+        ));
+        assert!(!has_top_level_clause(
+            "UPDATE t SET a = 1 /* ORDER BY c */ WHERE b = 2",
+            "ORDER BY"
+        ));
+    }
+
+    #[test]
+    fn test_has_top_level_clause_word_boundary() {
+        // 不应把 `reorder by_x` 当作 `ORDER BY`
+        assert!(!has_top_level_clause(
+            "UPDATE t SET a = 1 WHERE reorder by_x = 2",
+            "ORDER BY"
+        ));
+        // 三段关键字也能匹配
+        assert!(has_top_level_clause(
+            "UPDATE t SET a = 1 ORDER BY x",
+            "ORDER BY X"
+        ));
+    }
+
+    // ===== line_range_text =====
+
+    #[test]
+    fn test_line_range_text_basic_inclusive() {
+        let sql = "SELECT 1;\nUPDATE t SET a = 1;\nDELETE FROM t;";
+        assert_eq!(line_range_text(sql, 1, 1), "SELECT 1;");
+        assert_eq!(line_range_text(sql, 2, 2), "UPDATE t SET a = 1;");
+        assert_eq!(line_range_text(sql, 1, 2), "SELECT 1;\nUPDATE t SET a = 1;");
+        assert_eq!(line_range_text(sql, 3, 3), "DELETE FROM t;");
+    }
+
+    #[test]
+    fn test_line_range_text_out_of_bounds_and_inverted() {
+        let sql = "a\nb";
+        assert_eq!(line_range_text(sql, 1, 99), "a\nb", "上界越界取到文件尾");
+        assert_eq!(line_range_text(sql, 3, 5), "", "起始行越界返回空串");
+        assert_eq!(line_range_text(sql, 2, 1), "", "区间倒置返回空串");
+        assert_eq!(line_range_text("", 1, 1), "");
+    }
+
+    #[test]
+    fn test_line_range_text_keeps_crlf_carriage_return() {
+        let sql = "SELECT 1;\r\nSELECT 2;";
+        // `\r` 保留在行尾，与 sqlparser 把 `\r` 计入列号的语义一致
+        assert_eq!(line_range_text(sql, 1, 1), "SELECT 1;\r");
+        assert_eq!(line_range_text(sql, 2, 2), "SELECT 2;");
+    }
+
+    #[test]
+    fn test_line_range_text_multibyte_safe() {
+        let sql = "CREATE TABLE 用户表 (\n  名称 VARCHAR(20)\n);";
+        assert_eq!(line_range_text(sql, 2, 2), "  名称 VARCHAR(20)");
     }
 }

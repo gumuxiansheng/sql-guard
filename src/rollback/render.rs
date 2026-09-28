@@ -1339,6 +1339,7 @@ mod tests {
                     delete: Some(DeleteInfo {
                         table_name: "users".to_string(),
                         where_clause: Some("id = 1".to_string()),
+                        ..Default::default()
                     }),
                     alter_table: None,
                     truncate: None,
@@ -1485,6 +1486,7 @@ mod tests {
             update: Some(UpdateInfo {
                 table_name: "users".to_string(),
                 where_clause: Some("id = 1".to_string()),
+                ..Default::default()
             }),
             delete: None,
             alter_table: None,

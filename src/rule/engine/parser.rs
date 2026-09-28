@@ -1,6 +1,7 @@
 use sqlparser::ast::{
-    AlterTable, AlterTableOperation, ColumnOption, CreateIndex, CreateTable, CreateView, Delete,
-    DropBehavior, FromTable, Insert, Statement, TableConstraint, TableFactor, Truncate, Update,
+    AlterTable, AlterTableOperation, AssignmentTarget, ColumnOption, CreateIndex, CreateTable,
+    CreateView, Delete, DropBehavior, FromTable, Insert, Statement, TableConstraint, TableFactor,
+    Truncate, Update,
 };
 use sqlparser::dialect::{
     AnsiDialect, GenericDialect, MySqlDialect, OracleDialect, PostgreSqlDialect,
@@ -8,10 +9,10 @@ use sqlparser::dialect::{
 use sqlparser::parser::Parser;
 use sqlparser::tokenizer::Token;
 
-use super::analyzer::analyze_query;
+use super::analyzer::{analyze_query, expr_has_subquery};
 use super::ast::*;
 use super::gaussdb_rewrite;
-use super::scanner::{collect_comments, detect_comma_join_in_sql};
+use super::scanner::{collect_comments, detect_comma_join_in_sql, has_top_level_clause};
 use crate::config::CheckDialect;
 
 /// 把 SQL 文本解析为 AST，每条语句记录其在源文件中的行号/列号。
@@ -67,6 +68,7 @@ pub fn parse_sql_to_ast_fb(
                 parse_error: Some(format!("SQL tokenize error: {}", e)),
                 has_comma_join_anywhere: false,
                 comments: Vec::new(),
+                source: sql.to_string(),
             };
         }
     };
@@ -100,7 +102,8 @@ pub fn parse_sql_to_ast_fb(
                 let clean = matches!(parser.peek_token().token, Token::SemiColon | Token::EOF);
                 if clean {
                     let end_line = end_line_of(parser.peek_token(), line, total_lines);
-                    statements.push(convert_statement(&stmt, line, column, end_line));
+                    let stmt_src = statement_source_text(sql, line, end_line);
+                    statements.push(convert_statement(&stmt, line, column, end_line, &stmt_src));
                     continue;
                 }
                 // 不干净：丢弃主方言结果，落入下方回退链统一处理
@@ -140,7 +143,8 @@ pub fn parse_sql_to_ast_fb(
         let end_line = end_line_of(parser.peek_token(), line, total_lines);
         match recovered {
             Some(stmt) => {
-                statements.push(convert_statement(&stmt, line, column, end_line));
+                let stmt_src = statement_source_text(sql, line, end_line);
+                statements.push(convert_statement(&stmt, line, column, end_line, &stmt_src));
             }
             None => {
                 statements.push(StmtInfo {
@@ -170,7 +174,24 @@ pub fn parse_sql_to_ast_fb(
         // 逗号 JOIN 检测与注释收集基于原始 SQL 文本（与重写无关，保持原文件特征）
         has_comma_join_anywhere: detect_comma_join_in_sql(sql),
         comments: collect_comments(sql),
+        // 原始文本（未经 gaussdb_rewrite 归一化），供规则做 `slice` / `stmt_text` 切片
+        source: sql.to_string(),
     }
+}
+
+/// 按行区间取出某条语句的**原始**文本并 trim。
+///
+/// 为什么用"原始"而非重写后文本：GaussDB 方言下 `effective_sql` 已被归一化
+/// （`` `x` `` → `"x"`、`SYSDATE` → `CURRENT_TIMESTAMP`），会丢失"原文是否用反引号"
+/// "原始书写长度"等信息，而命名/引号/长度类规则必须看原文。
+///
+/// 为什么用整行区间而非精确列：`end_line` 由"下一条语句起始行的前一行"推得，
+/// 天然可能带上行尾空白。trim 后覆盖绝大多数规则需求；需要精确边界时规则可用
+/// [`SqlAst::slice`] 配合语句行列号。
+fn statement_source_text(sql: &str, start_line: i64, end_line: i64) -> String {
+    super::scanner::line_range_text(sql, start_line, end_line)
+        .trim()
+        .to_string()
 }
 
 /// 解析链枚举序列（主方言在前，去重，链尾兜底 Generic）。
@@ -258,6 +279,7 @@ pub(crate) fn convert_statement(
     line: i64,
     column: i64,
     end_line: i64,
+    stmt_src: &str,
 ) -> StmtInfo {
     match stmt {
         Statement::CreateTable(CreateTable {
@@ -540,12 +562,31 @@ pub(crate) fn convert_statement(
             }
         }
         Statement::Update(Update {
-            table, selection, ..
+            table,
+            assignments,
+            selection,
+            limit,
+            ..
         }) => {
             let table_name = match &table.relation {
                 TableFactor::Table { name, .. } => name.to_string(),
                 _ => table.relation.to_string(),
             };
+            // SET 目标列（AST 可得）：元组赋值 `SET (a, b) = (...)` 展开为各列。
+            let mut set_columns: Vec<String> = Vec::new();
+            for a in assignments {
+                match &a.target {
+                    AssignmentTarget::ColumnName(n) => set_columns.push(n.to_string()),
+                    AssignmentTarget::Tuple(names) => {
+                        set_columns.extend(names.iter().map(|n| n.to_string()));
+                    }
+                }
+            }
+            let set_clause_text = assignments
+                .iter()
+                .map(|a| a.to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
             StmtInfo {
                 kind: "UPDATE".to_string(),
                 line,
@@ -558,6 +599,14 @@ pub(crate) fn convert_statement(
                 update: Some(UpdateInfo {
                     table_name,
                     where_clause: selection.as_ref().map(|e| e.to_string()),
+                    set_columns,
+                    set_clause_text,
+                    has_subquery: selection.as_ref().is_some_and(expr_has_subquery),
+                    has_limit: limit.is_some(),
+                    // sqlparser 0.60 的 `Update` 结构不含 order_by / group_by 字段，
+                    // 只能对语句原文做顶层子句扫描兜底（子查询内的同名子句已排除）。
+                    has_order_by: has_top_level_clause(stmt_src, "ORDER BY"),
+                    has_group_by: has_top_level_clause(stmt_src, "GROUP BY"),
                 }),
                 delete: None,
                 alter_table: None,
@@ -571,6 +620,8 @@ pub(crate) fn convert_statement(
             tables,
             from,
             selection,
+            order_by,
+            limit,
             ..
         }) => {
             // 优先取 `tables`（MySQL 多表 DELETE），否则从 `from` 取首个表
@@ -608,6 +659,12 @@ pub(crate) fn convert_statement(
                 delete: Some(DeleteInfo {
                     table_name,
                     where_clause: selection.as_ref().map(|e| e.to_string()),
+                    has_subquery: selection.as_ref().is_some_and(expr_has_subquery),
+                    has_limit: limit.is_some(),
+                    // `Delete` 有 order_by 字段（MySQL 语法），直接看 AST
+                    has_order_by: !order_by.is_empty(),
+                    // sqlparser 0.60 的 `Delete` 没有 group_by 字段 → 原文顶层子句兜底
+                    has_group_by: has_top_level_clause(stmt_src, "GROUP BY"),
                 }),
                 alter_table: None,
                 truncate: None,
@@ -876,6 +933,9 @@ pub(crate) fn convert_statement(
             materialized,
             name,
             columns,
+            query,
+            temporary,
+            if_not_exists,
             ..
         }) => StmtInfo {
             kind: "CREATE_VIEW".to_string(),
@@ -895,6 +955,11 @@ pub(crate) fn convert_statement(
                 materialized: *materialized,
                 is_replace: *or_replace,
                 column_count: columns.len() as i64,
+                // 视图定义体（`AS SELECT ...`）：让规则能看进视图内部，
+                // 判定"视图内排序 / 视图嵌套 / 对视图执行非 SELECT DML"等。
+                definition: analyze_query(query),
+                is_temporary: *temporary,
+                if_not_exists: *if_not_exists,
             }),
             create_index: None,
             transaction: None,
@@ -905,11 +970,13 @@ pub(crate) fn convert_statement(
             using,
             columns,
             unique,
+            concurrently,
+            if_not_exists,
+            include,
             ..
         }) => {
             let idx_name = name.as_ref().map(|n| n.to_string()).unwrap_or_default();
             let col_names: Vec<String> = columns.iter().map(|obe| obe.to_string()).collect();
-            let _ = using;
             StmtInfo {
                 kind: "CREATE_INDEX".to_string(),
                 line,
@@ -929,6 +996,11 @@ pub(crate) fn convert_statement(
                     table_name: table_name.to_string(),
                     columns: col_names,
                     is_unique: *unique,
+                    // GaussDB 规范：有联机事务时建索引必须带 CONCURRENTLY
+                    concurrently: *concurrently,
+                    if_not_exists: *if_not_exists,
+                    using_method: using.as_ref().map(|u| u.to_string()).unwrap_or_default(),
+                    include_columns: include.iter().map(|i| i.to_string()).collect(),
                 }),
                 transaction: None,
             }
@@ -1734,5 +1806,278 @@ mod tests {
         );
         assert_eq!(ast.statements.len(), 1);
         assert_eq!(ast.statements[0].kind, "ALTER_TABLE");
+    }
+
+    // ===== C2-b：UPDATE / DELETE 子句字段 =====
+
+    #[test]
+    fn test_update_info_set_columns_and_helpers() {
+        let ast = parse_sql_to_ast(
+            "UPDATE users SET name = 'x', age = age + 1 WHERE id = 1",
+            CheckDialect::Generic,
+        );
+        assert!(!ast.has_parse_error());
+        let u = ast.statements[0].update.clone().expect("update info");
+        assert_eq!(u.table_name, "users");
+        assert_eq!(u.set_columns, vec!["name", "age"]);
+        assert!(u.set_clause_text.contains("name = 'x'"));
+        assert!(u.has_where());
+        assert!(!u.has_subquery);
+        assert!(!u.has_limit);
+        assert!(!u.has_order_by);
+        assert!(!u.has_group_by);
+    }
+
+    #[test]
+    fn test_update_sets_column_is_case_insensitive_and_schema_agnostic() {
+        let ast = parse_sql_to_ast(
+            "UPDATE users SET Id = 1, age = 2 WHERE x = 1",
+            CheckDialect::Generic,
+        );
+        let u = ast.statements[0].update.clone().expect("update info");
+        assert!(u.sets_column("id"), "大小写不敏感");
+        assert!(u.sets_column("users.id"), "带 schema/表限定也能匹配");
+        assert!(u.sets_column("  ID  "), "首尾空白应被忽略");
+        assert!(!u.sets_column("name"));
+        assert!(!u.sets_column(""));
+        // PG 折叠语义：不带引号的 `Id` 等价于 `id`，因此与显式带引号的 `"Id"` 不是同一列
+        assert!(
+            !u.sets_column("\"Id\""),
+            "未加引号的 Id 折叠为 id，不应等于显式引号列 \"Id\""
+        );
+    }
+
+    #[test]
+    fn test_update_sets_column_respects_quoted_case_sensitivity() {
+        // 显式带引号的列名保留大小写，`"Id"` 与 `id` 在 PG 系下是不同列
+        let ast = parse_sql_to_ast(
+            "UPDATE users SET \"Id\" = 1 WHERE x = 1",
+            CheckDialect::PostgreSql,
+        );
+        assert!(!ast.has_parse_error());
+        let u = ast.statements[0].update.clone().expect("update info");
+        assert!(u.sets_column("\"Id\""), "带引号列名应精确匹配");
+        assert!(!u.sets_column("id"), "带引号列名不应被折叠为小写后匹配");
+    }
+
+    #[test]
+    fn test_update_order_by_detected_via_source_text_fallback() {
+        // sqlparser 0.60 的 `Update` 结构没有 order_by / group_by 字段，
+        // 语句尾部子句会被解析器忽略；靠"原文顶层子句扫描"兜底捞回来。
+        // 需要存在回退方言，主方言未干净解析时才走切片重试路径。
+        let ast = parse_sql_to_ast_fb(
+            "UPDATE t SET a = 1 ORDER BY b",
+            CheckDialect::PostgreSql,
+            Some(CheckDialect::Generic),
+        );
+        assert_eq!(
+            ast.statements[0].kind, "UPDATE",
+            "应被识别为 UPDATE（而非 PARSE_ERROR）"
+        );
+        let u = ast.statements[0].update.clone().expect("update info");
+        assert!(u.has_order_by, "ORDER BY 应被原文兜底捕获");
+        assert!(!u.has_group_by);
+        assert_eq!(u.set_columns, vec!["a"]);
+    }
+
+    #[test]
+    fn test_update_group_by_detected_via_source_text_fallback() {
+        let ast = parse_sql_to_ast_fb(
+            "UPDATE t SET a = 1 GROUP BY b",
+            CheckDialect::PostgreSql,
+            Some(CheckDialect::Generic),
+        );
+        let u = ast.statements[0].update.clone().expect("update info");
+        assert!(u.has_group_by);
+        assert!(!u.has_order_by);
+    }
+
+    #[test]
+    fn test_update_order_by_inside_subquery_is_not_top_level() {
+        // 括号里的 ORDER BY 属于子查询，不能算作 UPDATE 自身的 ORDER BY
+        let ast = parse_sql_to_ast(
+            "UPDATE t SET a = (SELECT x FROM y ORDER BY x LIMIT 1) WHERE b = 2",
+            CheckDialect::Generic,
+        );
+        assert!(!ast.has_parse_error());
+        let u = ast.statements[0].update.clone().expect("update info");
+        assert!(!u.has_order_by, "子查询内的 ORDER BY 不应误报");
+    }
+
+    #[test]
+    fn test_update_has_subquery_in_where() {
+        let ast = parse_sql_to_ast(
+            "UPDATE t SET a = 1 WHERE id IN (SELECT id FROM y)",
+            CheckDialect::Generic,
+        );
+        let u = ast.statements[0].update.clone().expect("update info");
+        assert!(u.has_subquery);
+
+        let ast2 = parse_sql_to_ast("UPDATE t SET a = 1 WHERE id = 2", CheckDialect::Generic);
+        let u2 = ast2.statements[0].update.clone().expect("update info");
+        assert!(!u2.has_subquery);
+    }
+
+    #[test]
+    fn test_delete_info_order_by_from_ast_and_group_by_from_text() {
+        // Delete 有 order_by 字段（MySQL 语法），走 AST
+        let ast = parse_sql_to_ast(
+            "DELETE FROM t WHERE a = 1 ORDER BY b",
+            CheckDialect::Generic,
+        );
+        let d = ast.statements[0].delete.clone().expect("delete info");
+        assert_eq!(d.table_name, "t");
+        assert!(d.has_order_by, "Delete.order_by 应被 AST 捕获");
+        assert!(!d.has_group_by);
+        assert!(!d.has_subquery);
+        assert!(!d.has_limit);
+    }
+
+    #[test]
+    fn test_delete_limit_and_subquery() {
+        let ast = parse_sql_to_ast(
+            "DELETE FROM t WHERE id IN (SELECT id FROM y) LIMIT 10",
+            CheckDialect::MySql,
+        );
+        assert!(!ast.has_parse_error());
+        let d = ast.statements[0].delete.clone().expect("delete info");
+        assert!(d.has_limit);
+        assert!(d.has_subquery);
+    }
+
+    // ===== C2-c：CreateIndexInfo / ViewInfo =====
+
+    #[test]
+    fn test_create_index_concurrently_unique_and_method() {
+        let ast = parse_sql_to_ast(
+            "CREATE UNIQUE INDEX CONCURRENTLY idx_u ON users USING btree (email)",
+            CheckDialect::PostgreSql,
+        );
+        assert!(!ast.has_parse_error());
+        let ci = ast.statements[0]
+            .create_index
+            .clone()
+            .expect("create index info");
+        assert_eq!(ci.name, "idx_u");
+        assert_eq!(ci.table_name, "users");
+        assert_eq!(ci.columns, vec!["email"]);
+        assert!(ci.is_unique);
+        assert!(ci.concurrently, "CONCURRENTLY 必须能取到");
+        assert!(!ci.if_not_exists);
+        assert!(
+            ci.using_method.to_lowercase().contains("btree"),
+            "USING 方法应可读，实际={}",
+            ci.using_method
+        );
+    }
+
+    #[test]
+    fn test_create_index_without_concurrently() {
+        let ast = parse_sql_to_ast("CREATE INDEX idx_u ON users (email)", CheckDialect::Generic);
+        let ci = ast.statements[0]
+            .create_index
+            .clone()
+            .expect("create index info");
+        assert!(!ci.concurrently);
+        assert!(!ci.is_unique);
+        assert!(ci.include_columns.is_empty());
+    }
+
+    #[test]
+    fn test_create_view_definition_is_analyzed() {
+        let ast = parse_sql_to_ast(
+            "CREATE VIEW v AS SELECT id FROM users ORDER BY id",
+            CheckDialect::Generic,
+        );
+        assert!(!ast.has_parse_error());
+        let v = ast.statements[0].create_view.clone().expect("view info");
+        assert_eq!(v.name, "v");
+        assert!(v.has_definition(), "视图定义体必须可读");
+        assert!(!v.is_temporary);
+        assert!(!v.if_not_exists);
+        let d = v.definition;
+        assert_eq!(d.from_table.as_deref(), Some("users"));
+        assert!(
+            d.has_order_by,
+            "视图定义体内的 ORDER BY 必须能看到（GaussDB 禁止视图内排序）"
+        );
+    }
+
+    #[test]
+    fn test_create_temp_view_flags() {
+        let ast = parse_sql_to_ast(
+            "CREATE TEMPORARY VIEW IF NOT EXISTS v AS SELECT 1 AS a",
+            CheckDialect::PostgreSql,
+        );
+        assert!(!ast.has_parse_error());
+        let v = ast.statements[0].create_view.clone().expect("view info");
+        assert!(v.is_temporary);
+        assert!(v.if_not_exists);
+        assert!(v.has_definition());
+    }
+
+    // ===== C4：原文切片 =====
+
+    #[test]
+    fn test_ast_source_is_original_text_not_rewritten() {
+        // GaussDB 方言下 `parse_sql_to_ast_fb` 会把反引号重写成双引号，
+        // 但 `source` 必须保留原文的反引号（引号类规则依赖它）。
+        let sql = "CREATE TABLE `t` (\n  `a` INT\n)";
+        let ast = parse_sql_to_ast_fb(sql, CheckDialect::GaussDB, None);
+        assert_eq!(ast.source, sql, "source 必须是原始文本");
+        assert!(
+            ast.source.contains('`'),
+            "反引号不能被归一化层抹掉，实际={}",
+            ast.source
+        );
+    }
+
+    #[test]
+    fn test_stmt_text_via_slice_and_line_range() {
+        let sql = "SELECT 1;\nUPDATE t SET a = 1;\nDELETE FROM t;";
+        let ast = parse_sql_to_ast(sql, CheckDialect::Generic);
+        assert_eq!(ast.statements.len(), 3);
+
+        assert_eq!(ast.stmt_text(&ast.statements[0]), "SELECT 1;");
+        assert_eq!(ast.stmt_text(&ast.statements[1]), "UPDATE t SET a = 1;");
+        assert_eq!(ast.stmt_text_at(2), "DELETE FROM t;");
+        assert_eq!(ast.stmt_text_at(99), "", "越界返回空串");
+        assert_eq!(ast.stmt_text_at(-1), "", "负索引返回空串");
+        assert_eq!(ast.stmt_text_at_line(2), "UPDATE t SET a = 1;");
+        assert_eq!(ast.stmt_text_at_line(999), "");
+
+        // 精确行列切片（1-based、左闭右开）：`UPDATE t SET a = 1;` 的第 15 个字符是 `a`
+        assert_eq!(ast.slice(2, 1, 2, 15), "UPDATE t SET a");
+        assert_eq!(ast.slice(2, 1, 2, 0), "UPDATE t SET a = 1;");
+        assert_eq!(ast.line_range_text(1, 2), "SELECT 1;\nUPDATE t SET a = 1;");
+    }
+
+    #[test]
+    fn test_slice_is_char_based_and_multibyte_safe() {
+        let ast = parse_sql_to_ast(
+            "CREATE TABLE 用户表 (\n  名称 VARCHAR(20)\n)",
+            CheckDialect::Generic,
+        );
+        // 列号按字符计数：第 3 个字符起
+        assert_eq!(ast.slice(1, 14, 1, 17), "用户表");
+        assert_eq!(ast.slice(2, 1, 2, 0), "  名称 VARCHAR(20)");
+    }
+
+    #[test]
+    fn test_slice_tolerates_out_of_range_and_inverted() {
+        let ast = parse_sql_to_ast("SELECT 1;", CheckDialect::Generic);
+        assert_eq!(ast.slice(1, 1, 1, 999), "SELECT 1;", "列越界取到行尾");
+        assert_eq!(ast.slice(1, 1, 99, 0), "SELECT 1;", "行越界取到文件尾");
+        assert_eq!(ast.slice(5, 1, 6, 0), "", "起始行越界返回空串");
+        assert_eq!(ast.slice(2, 1, 1, 0), "", "区间倒置返回空串");
+    }
+
+    #[test]
+    fn test_parse_error_statement_still_exposes_slice() {
+        // 全部方言都解析不出的语句：仍应保留原文可切片（规则可用文本兜底判定）
+        let sql = "TOTALLY NOT SQL @@@ ;";
+        let ast = parse_sql_to_ast(sql, CheckDialect::Generic);
+        assert_eq!(ast.source, sql);
+        assert!(ast.stmt_text_at(0).contains("@"));
     }
 }

@@ -127,6 +127,15 @@ pub struct SqlAst {
     /// 源文本中的注释（行注释与块注释）。sqlparser 解析时丢弃注释，
     /// 这里通过独立的文本扫描得到，供规则做基于注释的判断。
     pub comments: Vec<CommentInfo>,
+    /// **原始** SQL 文本（未经 `gaussdb_rewrite` 归一化）。
+    ///
+    /// 存在的意义：`parse_sql_to_ast_fb` 在 GaussDB 方言下会把文本重写为 PG 语法
+    /// （如 `` `x` `` → `"x"`、`SYSDATE` → `CURRENT_TIMESTAMP`），重写后文本会丢失
+    /// "原文是否用了反引号""原始长度"等信息。而"命名/引号/长度"类规则必须看原文，
+    /// 因此这里额外保存一份原始文本，供 [`SqlAst::slice`] / [`SqlAst::stmt_text`] 使用。
+    ///
+    /// 内存代价为 O(文件大小)，与 `RuleContext.sql_content` 同量级。
+    pub source: String,
 }
 
 /// 单个 SQL 语句的信息。
@@ -287,6 +296,71 @@ pub struct WindowFuncInfo {
     pub has_window_frame: bool,
 }
 
+/// `ORDER BY` 中的单个排序项。
+///
+/// sqlparser 0.60 的结构为
+/// `OrderBy { kind: OrderByKind::Expressions(Vec<OrderByExpr>) }`，
+/// 每项 `OrderByExpr { expr, options: OrderByOptions { asc, nulls_first } }`。
+///
+/// `asc` / `nulls_first` 是**三态**：`None` 表示原文未显式书写。
+/// GaussDB 规范要求 `ORDER BY` 必须显式指定排序方式与 NULL 排序方式，
+/// 因此"未显式指定"本身就是违规——规则需能区分 `None` 与 `Some(false)`。
+/// Rhai 侧不暴露 `Option`，改用 `has_direction()` / `direction()` /
+/// `has_nulls_spec()` / `nulls()` 这组方法表达三态。
+#[derive(Debug, Clone, Default)]
+pub struct OrderByItemInfo {
+    /// 排序表达式文本（如 `created_at` / `t1.id` / `1`）。
+    pub expr_text: String,
+    /// `Some(true)` = ASC，`Some(false)` = DESC，`None` = 原文未指定。
+    pub asc: Option<bool>,
+    /// `Some(true)` = NULLS FIRST，`Some(false)` = NULLS LAST，`None` = 原文未指定。
+    pub nulls_first: Option<bool>,
+}
+
+impl OrderByItemInfo {
+    pub fn expr_text(&self) -> String {
+        self.expr_text.clone()
+    }
+    /// 是否显式写了 `ASC` / `DESC`。
+    pub fn has_direction(&self) -> bool {
+        self.asc.is_some()
+    }
+    /// 方向文本：`ASC` / `DESC`；未显式指定时为空串。
+    pub fn direction(&self) -> String {
+        match self.asc {
+            Some(true) => "ASC".to_string(),
+            Some(false) => "DESC".to_string(),
+            None => String::new(),
+        }
+    }
+    /// 是否显式写为升序。
+    pub fn is_asc(&self) -> bool {
+        self.asc == Some(true)
+    }
+    /// 是否显式写为降序。
+    pub fn is_desc(&self) -> bool {
+        self.asc == Some(false)
+    }
+    /// 是否显式写了 `NULLS FIRST` / `NULLS LAST`。
+    pub fn has_nulls_spec(&self) -> bool {
+        self.nulls_first.is_some()
+    }
+    /// NULL 排序文本：`FIRST` / `LAST`；未显式指定时为空串。
+    pub fn nulls(&self) -> String {
+        match self.nulls_first {
+            Some(true) => "FIRST".to_string(),
+            Some(false) => "LAST".to_string(),
+            None => String::new(),
+        }
+    }
+    pub fn has_nulls_first(&self) -> bool {
+        self.nulls_first == Some(true)
+    }
+    pub fn has_nulls_last(&self) -> bool {
+        self.nulls_first == Some(false)
+    }
+}
+
 /// 表达式顶层信息（不递归暴露子表达式，避免类型爆炸）。
 #[derive(Debug, Clone, Default)]
 pub struct ExprInfo {
@@ -337,6 +411,10 @@ pub struct SelectInfo {
     pub has_qualify: bool,
     // ORDER BY / LIMIT / OFFSET / FETCH（在 Query 层，无论是否集合运算都要查）
     pub has_order_by: bool,
+    /// `ORDER BY` 的逐项明细（含 ASC/DESC 与 NULLS FIRST/LAST 的显式性）。
+    /// `OrderByKind::All`（DuckDB/ClickHouse 的 `ORDER BY ALL`）时为空列表，
+    /// 此时以 `has_order_by` 为准。
+    pub order_by_items: Vec<OrderByItemInfo>,
     pub has_limit: bool,
     pub has_offset: bool,
     pub has_fetch: bool,
@@ -374,6 +452,23 @@ pub struct InsertInfo {
 pub struct UpdateInfo {
     pub table_name: String,
     pub where_clause: Option<String>,
+    /// `SET` 子句的目标列名（AST 可得：`Assignment.target`；元组赋值展开为各列）。
+    /// 供 GaussDB「分布键值禁止 UPDATE」「禁止更新主键/唯一约束列」等规则使用。
+    pub set_columns: Vec<String>,
+    /// `SET` 子句整体文本（如 `a = 1, b = a + 1`），AST 可得。
+    pub set_clause_text: String,
+    /// `WHERE` 中是否含子查询（供「SUBSELECT 宜改 JOIN」提示）。
+    pub has_subquery: bool,
+    /// 是否含 `LIMIT`（sqlparser 0.60 `Update.limit`）。
+    pub has_limit: bool,
+    /// 原文中是否存在**顶层** `ORDER BY` 子句。
+    ///
+    /// ⚠️ 文本兜底：sqlparser 0.60 的 `Update` 结构**不含** `order_by` 字段
+    /// （`UPDATE ... ORDER BY` 会直接解析失败、落入 `PARSE_ERROR`），
+    /// 故该标志由语句原文的"顶层子句扫描"得出（跳过括号内子查询与字符串/注释）。
+    pub has_order_by: bool,
+    /// 原文中是否存在顶层 `GROUP BY` 子句（同 `has_order_by`，文本兜底）。
+    pub has_group_by: bool,
 }
 
 /// DELETE 语句信息。`where_clause` 为 SQL 文本，便于规则做字符串匹配。
@@ -381,6 +476,17 @@ pub struct UpdateInfo {
 pub struct DeleteInfo {
     pub table_name: String,
     pub where_clause: Option<String>,
+    /// `WHERE` 中是否含子查询。
+    pub has_subquery: bool,
+    /// 是否含 `LIMIT`（sqlparser 0.60 `Delete.limit`）。
+    pub has_limit: bool,
+    /// 是否含 `ORDER BY`（AST 可得：`Delete.order_by` 非空）。
+    pub has_order_by: bool,
+    /// 原文中是否存在顶层 `GROUP BY` 子句。
+    ///
+    /// ⚠️ 文本兜底：sqlparser 0.60 的 `Delete` 有 `order_by` 但**没有** `group_by`，
+    /// 故该标志由语句原文的顶层子句扫描得出。
+    pub has_group_by: bool,
 }
 
 /// TRUNCATE 语句信息。
@@ -397,6 +503,16 @@ pub struct ViewInfo {
     pub materialized: bool,
     pub is_replace: bool,
     pub column_count: i64,
+    /// 视图定义体（`AS SELECT ...`）的查询分析结果。
+    ///
+    /// 供 GaussDB「禁止在视图中排序」「禁止视图嵌套」「禁止对视图执行 SELECT 以外 DML」
+    /// 等规则使用——这些规则必须能看进视图内部，仅凭"存在 CREATE VIEW"无法判定。
+    /// 非 `CREATE VIEW` 语句取不到定义体时返回默认空对象。
+    pub definition: SelectInfo,
+    /// 是否为 `CREATE TEMP/TEMPORARY VIEW`。
+    pub is_temporary: bool,
+    /// 是否带 `IF NOT EXISTS`。
+    pub if_not_exists: bool,
 }
 
 /// CREATE INDEX 语句信息。
@@ -406,6 +522,14 @@ pub struct CreateIndexInfo {
     pub table_name: String,
     pub columns: Vec<String>,
     pub is_unique: bool,
+    /// 是否带 `CONCURRENTLY`（GaussDB 规范：有联机事务时必须加）。
+    pub concurrently: bool,
+    /// 是否带 `IF NOT EXISTS`。
+    pub if_not_exists: bool,
+    /// `USING <method>` 的索引方法（`btree` / `hash` / `gin` …），无则空串。
+    pub using_method: String,
+    /// `INCLUDE (col, ...)` 的附加列名列表。
+    pub include_columns: Vec<String>,
 }
 
 /// 事务语句信息。`kind` 取值 `START_TRANSACTION/COMMIT/ROLLBACK`。
@@ -524,6 +648,112 @@ impl SqlAst {
             }
         }
         None
+    }
+
+    // ===== 原文切片 API（C4）=====
+    // 目标：让规则能拿到"语句原文""任意行列范围的原文"，用于 AST 无法表达的检查
+    // （是否用双引号定义对象名、字段名是否带引号、语句长度、原始书写形式等）。
+    // 一律基于 `self.source`（**原始** SQL，而非 GaussDB 重写后的文本），
+    // 因此反引号、原始长度、原始大小写都被保留。
+
+    /// 原始 SQL 文本（未经方言归一化重写）。
+    pub fn source(&self) -> String {
+        self.source.clone()
+    }
+
+    /// 按行列范围切出原文片段。
+    ///
+    /// 坐标语义与 sqlparser 的 `Location` 一致：
+    /// - 行号、列号均为 **1-based**，按 **字符**（而非字节）计数；
+    /// - 返回 `[ (start_line, start_col), (end_line, end_col) )`，即**左闭右开**；
+    /// - `start_col <= 1` 视为"从行首开始"；
+    /// - `end_col <= 0` 视为"到行尾结束"；
+    /// - 兼容 LF 与 CRLF（`\r` 作为行内普通字符计入列号，与 sqlparser 一致）。
+    ///
+    /// 越界时按"取到边界为止"处理，不 panic。
+    pub fn slice(&self, start_line: i64, start_col: i64, end_line: i64, end_col: i64) -> String {
+        if self.source.is_empty() {
+            return String::new();
+        }
+        let l1 = start_line.max(1) as usize;
+        let l2 = end_line.max(1) as usize;
+        if l2 < l1 {
+            return String::new();
+        }
+        let from_col = start_col.max(1) as usize - 1;
+        let mut out = String::new();
+        for (idx, line_text) in self.source.split('\n').enumerate() {
+            let line_no = idx + 1;
+            if line_no < l1 {
+                continue;
+            }
+            if line_no > l2 {
+                break;
+            }
+            if line_no > l1 {
+                out.push('\n');
+            }
+            let chars: Vec<char> = line_text.chars().collect();
+            let from = if line_no == l1 {
+                from_col.min(chars.len())
+            } else {
+                0
+            };
+            let to = if line_no == l2 {
+                if end_col <= 0 {
+                    chars.len()
+                } else {
+                    (end_col as usize - 1).min(chars.len())
+                }
+            } else {
+                chars.len()
+            };
+            if to > from {
+                out.extend(chars[from..to].iter());
+            }
+        }
+        out
+    }
+
+    /// 取某条语句的原文（按语句的 `line..=end_line` 整行区间切片后 trim）。
+    ///
+    /// 为什么用整行区间而不是精确列：`end_line` 由"下一条语句起始行的前一行"推得，
+    /// 因此天然可能带上语句末尾的空白与同行尾随内容。trim 后覆盖绝大多数规则需求。
+    /// 需要精确边界时请用 [`SqlAst::slice`] 配合语句的行列号。
+    pub fn stmt_text(&self, stmt: &StmtInfo) -> String {
+        self.stmt_text_by_range(stmt.line, stmt.end_line)
+    }
+
+    /// 取第 `index` 条语句（0-based）的原文；越界返回空串。
+    pub fn stmt_text_at(&self, index: i64) -> String {
+        if index < 0 {
+            return String::new();
+        }
+        match self.statements.get(index as usize) {
+            Some(s) => self.stmt_text(s),
+            None => String::new(),
+        }
+    }
+
+    /// 取覆盖指定行号（1-based）的那条语句的原文；无语句覆盖时返回空串。
+    pub fn stmt_text_at_line(&self, line: i64) -> String {
+        for s in &self.statements {
+            if line >= s.line && line <= s.end_line {
+                return self.stmt_text(s);
+            }
+        }
+        String::new()
+    }
+
+    /// 取 `[start_line, end_line]`（1-based，闭区间）的整行文本并按 `\n` 连接，末尾 trim。
+    pub fn line_range_text(&self, start_line: i64, end_line: i64) -> String {
+        super::scanner::line_range_text(&self.source, start_line, end_line)
+            .trim()
+            .to_string()
+    }
+
+    fn stmt_text_by_range(&self, start_line: i64, end_line: i64) -> String {
+        self.line_range_text(start_line, end_line)
     }
 }
 
@@ -814,6 +1044,40 @@ impl SelectInfo {
     pub fn has_order_by(&self) -> bool {
         self.has_order_by
     }
+    /// `ORDER BY` 的逐项明细（含 ASC/DESC 与 NULLS FIRST/LAST 的显式性）。
+    pub fn order_by_items(&self) -> Vec<OrderByItemInfo> {
+        self.order_by_items.clone()
+    }
+    /// 是否存在"未显式指定 ASC/DESC"的排序项。
+    /// 对应 GaussDB 规范「ORDER BY 必须显式指定排序方式」。
+    /// 无 ORDER BY 时返回 false（本方法不负责"必须有 ORDER BY"）。
+    pub fn has_order_by_without_direction(&self) -> bool {
+        self.order_by_items.iter().any(|o| !o.has_direction())
+    }
+    /// 是否存在"未显式指定 NULLS FIRST/LAST"的排序项。
+    /// 对应 GaussDB 规范「ORDER BY 必须显式指定 NULL 的排序方式」。
+    pub fn has_order_by_without_nulls_spec(&self) -> bool {
+        self.order_by_items.iter().any(|o| !o.has_nulls_spec())
+    }
+    /// `ORDER BY` 整体文本（各排序项以 `, ` 连接），无则空串。
+    pub fn order_by_text(&self) -> String {
+        self.order_by_items
+            .iter()
+            .map(|o| {
+                let mut s = o.expr_text.clone();
+                if !o.direction().is_empty() {
+                    s.push(' ');
+                    s.push_str(&o.direction());
+                }
+                if !o.nulls().is_empty() {
+                    s.push_str(" NULLS ");
+                    s.push_str(&o.nulls());
+                }
+                s
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
     pub fn has_limit(&self) -> bool {
         self.has_limit
     }
@@ -937,6 +1201,42 @@ impl UpdateInfo {
     pub fn where_clause(&self) -> String {
         self.where_clause.clone().unwrap_or_default()
     }
+    /// `SET` 子句的目标列名列表。
+    pub fn set_columns(&self) -> Vec<String> {
+        self.set_columns.clone()
+    }
+    /// 是否存在某个目标列被赋值（大小写不敏感，自动去掉 schema 前缀与引号）。
+    ///
+    /// 供「分布键值禁止 UPDATE」「禁止更新主键列」类规则使用：
+    /// `u.sets_column("id")`。
+    pub fn sets_column(&self, name: &str) -> bool {
+        let target = crate::rule::engine::idents::normalize_ident(name);
+        if target.is_empty() {
+            return false;
+        }
+        self.set_columns
+            .iter()
+            .any(|c| crate::rule::engine::idents::normalize_ident(c) == target)
+    }
+    /// `SET` 子句整体文本。
+    pub fn set_clause_text(&self) -> String {
+        self.set_clause_text.clone()
+    }
+    /// `WHERE` 中是否含子查询。
+    pub fn has_subquery(&self) -> bool {
+        self.has_subquery
+    }
+    pub fn has_limit(&self) -> bool {
+        self.has_limit
+    }
+    /// 是否含顶层 `ORDER BY`（文本兜底，见字段注释）。
+    pub fn has_order_by(&self) -> bool {
+        self.has_order_by
+    }
+    /// 是否含顶层 `GROUP BY`（文本兜底，见字段注释）。
+    pub fn has_group_by(&self) -> bool {
+        self.has_group_by
+    }
 }
 
 impl DeleteInfo {
@@ -948,6 +1248,20 @@ impl DeleteInfo {
     }
     pub fn where_clause(&self) -> String {
         self.where_clause.clone().unwrap_or_default()
+    }
+    /// `WHERE` 中是否含子查询。
+    pub fn has_subquery(&self) -> bool {
+        self.has_subquery
+    }
+    pub fn has_limit(&self) -> bool {
+        self.has_limit
+    }
+    pub fn has_order_by(&self) -> bool {
+        self.has_order_by
+    }
+    /// 是否含顶层 `GROUP BY`（文本兜底，见字段注释）。
+    pub fn has_group_by(&self) -> bool {
+        self.has_group_by
     }
 }
 
@@ -1010,6 +1324,23 @@ impl ViewInfo {
     pub fn column_count(&self) -> i64 {
         self.column_count
     }
+    /// 视图定义体（`AS SELECT ...`）的查询分析结果。
+    /// 非 `CREATE VIEW` 语句返回默认空对象（此时 `definition().has_from_table()` 为 false）。
+    pub fn definition(&self) -> SelectInfo {
+        self.definition.clone()
+    }
+    /// 定义体是否可用（即确实解析出了 `AS SELECT ...`）。
+    pub fn has_definition(&self) -> bool {
+        !self.definition.projection.is_empty()
+            || self.definition.has_from_table()
+            || self.definition.has_order_by
+    }
+    pub fn is_temporary(&self) -> bool {
+        self.is_temporary
+    }
+    pub fn if_not_exists(&self) -> bool {
+        self.if_not_exists
+    }
 }
 
 impl CreateIndexInfo {
@@ -1024,6 +1355,21 @@ impl CreateIndexInfo {
     }
     pub fn is_unique(&self) -> bool {
         self.is_unique
+    }
+    /// 是否带 `CONCURRENTLY`（GaussDB 规范：有联机事务时必须加）。
+    pub fn concurrently(&self) -> bool {
+        self.concurrently
+    }
+    pub fn if_not_exists(&self) -> bool {
+        self.if_not_exists
+    }
+    /// `USING <method>` 的索引方法（`btree` / `hash` / `gin` …），无则空串。
+    pub fn using_method(&self) -> String {
+        self.using_method.clone()
+    }
+    /// `INCLUDE (col, ...)` 的附加列名列表。
+    pub fn include_columns(&self) -> Vec<String> {
+        self.include_columns.clone()
     }
 }
 
@@ -1341,6 +1687,7 @@ mod tests {
             parse_error: None,
             has_comma_join_anywhere: false,
             comments: Vec::new(),
+            source: String::new(),
         };
         ast.statements.push(StmtInfo {
             kind: "OTHER".to_string(),

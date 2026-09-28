@@ -7,6 +7,7 @@ use crate::config::{Config, RuleConfig};
 use crate::error::{SqlGuardError, Violation};
 
 use super::ast::*;
+use super::idents;
 use super::parser::parse_sql_to_ast_fb;
 
 /// 规则脚本公共辅助函数。在每条规则脚本执行前自动 prepend，
@@ -377,6 +378,11 @@ fn run_single_rule(
         Dynamic::from_int(context.line_count as i64),
     );
     ctx_map.insert("ast".into(), Dynamic::from(context.ast.clone()));
+    // C8：规则参数注入。未配置时为空 Map，脚本应自行给默认值。
+    ctx_map.insert(
+        "params".into(),
+        Dynamic::from(toml_params_to_map(rule_config.params.as_ref())),
+    );
     scope.push("context", Dynamic::from(ctx_map));
 
     let violations_array: Array = Array::new();
@@ -501,6 +507,7 @@ pub fn build_engine() -> Engine {
     engine.register_type_with_name::<TransactionInfo>("TransactionInfo");
     engine.register_type_with_name::<CteInfo>("CteInfo");
     engine.register_type_with_name::<WindowFuncInfo>("WindowFuncInfo");
+    engine.register_type_with_name::<OrderByItemInfo>("OrderByItemInfo");
     engine.register_type_with_name::<ExprInfo>("ExprInfo");
     engine.register_type_with_name::<ForeignKeyInfo>("ForeignKeyInfo");
     engine.register_type_with_name::<CheckInfo>("CheckInfo");
@@ -882,7 +889,150 @@ pub fn build_engine() -> Engine {
     engine.register_fn("line", |c: &mut CommentInfo| c.line());
     engine.register_fn("kind", |c: &mut CommentInfo| c.kind());
 
+    // ===== C2-a：OrderByItemInfo + SelectInfo 的 ORDER BY 明细 =====
+
+    // OrderByItemInfo 方法（Rhai 不暴露 Option，三态用 has_*/direction/nulls 表达）
+    engine.register_fn("expr_text", |o: &mut OrderByItemInfo| o.expr_text());
+    engine.register_fn("has_direction", |o: &mut OrderByItemInfo| o.has_direction());
+    engine.register_fn("direction", |o: &mut OrderByItemInfo| o.direction());
+    engine.register_fn("is_asc", |o: &mut OrderByItemInfo| o.is_asc());
+    engine.register_fn("is_desc", |o: &mut OrderByItemInfo| o.is_desc());
+    engine.register_fn("has_nulls_spec", |o: &mut OrderByItemInfo| {
+        o.has_nulls_spec()
+    });
+    engine.register_fn("nulls", |o: &mut OrderByItemInfo| o.nulls());
+    engine.register_fn("has_nulls_first", |o: &mut OrderByItemInfo| {
+        o.has_nulls_first()
+    });
+    engine.register_fn("has_nulls_last", |o: &mut OrderByItemInfo| {
+        o.has_nulls_last()
+    });
+
+    engine.register_fn("order_by_items", |s: &mut SelectInfo| -> Array {
+        s.order_by_items().into_iter().map(Dynamic::from).collect()
+    });
+    engine.register_fn("has_order_by_without_direction", |s: &mut SelectInfo| {
+        s.has_order_by_without_direction()
+    });
+    engine.register_fn("has_order_by_without_nulls_spec", |s: &mut SelectInfo| {
+        s.has_order_by_without_nulls_spec()
+    });
+    engine.register_fn("order_by_text", |s: &mut SelectInfo| s.order_by_text());
+
+    // ===== C2-b：UpdateInfo / DeleteInfo 子句字段 =====
+
+    engine.register_fn("set_columns", |u: &mut UpdateInfo| -> Array {
+        u.set_columns().into_iter().map(Dynamic::from).collect()
+    });
+    engine.register_fn("sets_column", |u: &mut UpdateInfo, name: String| {
+        u.sets_column(&name)
+    });
+    engine.register_fn("set_clause_text", |u: &mut UpdateInfo| u.set_clause_text());
+    engine.register_fn("has_subquery", |u: &mut UpdateInfo| u.has_subquery());
+    engine.register_fn("has_limit", |u: &mut UpdateInfo| u.has_limit());
+    engine.register_fn("has_order_by", |u: &mut UpdateInfo| u.has_order_by());
+    engine.register_fn("has_group_by", |u: &mut UpdateInfo| u.has_group_by());
+
+    engine.register_fn("has_subquery", |d: &mut DeleteInfo| d.has_subquery());
+    engine.register_fn("has_limit", |d: &mut DeleteInfo| d.has_limit());
+    engine.register_fn("has_order_by", |d: &mut DeleteInfo| d.has_order_by());
+    engine.register_fn("has_group_by", |d: &mut DeleteInfo| d.has_group_by());
+
+    // ===== C2-c：ViewInfo 定义体 / CreateIndexInfo 细节 =====
+
+    engine.register_fn("definition", |v: &mut ViewInfo| v.definition());
+    engine.register_fn("has_definition", |v: &mut ViewInfo| v.has_definition());
+    engine.register_fn("is_temporary", |v: &mut ViewInfo| v.is_temporary());
+    engine.register_fn("if_not_exists", |v: &mut ViewInfo| v.if_not_exists());
+
+    engine.register_fn("concurrently", |c: &mut CreateIndexInfo| c.concurrently());
+    engine.register_fn("if_not_exists", |c: &mut CreateIndexInfo| c.if_not_exists());
+    engine.register_fn("using_method", |c: &mut CreateIndexInfo| c.using_method());
+    engine.register_fn("include_columns", |c: &mut CreateIndexInfo| -> Array {
+        c.include_columns().into_iter().map(Dynamic::from).collect()
+    });
+
+    // ===== C4：语句原文切片 =====
+    // 基于 SqlAst.source（**原始** SQL，非方言归一化后的文本），
+    // 用于 AST 无法表达的检查（引号写法、原始长度、原始大小写等）。
+
+    engine.register_fn("source", |a: &mut SqlAst| a.source());
+    engine.register_fn(
+        "slice",
+        |a: &mut SqlAst, l1: i64, c1: i64, l2: i64, c2: i64| a.slice(l1, c1, l2, c2),
+    );
+    engine.register_fn("stmt_text", |a: &mut SqlAst, s: StmtInfo| a.stmt_text(&s));
+    engine.register_fn("stmt_text_at", |a: &mut SqlAst, index: i64| {
+        a.stmt_text_at(index)
+    });
+    engine.register_fn("stmt_text_at_line", |a: &mut SqlAst, line: i64| {
+        a.stmt_text_at_line(line)
+    });
+    engine.register_fn("line_range_text", |a: &mut SqlAst, l1: i64, l2: i64| {
+        a.line_range_text(l1, l2)
+    });
+
+    // ===== C5：标识符与字节级工具函数（全局函数，非方法）=====
+
+    engine.register_fn("len_bytes", |s: String| idents::len_bytes(&s));
+    engine.register_fn("is_valid_ident", |s: String| idents::is_valid_ident(&s));
+    engine.register_fn("is_quoted_ident", |s: String| idents::is_quoted_ident(&s));
+    engine.register_fn("strip_quotes", |s: String| idents::strip_quotes(&s));
+    engine.register_fn("ident_leaf", |s: String| idents::ident_leaf(&s));
+    engine.register_fn("normalize_ident", |s: String| idents::normalize_ident(&s));
+    engine.register_fn("is_reserved_word", |s: String| idents::is_reserved_word(&s));
+    engine.register_fn("has_reserved_prefix", |s: String| {
+        idents::has_reserved_prefix(&s)
+    });
+
     engine
+}
+
+/// 把规则配置里的 `params`（TOML 值）转成注入脚本的 Rhai Map（C8）。
+///
+/// 约定：
+/// - `params` 是 TOML table → 逐键递归转换；
+/// - `params` 是标量/数组等**非 table** 形态 → 包成 `#{ "value": ... }`，
+///   保证脚本侧 `context["params"]` **恒为 Map**，避免"有的项目写内联标量"
+///   导致脚本里出现类型分支；
+/// - `params` 未配置（`None`）→ 空 Map。
+fn toml_params_to_map(params: Option<&toml::Value>) -> Map {
+    match params {
+        None => Map::new(),
+        Some(toml::Value::Table(t)) => {
+            let mut m = Map::new();
+            for (k, v) in t {
+                m.insert(k.clone().into(), toml_to_dynamic(v));
+            }
+            m
+        }
+        Some(other) => {
+            let mut m = Map::new();
+            m.insert("value".into(), toml_to_dynamic(other));
+            m
+        }
+    }
+}
+
+/// 递归把 `toml::Value` 转成 Rhai `Dynamic`。
+///
+/// `Datetime` 在 Rhai 中没有对应类型，转为 RFC3339 字符串（脚本按字符串处理即可）。
+fn toml_to_dynamic(v: &toml::Value) -> Dynamic {
+    match v {
+        toml::Value::String(s) => Dynamic::from(s.clone()),
+        toml::Value::Integer(i) => Dynamic::from_int(*i),
+        toml::Value::Float(f) => Dynamic::from_float(*f),
+        toml::Value::Boolean(b) => Dynamic::from_bool(*b),
+        toml::Value::Datetime(d) => Dynamic::from(d.to_string()),
+        toml::Value::Array(a) => Dynamic::from(a.iter().map(toml_to_dynamic).collect::<Array>()),
+        toml::Value::Table(t) => {
+            let mut m = Map::new();
+            for (k, val) in t {
+                m.insert(k.clone().into(), toml_to_dynamic(val));
+            }
+            Dynamic::from(m)
+        }
+    }
 }
 
 #[cfg(test)]
@@ -914,7 +1064,6 @@ mod tests {
     fn test_parse_rule_ids_single() {
         assert_eq!(parse_rule_ids("DML001"), vec!["DML001".to_string()]);
     }
-
     #[test]
     fn test_parse_rule_ids_multiple_comma() {
         assert_eq!(
@@ -1127,5 +1276,234 @@ mod tests {
             "calls to unregistered functions must fail, got: {:?}",
             result
         );
+    }
+
+    // ===== C8：规则参数注入 =====
+
+    #[test]
+    fn test_toml_params_to_map_none_yields_empty_map() {
+        assert!(toml_params_to_map(None).is_empty());
+    }
+
+    #[test]
+    fn test_toml_params_to_map_wraps_non_table_under_value_key() {
+        // 非 table 形态（标量/数组）包成 #{ "value": ... }，保证脚本侧恒为 Map
+        let m = toml_params_to_map(Some(&toml::Value::Integer(5)));
+        assert_eq!(m.len(), 1);
+        assert_eq!(m["value"].clone().try_cast::<i64>(), Some(5));
+
+        let arr = toml::Value::Array(vec![toml::Value::Integer(1), toml::Value::Integer(2)]);
+        let m2 = toml_params_to_map(Some(&arr));
+        let v: Array = m2["value"].clone().try_cast::<Array>().expect("array");
+        assert_eq!(v.len(), 2);
+    }
+
+    #[test]
+    fn test_toml_params_to_map_converts_all_scalar_kinds() {
+        let src = r#"
+            n = 3
+            f = 0.5
+            b = true
+            s = "x"
+            arr = [1, 2]
+            [nested]
+            k = "v"
+        "#;
+        let value: toml::Value = toml::from_str(src).expect("parse toml");
+        let m = toml_params_to_map(Some(&value));
+
+        assert_eq!(m["n"].clone().try_cast::<i64>(), Some(3));
+        assert_eq!(m["f"].clone().try_cast::<f64>(), Some(0.5));
+        assert_eq!(m["b"].clone().try_cast::<bool>(), Some(true));
+        assert_eq!(m["s"].clone().try_cast::<String>().as_deref(), Some("x"));
+        assert_eq!(
+            m["arr"].clone().try_cast::<Array>().map(|a| a.len()),
+            Some(2)
+        );
+        let nested: Map = m["nested"].clone().try_cast::<Map>().expect("nested map");
+        assert_eq!(
+            nested["k"].clone().try_cast::<String>().as_deref(),
+            Some("v")
+        );
+    }
+
+    #[test]
+    fn test_params_reachable_from_rule_script() {
+        // 端到端：配置里的 params 必须能被脚本通过 context["params"] 读到。
+        let dir = tempfile::tempdir().expect("tempdir");
+        let script = dir.path().join("params_probe.rhai");
+        fs::write(
+            &script,
+            r#"
+let p = context["params"];
+let limit = -1;
+if "max_join_tables" in p {
+    limit = p["max_join_tables"];
+}
+violations.push(violation_msg("limit=" + limit.to_string()));
+"#,
+        )
+        .expect("write script");
+
+        let mut params = toml::Table::new();
+        params.insert("max_join_tables".to_string(), toml::Value::Integer(3));
+        params.insert(
+            "label".to_string(),
+            toml::Value::String("gaussdb".to_string()),
+        );
+        let rule_config = RuleConfig {
+            id: "T001".to_string(),
+            name: "params_probe".to_string(),
+            group: None,
+            description: None,
+            enabled: true,
+            script_path: script.clone(),
+            applies_to: vec!["sql".to_string()],
+            severity: "warning".to_string(),
+            params: Some(toml::Value::Table(params)),
+        };
+
+        let context = RuleContext {
+            sql_content: "SELECT 1;".to_string(),
+            file_path: "x.sql".to_string(),
+            file_name: "x.sql".to_string(),
+            script_type: "sql".to_string(),
+            line_count: 1,
+            ast: parse_sql_to_ast_fb("SELECT 1;", crate::config::CheckDialect::Generic, None),
+        };
+
+        let engine = build_engine();
+        let vs = run_single_rule(&engine, &context, &rule_config, &script, 0).expect("run rule");
+        assert_eq!(vs.len(), 1);
+        assert_eq!(vs[0].message, "limit=3");
+        assert_eq!(vs[0].rule_id, "T001");
+    }
+
+    #[test]
+    fn test_params_absent_yields_empty_map_in_script() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let script = dir.path().join("no_params_probe.rhai");
+        fs::write(
+            &script,
+            r#"
+let p = context["params"];
+violations.push(violation_msg("len=" + p.len().to_string()));
+"#,
+        )
+        .expect("write script");
+
+        let rule_config = RuleConfig {
+            id: "T002".to_string(),
+            name: "no_params_probe".to_string(),
+            group: None,
+            description: None,
+            enabled: true,
+            script_path: script.clone(),
+            applies_to: vec!["sql".to_string()],
+            severity: "warning".to_string(),
+            params: None,
+        };
+        let context = RuleContext {
+            sql_content: "SELECT 1;".to_string(),
+            file_path: "x.sql".to_string(),
+            file_name: "x.sql".to_string(),
+            script_type: "sql".to_string(),
+            line_count: 1,
+            ast: parse_sql_to_ast_fb("SELECT 1;", crate::config::CheckDialect::Generic, None),
+        };
+
+        let engine = build_engine();
+        let vs = run_single_rule(&engine, &context, &rule_config, &script, 0).expect("run rule");
+        assert_eq!(vs.len(), 1);
+        assert_eq!(vs[0].message, "len=0");
+    }
+
+    // ===== C4 / C5：切片与标识符工具可从脚本调用 =====
+
+    #[test]
+    fn test_slice_helpers_reachable_from_rule_script() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let script = dir.path().join("slice_probe.rhai");
+        fs::write(
+            &script,
+            r#"
+let ast = context["ast"];
+let s = ast.statements()[0];
+violations.push(violation_msg(
+    ast.stmt_text(s) + "|" + ast.source().len().to_string()
+));
+"#,
+        )
+        .expect("write script");
+
+        let rule_config = RuleConfig {
+            id: "T003".to_string(),
+            name: "slice_probe".to_string(),
+            group: None,
+            description: None,
+            enabled: true,
+            script_path: script.clone(),
+            applies_to: vec!["sql".to_string()],
+            severity: "warning".to_string(),
+            params: None,
+        };
+        let sql = "SELECT 1;";
+        let context = RuleContext {
+            sql_content: sql.to_string(),
+            file_path: "x.sql".to_string(),
+            file_name: "x.sql".to_string(),
+            script_type: "sql".to_string(),
+            line_count: 1,
+            ast: parse_sql_to_ast_fb(sql, crate::config::CheckDialect::Generic, None),
+        };
+
+        let engine = build_engine();
+        let vs = run_single_rule(&engine, &context, &rule_config, &script, 0).expect("run rule");
+        assert_eq!(vs[0].message, "SELECT 1;|9");
+    }
+
+    #[test]
+    fn test_ident_helpers_reachable_from_rule_script() {
+        let engine = build_engine();
+        let mut scope = Scope::new();
+        let got = engine
+            .eval_with_scope::<String>(
+                &mut scope,
+                r#"
+is_valid_ident("users").to_string() + "|" +
+len_bytes("中文").to_string() + "|" +
+is_reserved_word("select").to_string() + "|" +
+is_quoted_ident("\"t\"").to_string() + "|" +
+has_reserved_prefix("pg_class").to_string() + "|" +
+ident_leaf("ofsm.cdeorg") + "|" +
+normalize_ident("Users")
+"#,
+            )
+            .expect("script should run");
+        assert_eq!(got, "true|6|true|true|true|cdeorg|users");
+    }
+
+    #[test]
+    fn test_order_by_and_clause_helpers_reachable_from_rule_script() {
+        let engine = build_engine();
+        let ast = parse_sql_to_ast_fb(
+            "SELECT id FROM t ORDER BY a DESC",
+            crate::config::CheckDialect::Generic,
+            None,
+        );
+        let mut scope = Scope::new();
+        scope.push("ast", Dynamic::from(ast));
+        let got = engine
+            .eval_with_scope::<String>(
+                &mut scope,
+                r#"
+let sel = ast.statements()[0].select();
+let ob = sel.order_by_items()[0];
+sel.order_by_text() + "|" + ob.direction() + "|" +
+sel.has_order_by_without_nulls_spec().to_string()
+"#,
+            )
+            .expect("script should run");
+        assert_eq!(got, "a DESC|DESC|true");
     }
 }

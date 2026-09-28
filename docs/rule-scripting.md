@@ -36,6 +36,7 @@ SqlGuard 使用 [Rhai](https://rhai.rs/) 脚本语言编写自定义规则。每
 | `script_type` | String | 分类后的脚本类型（如 `ddl`、`dml`、`other`），由 `sqlguard.toml` 中 `[[classification.rules]]` 决定 |
 | `line_count` | INT | SQL 文件总行数 |
 | `ast` | SqlAst | 解析后的 AST，见下文 |
+| `params` | Map | 该规则的配置参数（来自 `[[rules]].params` / `[rules.params]`）；未配置时为空 Map。见 §5.10.3 |
 
 访问方式：`context["ast"]`、`context["sql_content"]` 等。
 
@@ -226,6 +227,10 @@ AST 包装类型定义于 [`src/rule/engine/ast.rs`](../src/rule/engine/ast.rs)�
 | `has_having()` | bool | 是否含 HAVING 子句 |
 | `has_qualify()` | bool | 是否含 QUALIFY 子句（Snowflake 等方言） |
 | `has_order_by()` | bool | 是否含 ORDER BY（在 Query 层，集合运算也能查到） |
+| `order_by_items()` | Array&lt;OrderByItemInfo&gt; | ORDER BY 的逐项明细（含 ASC/DESC 与 NULLS FIRST/LAST 的显式性）。`ORDER BY ALL` 时为空列表 |
+| `has_order_by_without_direction()` | bool | 是否存在未显式写 `ASC`/`DESC` 的排序项（无 ORDER BY 时为 false） |
+| `has_order_by_without_nulls_spec()` | bool | 是否存在未显式写 `NULLS FIRST/LAST` 的排序项 |
+| `order_by_text()` | String | ORDER BY 整体文本（各项以 `, ` 连接） |
 | `has_limit()` | bool | 是否含 LIMIT |
 | `has_offset()` | bool | 是否含 OFFSET |
 | `has_fetch()` | bool | 是否含 FETCH（SQL:2008 风格分页） |
@@ -267,9 +272,20 @@ AST 包装类型定义于 [`src/rule/engine/ast.rs`](../src/rule/engine/ast.rs)�
 | `UpdateInfo.table_name()` | String | UPDATE 目标表名 |
 | `UpdateInfo.has_where()` | bool | 是否含 WHERE |
 | `UpdateInfo.where_clause()` | String | WHERE 表达式文本 |
+| `UpdateInfo.set_columns()` | Array&lt;String&gt; | `SET` 的目标列名（元组赋值展开为各列） |
+| `UpdateInfo.sets_column(name)` | bool | 某个列是否被赋值（大小写不敏感、自动去 schema 前缀与引号） |
+| `UpdateInfo.set_clause_text()` | String | `SET` 子句整体文本 |
+| `UpdateInfo.has_subquery()` | bool | WHERE 中是否含子查询 |
+| `UpdateInfo.has_limit()` | bool | 是否含 `LIMIT` |
+| `UpdateInfo.has_order_by()` | bool | 是否含顶层 `ORDER BY`（⚠️ 原文兜底，见 §5.10.2） |
+| `UpdateInfo.has_group_by()` | bool | 是否含顶层 `GROUP BY`（⚠️ 原文兜底） |
 | `DeleteInfo.table_name()` | String | DELETE 目标表名 |
 | `DeleteInfo.has_where()` | bool | 是否含 WHERE |
 | `DeleteInfo.where_clause()` | String | WHERE 表达式文本 |
+| `DeleteInfo.has_subquery()` | bool | WHERE 中是否含子查询 |
+| `DeleteInfo.has_limit()` | bool | 是否含 `LIMIT` |
+| `DeleteInfo.has_order_by()` | bool | 是否含 `ORDER BY`（AST 可得） |
+| `DeleteInfo.has_group_by()` | bool | 是否含顶层 `GROUP BY`（⚠️ 原文兜底） |
 
 ## 5. 新增 Info 类型（P1-P3 能力扩展）
 
@@ -390,8 +406,195 @@ AST 包装类型定义于 [`src/rule/engine/ast.rs`](../src/rule/engine/ast.rs)�
 | `line()` | INT | 注释所在行号（1-based） |
 | `kind()` | String | `LINE`（行注释）或 `BLOCK`（块注释） |
 
-## 6. Rhai 语法要点
+### 5.10 子句修饰符 / 原文切片 / 标识符工具 / 规则参数
 
+本节对应 GaussDB 规范落地时补齐的四项引擎能力（C2 / C4 / C5 / C8）。
+
+#### 5.10.1 `OrderByItemInfo`（ORDER BY 逐项明细）
+
+由 `SelectInfo.order_by_items()` 返回。Rhai 不暴露 `Option`，方向与 NULL 排序都是**三态**，
+用 `has_*` 方法区分"原文未显式指定"与"显式指定为某个值"——「未指定」正是 GaussDB 规范的违规点。
+
+| 方法 | 返回类型 | 说明 |
+|------|----------|------|
+| `expr_text()` | String | 排序表达式文本 |
+| `has_direction()` | bool | 是否显式写了 `ASC` / `DESC` |
+| `direction()` | String | `ASC` / `DESC`；未指定时为空串 |
+| `is_asc()` / `is_desc()` | bool | 是否为显式升序 / 降序 |
+| `has_nulls_spec()` | bool | 是否显式写了 `NULLS FIRST` / `NULLS LAST` |
+| `nulls()` | String | `FIRST` / `LAST`；未指定时为空串 |
+| `has_nulls_first()` / `has_nulls_last()` | bool | 是否为显式 NULLS FIRST / LAST |
+
+```rhai
+// GaussDB：ORDER BY 必须显式指定 ASC/DESC 与 NULL 排序方式
+for s in ast.statements() {
+    if s.has_select() {
+        let sel = s.select();
+        if sel.has_order_by() {
+            if sel.has_order_by_without_direction() {
+                violations.push(violation("ORDER BY must specify ASC/DESC", s.line(), s.column()));
+            }
+            if sel.has_order_by_without_nulls_spec() {
+                violations.push(violation("ORDER BY must specify NULLS FIRST/LAST", s.line(), s.column()));
+            }
+        }
+    }
+}
+```
+
+#### 5.10.2 语句原文切片（C4）
+
+方言归一化层会重写文本（GaussDB 下 `` `x` `` → `"x"`、`SYSDATE` → `CURRENT_TIMESTAMP`），
+sqlparser 也会丢弃引号写法。`SqlAst.source` 保存的是**原始文本**（未经重写），切片 API 全部基于它。
+
+| 方法 | 返回类型 | 说明 |
+|------|----------|------|
+| `source()` | String | 原始 SQL 全文 |
+| `slice(start_line, start_col, end_line, end_col)` | String | 精确切片：1-based、**按字符**计数、左闭右开；`start_col<=1` 表示从行首，`end_col<=0` 表示到行尾；兼容 LF/CRLF；越界不 panic |
+| `stmt_text(stmt)` | String | 某条语句的原文（按 `line..=end_line` 整行区间切片后 trim） |
+| `stmt_text_at(index)` | String | 第 `index` 条语句（0-based）原文；越界返回空串 |
+| `stmt_text_at_line(line)` | String | 覆盖指定行号的那条语句原文 |
+| `line_range_text(l1, l2)` | String | 闭区间行范围 `[l1, l2]` 的整行文本（trim） |
+
+> ⚠️ 语句原文取的是**整行区间**：若同一行写了两条语句（`A; B;`），会连带取到同行后续内容。
+> 需要精确边界时用 `slice()` 配合语句的 `line()` / `column()`。
+
+**依赖原文兜底的字段**：`UpdateInfo.has_order_by()` / `has_group_by()`、`DeleteInfo.has_group_by()`。
+原因是 sqlparser 0.60 的 `Update` 结构没有 `order_by`/`group_by` 字段、`Delete` 没有 `group_by`。
+这些标志由「语句原文的顶层子句扫描」得出：跟踪括号深度并跳过字符串/注释，因此
+`OVER (ORDER BY ...)`、`WHERE x IN (SELECT ... ORDER BY ...)` 里的同名子句不会被误判为顶层。
+
+> ⚠️ 边界情形：`UPDATE ... ORDER BY` 在 sqlparser 中是"残缺解析"，要靠**方言回退链**才能拿到
+> UPDATE 节点。若方言链没有可用的回退方言（如 `dialect = "generic"` 且未配置 `dialect_fallback`），
+> 这类语句会退化为 `PARSE_ERROR`（会报 PARSE 警告，不会静默），此时 `has_order_by()` 取不到值。
+> 使用 `gaussdb` / `postgresql` 方言时链尾恒有 `generic` 兜底，不受影响。
+
+```rhai
+// 字段名是否被引号包裹（AST 无法表达，需看原文）
+for s in ast.statements() {
+    if s.has_alter_table() {
+        let t = ast.stmt_text(s);
+        if t.contains("\"") {
+            violations.push(violation("do not quote column names in DDL", s.line(), s.column()));
+        }
+    }
+}
+```
+
+#### 5.10.3 规则参数（C8）
+
+`[[rules]]` 下用 `[rules.params]`（或内联 `params = {...}`）声明任意参数，注入到 `context["params"]`：
+
+```toml
+[[rules]]
+id = "GDML001"
+name = "max_join_tables"
+script_path = "config/rules/gaussdb/dml/max_join_tables.rhai"
+applies_to = ["dml"]
+severity = "warning"
+
+[rules.params]
+max_join_tables = 3
+max_join_tables_batch = 5
+```
+
+```rhai
+let p = context["params"];
+let limit = 3;                                   // 脚本内默认值：配置缺失时生效
+if "max_join_tables" in p { limit = p["max_join_tables"]; }
+```
+
+- 未配置时 `context["params"]` 是**空 Map**（不是 `()`），可直接 `len()` / 用 `in` 判定
+- 整个 `params` 写成非 table 形态（标量 / 数组）时会被包成 `#{ "value": ... }`，保证脚本侧恒为 Map
+- TOML `Datetime` 转为 RFC3339 字符串（Rhai 没有日期类型）
+
+#### 5.10.4 标识符与字节级内置函数（C5）
+
+全局函数，脚本顶层直接调用，无需经 `context`：
+
+| 函数 | 返回类型 | 说明 |
+|------|----------|------|
+| `len_bytes(s)` | INT | UTF-8 **字节**长度。Rhai 的 `s.len()` 是字符数；「对象名 ≤63 字节」这类规则必须用本函数 |
+| `is_valid_ident(s)` | bool | 非空、仅含 `[A-Za-z0-9_]`、不以数字开头（**不**先剥引号，故带引号返回 false） |
+| `is_quoted_ident(s)` | bool | 是否被 `"` / `` ` `` / `[]` 成对包裹 |
+| `strip_quotes(s)` | String | 剥掉成对引号；不配对时原样返回 |
+| `ident_leaf(s)` | String | 取最后一段标识符并剥引号（`ofsm.cdeorg` → `cdeorg`） |
+| `normalize_ident(s)` | String | 叶子名 + PG 折叠：未加引号 → 小写，加引号 → 保留大小写 |
+| `is_reserved_word(s)` | bool | 叶子名是否为 SQL 保留关键字（大小写不敏感，117 项） |
+| `has_reserved_prefix(s)` | bool | 叶子名是否以 `pg_` / `gs_` / `adm_` / `my_` / `db_` 开头 |
+
+```rhai
+// GaussDB 命名四连：字符集 / 引号 / 预留前缀 / 字节长度
+for s in ast.statements() {
+    if s.has_create_table() {
+        let t = s.create_table().table_name();
+        if !is_valid_ident(t) {
+            violations.push(violation("object name must use only letters, digits and underscores", s.line(), s.column()));
+        }
+        if is_quoted_ident(t) {
+            violations.push(violation("do not quote object names", s.line(), s.column()));
+        }
+        if has_reserved_prefix(t) || is_reserved_word(t) {
+            violations.push(violation("reserved name or prefix: " + t, s.line(), s.column()));
+        }
+        if len_bytes(t) > 63 {
+            violations.push(violation("object name exceeds 63 bytes", s.line(), s.column()));
+        }
+    }
+}
+```
+
+> `is_reserved_word` / `has_reserved_prefix` 作用于**叶子段**，因此 `ofsm.pg_class` 也能命中。
+> 保留字表（`src/rule/engine/idents.rs::RESERVED_WORDS`）目前与 DDL003 规则脚本的内联表
+> 语义一致，改一处必须同步另一处。
+
+#### 5.10.5 新增字段速查
+
+| 类型 | 新增方法 |
+|------|----------|
+| `SelectInfo` | `order_by_items()` / `has_order_by_without_direction()` / `has_order_by_without_nulls_spec()` / `order_by_text()` |
+| `UpdateInfo` | `set_columns()` / `sets_column(name)` / `set_clause_text()` / `has_subquery()` / `has_limit()` / `has_order_by()` / `has_group_by()` |
+| `DeleteInfo` | `has_subquery()` / `has_limit()` / `has_order_by()` / `has_group_by()` |
+| `CreateIndexInfo` | `concurrently()` / `if_not_exists()` / `using_method()` / `include_columns()` |
+| `ViewInfo` | `definition()`（返回 `SelectInfo`） / `has_definition()` / `is_temporary()` / `if_not_exists()` |
+| `SqlAst` | `source()` / `slice(l1,c1,l2,c2)` / `stmt_text(stmt)` / `stmt_text_at(i)` / `stmt_text_at_line(l)` / `line_range_text(l1,l2)` |
+
+```rhai
+// 视图内部检查（GaussDB：禁止在视图中排序）
+for s in ast.statements() {
+    if s.has_create_view() {
+        let v = s.create_view();
+        if v.has_definition() && v.definition().has_order_by() {
+            violations.push(violation("ORDER BY is not allowed inside a view", s.line(), s.column()));
+        }
+    }
+}
+
+// 索引并发创建（GaussDB：有联机事务时建索引必须加 CONCURRENTLY）
+for s in ast.statements() {
+    if s.has_create_index() {
+        let ci = s.create_index();
+        if !ci.concurrently() {
+            violations.push(violation("CREATE INDEX should use CONCURRENTLY in online systems", s.line(), s.column()));
+        }
+    }
+}
+
+// UPDATE SET 是否触碰了某个列（GaussDB：分布键值禁止 UPDATE）
+for s in ast.statements() {
+    if s.has_update() {
+        let u = s.update();
+        if u.sets_column("id") {
+            violations.push(violation("distribution key must not be updated", s.line(), s.column()));
+        }
+        if u.has_order_by() || u.has_group_by() {
+            violations.push(violation("ORDER BY/GROUP BY is not allowed in UPDATE", s.line(), s.column()));
+        }
+    }
+}
+```
+
+## 6. Rhai 语法要点
 - **变量声明**：`let x = ...;`
 - **对象 Map 字面量**：`#{ "key": value, "key2": value2 }`（`#` 是 Rhai 的对象字面量前缀）
 - **数组**：`[1, 2, 3]`，方法 `push()`、`len()`、索引访问 `arr[0]`
@@ -720,12 +923,12 @@ if upper.contains("DROP TABLE") {
 
 ## 12. 限制与注意事项
 
-- AST 包装类型覆盖了 SELECT/INSERT/UPDATE/DELETE/CREATE TABLE/DROP/ALTER TABLE/TRUNCATE/CREATE VIEW/CREATE INDEX/事务语句等主要 DDL/DML 场景；存储过程体（`CREATE PROCEDURE` / `CREATE FUNCTION` 的 `BEGIN ... END` 块）sqlparser 0.45 解析能力有限，规则只能基于 kind 检测"存在 CREATE PROCEDURE"，无法检查过程体内容。
-- **节点级位置信息**：sqlparser 0.45 的 AST 节点本身不携带位置，`JoinInfo` / `ColumnInfo` / `ForeignKeyInfo` / `CheckInfo` / `IndexInfo` / `UniqueInfo` / `ExprInfo` 上的 `line()` / `column()` 方法预留返回 0，需未来基于 token 流回填才能精确到 JOIN/列级。
+- AST 包装类型覆盖了 SELECT/INSERT/UPDATE/DELETE/CREATE TABLE/DROP/ALTER TABLE/TRUNCATE/CREATE VIEW/CREATE INDEX/事务语句等主要 DDL/DML 场景；存储过程体（`CREATE PROCEDURE` / `CREATE FUNCTION` 的 `BEGIN ... END` 块）sqlparser 0.60 解析能力有限，规则只能基于 kind 检测"存在 CREATE PROCEDURE"，无法检查过程体内容。
+- **节点级位置信息**：sqlparser 0.60 的 AST 节点本身不携带位置，`JoinInfo` / `ColumnInfo` / `ForeignKeyInfo` / `CheckInfo` / `IndexInfo` / `UniqueInfo` / `ExprInfo` 上的 `line()` / `column()` 方法预留返回 0，需未来基于 token 流回填才能精确到 JOIN/列级。
 - **逗号隐式 JOIN**：sqlparser 把 `FROM a, b` 与 `FROM a CROSS JOIN b` 都解析为 `JoinOperator::CrossJoin`，AST 上无标记区分。`SelectInfo.has_comma_join()` 与 `SqlAst.has_comma_join_anywhere()` 通过文本扫描（跟踪 paren depth 与子句终止关键字）回退实现，可靠但非 AST 原生。
 - **注释**：sqlparser 在 parse 阶段丢弃注释，`SqlAst.comments()` 通过独立文本扫描得到，能识别 `--` 与 `/* */`，但不能区分注释是否在字符串字面量内（极端场景误报）。
 - **表达式树深度**：`ExprInfo` 只暴露顶层判定，不递归暴露子表达式（避免类型爆炸）。若需深入子表达式，建议结合 `where_clause()` 文本做二次解析。
 - Rhai 中整数默认为 `i64`，`line_count` 等字段按 `i64` 注入。
 - Rhai 不支持闭包捕获外部可变引用，但可以通过 `for` 循环遍历并直接调用 `violations.push()`，或在顶层 `fn` 中调用。
 - 同一文件的 AST 只解析一次，所有规则共享。
-- 每条规则每次执行都会重新构建 Rhai 引擎并注册所有方法，规则较多时会有性能开销。
+- Rhai 引擎由 `runner::build_engine()` 每次 `check` 构建一次，`run_rules_for_file` 复用同一个 `&Engine`；**不是**每条规则重建引擎，因此规则数量增长不会带来引擎构建开销。真正的每规则开销只有脚本读取 + 编译 + 执行。

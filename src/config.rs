@@ -199,6 +199,26 @@ pub struct RuleConfig {
     pub applies_to: Vec<String>,
     #[serde(default = "default_severity")]
     pub severity: String,
+    /// 规则参数（可选）：原样注入到脚本的 `context["params"]`。
+    ///
+    /// 用途：把规范里的**阈值**外部化，避免硬编码在 `.rhai` 中。规范改阈值时
+    /// 只改配置、不动脚本，也便于同一规则在不同项目用不同口径。
+    ///
+    /// TOML 写法（`[[rules]]` 数组元素下的子表）：
+    /// ```toml
+    /// [[rules]]
+    /// id = "GDML001"
+    /// name = "max_join_tables"
+    /// # ...
+    /// [rules.params]
+    /// max_join_tables = 3
+    /// max_join_tables_batch = 5
+    /// ```
+    /// 或内联：`params = { max_join_tables = 3 }`。
+    ///
+    /// 未配置时脚本拿到的 `context["params"]` 是空 Map，脚本应自行给默认值。
+    #[serde(default)]
+    pub params: Option<toml::Value>,
 }
 
 fn default_enabled() -> bool {

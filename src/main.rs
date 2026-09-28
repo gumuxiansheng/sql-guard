@@ -1625,6 +1625,7 @@ fn generate_default_config() -> Config {
                 script_path: "config/rules/ddl/no_drop_table.rhai".into(),
                 applies_to: vec!["ddl".to_string()],
                 severity: "error".to_string(),
+                params: None,
             },
             sqlguard::config::RuleConfig {
                 id: "DDL002".to_string(),
@@ -1635,6 +1636,7 @@ fn generate_default_config() -> Config {
                 script_path: "config/rules/ddl/primary_key_required.rhai".into(),
                 applies_to: vec!["ddl".to_string()],
                 severity: "warning".to_string(),
+                params: None,
             },
             sqlguard::config::RuleConfig {
                 id: "DDL003".to_string(),
@@ -1645,6 +1647,7 @@ fn generate_default_config() -> Config {
                 script_path: "config/rules/ddl/no_reserved_keyword_naming.rhai".into(),
                 applies_to: vec!["ddl".to_string()],
                 severity: "error".to_string(),
+                params: None,
             },
             sqlguard::config::RuleConfig {
                 id: "DDL004".to_string(),
@@ -1655,6 +1658,7 @@ fn generate_default_config() -> Config {
                 script_path: "config/rules/ddl/backup_table_naming.rhai".into(),
                 applies_to: vec!["ddl".to_string()],
                 severity: "warning".to_string(),
+                params: None,
             },
             sqlguard::config::RuleConfig {
                 id: "DDL005".to_string(),
@@ -1665,6 +1669,7 @@ fn generate_default_config() -> Config {
                 script_path: "config/rules/ddl/index_naming_convention.rhai".into(),
                 applies_to: vec!["ddl".to_string()],
                 severity: "warning".to_string(),
+                params: None,
             },
             sqlguard::config::RuleConfig {
                 id: "DDL006".to_string(),
@@ -1675,6 +1680,7 @@ fn generate_default_config() -> Config {
                 script_path: "config/rules/ddl/no_redundant_index.rhai".into(),
                 applies_to: vec!["ddl".to_string()],
                 severity: "warning".to_string(),
+                params: None,
             },
             sqlguard::config::RuleConfig {
                 id: "DDL007".to_string(),
@@ -1685,6 +1691,7 @@ fn generate_default_config() -> Config {
                 script_path: "config/rules/ddl/table_name_naming.rhai".into(),
                 applies_to: vec!["ddl".to_string()],
                 severity: "warning".to_string(),
+                params: None,
             },
             sqlguard::config::RuleConfig {
                 id: "DML001".to_string(),
@@ -1695,6 +1702,7 @@ fn generate_default_config() -> Config {
                 script_path: "config/rules/dml/no_select_all.rhai".into(),
                 applies_to: vec!["dml".to_string()],
                 severity: "error".to_string(),
+                params: None,
             },
             sqlguard::config::RuleConfig {
                 id: "DML002".to_string(),
@@ -1705,6 +1713,7 @@ fn generate_default_config() -> Config {
                 script_path: "config/rules/dml/no_delete_update_without_where.rhai".into(),
                 applies_to: vec!["dml".to_string()],
                 severity: "error".to_string(),
+                params: None,
             },
             sqlguard::config::RuleConfig {
                 id: "DML003".to_string(),
@@ -1715,6 +1724,7 @@ fn generate_default_config() -> Config {
                 script_path: "config/rules/dml/insert_columns_required.rhai".into(),
                 applies_to: vec!["dml".to_string()],
                 severity: "error".to_string(),
+                params: None,
             },
             sqlguard::config::RuleConfig {
                 id: "DML004".to_string(),
@@ -1725,6 +1735,7 @@ fn generate_default_config() -> Config {
                 script_path: "config/rules/dml/subquery_alias_required.rhai".into(),
                 applies_to: vec!["dml".to_string()],
                 severity: "error".to_string(),
+                params: None,
             },
             sqlguard::config::RuleConfig {
                 id: "DML005".to_string(),
@@ -1735,6 +1746,7 @@ fn generate_default_config() -> Config {
                 script_path: "config/rules/dml/column_references_qualified.rhai".into(),
                 applies_to: vec!["dml".to_string()],
                 severity: "warning".to_string(),
+                params: None,
             },
             sqlguard::config::RuleConfig {
                 id: "DML006".to_string(),
@@ -1745,6 +1757,7 @@ fn generate_default_config() -> Config {
                 script_path: "config/rules/dml/no_join_without_condition.rhai".into(),
                 applies_to: vec!["dml".to_string()],
                 severity: "error".to_string(),
+                params: None,
             },
             sqlguard::config::RuleConfig {
                 id: "DML007".to_string(),
@@ -1755,6 +1768,7 @@ fn generate_default_config() -> Config {
                 script_path: "config/rules/dml/order_by_required_for_pagination.rhai".into(),
                 applies_to: vec!["dml".to_string()],
                 severity: "error".to_string(),
+                params: None,
             },
             // ===== P1 规则：默认禁用，建议评估后启用 =====
             sqlguard::config::RuleConfig {
@@ -1766,6 +1780,7 @@ fn generate_default_config() -> Config {
                 script_path: "config/rules/dml/no_unused_join.rhai".into(),
                 applies_to: vec!["dml".to_string()],
                 severity: "warning".to_string(),
+                params: None,
             },
             sqlguard::config::RuleConfig {
                 id: "DML102".to_string(),
@@ -1776,6 +1791,7 @@ fn generate_default_config() -> Config {
                 script_path: "config/rules/dml/no_unused_cte.rhai".into(),
                 applies_to: vec!["dml".to_string()],
                 severity: "warning".to_string(),
+                params: None,
             },
             sqlguard::config::RuleConfig {
                 id: "DML103".to_string(),
@@ -1786,6 +1802,7 @@ fn generate_default_config() -> Config {
                 script_path: "config/rules/dml/use_is_null.rhai".into(),
                 applies_to: vec!["dml".to_string()],
                 severity: "error".to_string(),
+                params: None,
             },
             sqlguard::config::RuleConfig {
                 id: "DML104".to_string(),
@@ -1796,6 +1813,7 @@ fn generate_default_config() -> Config {
                 script_path: "config/rules/dml/use_coalesce.rhai".into(),
                 applies_to: vec!["dml".to_string()],
                 severity: "warning".to_string(),
+                params: None,
             },
             sqlguard::config::RuleConfig {
                 id: "DML105".to_string(),
@@ -1806,6 +1824,7 @@ fn generate_default_config() -> Config {
                 script_path: "config/rules/dml/no_order_by_in_subquery.rhai".into(),
                 applies_to: vec!["dml".to_string()],
                 severity: "warning".to_string(),
+                params: None,
             },
             sqlguard::config::RuleConfig {
                 id: "DML106".to_string(),
@@ -1816,6 +1835,7 @@ fn generate_default_config() -> Config {
                 script_path: "config/rules/dml/union_all_preferred.rhai".into(),
                 applies_to: vec!["dml".to_string()],
                 severity: "warning".to_string(),
+                params: None,
             },
             sqlguard::config::RuleConfig {
                 id: "DML107".to_string(),
@@ -1826,6 +1846,7 @@ fn generate_default_config() -> Config {
                 script_path: "config/rules/dml/no_nested_case.rhai".into(),
                 applies_to: vec!["dml".to_string()],
                 severity: "warning".to_string(),
+                params: None,
             },
             sqlguard::config::RuleConfig {
                 id: "DML108".to_string(),
@@ -1836,6 +1857,7 @@ fn generate_default_config() -> Config {
                 script_path: "config/rules/dml/no_constant_where.rhai".into(),
                 applies_to: vec!["dml".to_string()],
                 severity: "warning".to_string(),
+                params: None,
             },
             sqlguard::config::RuleConfig {
                 id: "DML111".to_string(),
@@ -1846,6 +1868,7 @@ fn generate_default_config() -> Config {
                 script_path: "config/rules/dml/no_or_in_where.rhai".into(),
                 applies_to: vec!["dml".to_string()],
                 severity: "warning".to_string(),
+                params: None,
             },
         ],
         rules_file: None,

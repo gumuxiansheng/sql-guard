@@ -82,7 +82,7 @@
 - `mapper::map_statement_type` 把 `<select>/<insert>/<update>/<delete>` **全部硬编码成 `"dml"`**（`docs/architecture-review.md` 3.4 也点名）。意味着你无法把「查询」和「变更」用不同规则集治理（比如只允许 DML 红线，但 SELECT 走宽松），`applies_to` 的灵活性被削弱。
 - `<include>` **仅支持同文件内引用**，跨 namespace 不行。
 - 动态 SQL 标签剥离后，sqlparser 可能因条件分支语法不完整而解析失败 → 又回到 2.3 的静默丢失。
-- `CREATE PROCEDURE` / `CREATE FUNCTION` 的 `BEGIN...END` 体，sqlparser 0.45 解析有限，**只能识别「存在」而无法检查过程体内容**（官方已知限制）。存储过程密集的团队基本用不上。
+- `CREATE PROCEDURE` / `CREATE FUNCTION` 的 `BEGIN...END` 体，sqlparser 0.60 解析有限，**只能识别「存在」而无法检查过程体内容**（官方已知限制）。存储过程密集的团队基本用不上。
 
 ### 2.6 增量校验 `check-diff` —— 用心，但依赖脆弱
 
