@@ -142,6 +142,16 @@ script_path = "config/rules/dml/no_join_without_condition.rhai"
 applies_to = ["dml"]
 severity = "error"
 
+[[rules]]
+id = "DML007"
+name = "order_by_required_for_pagination"
+group = "dml-safety"
+description = "Pagination (LIMIT/OFFSET/FETCH) must have ORDER BY to keep result order deterministic"
+enabled = true
+script_path = "config/rules/dml/order_by_required_for_pagination.rhai"
+applies_to = ["dml"]
+severity = "error"
+
 # ================================================================================
 # P1 规则：默认禁用，建议评估后启用
 # 在 sqlguard.rules.toml 中将 enabled = false 改为 true 即可启用
