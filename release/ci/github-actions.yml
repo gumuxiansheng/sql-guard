@@ -27,7 +27,7 @@ jobs:
       #     tar -xzf sg.tar.gz
       #     sudo ./sql-guard-*/scripts/install.sh --no-config
       #   env:
-      #     SQLGUARD_URL: https://example.com/sql-guard-0.2.6-linux-x86_64-musl.tar.gz
+      #     SQLGUARD_URL: https://example.com/sql-guard-0.2.7-linux-x86_64-musl.tar.gz
 
       - name: SqlGuard check
         run: sqlguard check ./sql
