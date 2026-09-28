@@ -11,6 +11,8 @@
 #   - x86_64/aarch64-apple-darwin：用 cargo-zigbuild（Zig 自带 macOS 链接器/SDK）从 Linux 交叉编译。
 #       该步骤为 best-effort：若因网络等原因失败，会跳过 macOS 目标，但不影响 Linux/Windows 产物上传。
 #   - 构建逻辑封装在 scripts/build-release.sh，便于本地复现与调试。
+#   - 发布包组装封装在 scripts/package-release.sh（自动收集 dist/ 扁平产物或
+#     target/<triple>/release 产物，生成 VERSION / SHA256SUMS 与 tar.gz / zip 压缩包）。
 #   - 二进制先经内置任务 git:release 创建 Release，再由 cnbcool/attachments 上传为附件。
 #
 # 注：若需对所有 tag（不限 v 前缀）生效，将下面的 "v*" 改为 "$" 即可。
@@ -39,10 +41,23 @@
           script:
             - bash scripts/build-release.sh
 
-        # 3) 将 dist/ 下全部二进制上传为 Release 附件
+        # 3) 组装发布包：文档 + 安装脚本 + 内置规则库 + 示例 + VERSION/SHA256SUMS + 压缩包
+        #    产物落在 dist/sql-guard-<version>/，并额外产出 -all 合包与各平台独立包。
+        - name: 组装发布包
+          timeout: 20m
+          script:
+            - bash scripts/package-release.sh
+
+        # 4) 将发布包与扁平二进制上传为 Release 附件
+        #    - dist/sql-guard-<version>/ 目录本身不上传（附件为文件），上传其压缩包与校验和；
+        #    - dist/SHA256SUMS 记录各压缩包的校验和，供下载方核对；
+        #    - dist/sqlguard-* 为 build-release.sh 的扁平二进制，保留原有下载方式。
         - name: 上传 Release 附件
           image: cnbcool/attachments:latest
           settings:
             tag: ${CNB_BRANCH}
             attachments:
-              - "./dist/*"
+              - "./dist/*.tar.gz"
+              - "./dist/*.zip"
+              - "./dist/SHA256SUMS"
+              - "./dist/sqlguard-*"

@@ -1,0 +1,93 @@
+# SqlGuard —— GitHub Actions 流水线片段
+#
+# 用法：把需要的 job 复制到仓库 .github/workflows/ 下即可。
+# 前提：runner 上已安装 sqlguard（见 docs/INSTALL.md），或用本仓库的
+#       actions/setup 步骤下载发布包后 ./scripts/install.sh。
+
+# ─────────────────────────────────────────────────────────────
+# 1) 全量检查（每次 push / PR 都跑）
+# ─────────────────────────────────────────────────────────────
+name: sqlguard-full
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+
+jobs:
+  sqlguard:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # 若 runner 未预装 sqlguard，取消下面注释以安装（需提前下载发布包）
+      # - name: Install SqlGuard
+      #   run: |
+      #     curl -fsSL -o sg.tar.gz "$SQLGUARD_URL"
+      #     tar -xzf sg.tar.gz
+      #     sudo ./sql-guard-*/scripts/install.sh --no-config
+      #   env:
+      #     SQLGUARD_URL: https://example.com/sql-guard-0.2.6-linux-x86_64-musl.tar.gz
+
+      - name: SqlGuard check
+        run: sqlguard check ./sql
+
+      - name: Upload HTML report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sqlguard-report
+          path: reports/
+        continue-on-error: true
+
+# ─────────────────────────────────────────────────────────────
+# 2) PR 增量检查（推荐：只校验本次改动）
+# ─────────────────────────────────────────────────────────────
+name: sqlguard-incremental
+
+on:
+  pull_request:
+    paths:
+      - '**/*.sql'
+      - '**/*.ddl'
+      - '**/*.dml'
+      - 'src/main/resources/mapper/**/*.xml'
+
+jobs:
+  incremental-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0                 # ★ 必须有完整 git 历史才能 diff
+
+      - name: Fetch base branch
+        run: git fetch origin ${{ github.base_ref }}
+
+      - name: SqlGuard incremental check
+        run: |
+          sqlguard check-diff \
+            --base origin/${{ github.base_ref }} \
+            -f json -o reports/
+
+# ─────────────────────────────────────────────────────────────
+# 3) 上传 SARIF 到 GitHub Code Scanning（违规以 PR 注释呈现）
+# ─────────────────────────────────────────────────────────────
+name: sqlguard-sarif
+
+on: [pull_request]
+
+jobs:
+  sarif:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write            # ★ 上传 SARIF 必需
+    steps:
+      - uses: actions/checkout@v4
+      - name: SqlGuard check
+        run: sqlguard check ./sql -f sarif -o reports/
+      - name: Upload SARIF
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: reports/sqlguard-report.sarif

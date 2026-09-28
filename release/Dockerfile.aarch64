@@ -1,0 +1,18 @@
+# SqlGuard 容器镜像（ARM64 / aarch64 版本）
+#
+# 构建（在发布包根目录执行）：
+#   docker build -f Dockerfile.aarch64 -t sqlguard:0.2.6-aarch64 .
+#
+# 运行：
+#   docker run --rm -v "$PWD:/work" sqlguard:0.2.6-aarch64 check /work/sql
+
+FROM alpine:3.20
+
+RUN apk add --no-cache ca-certificates
+
+COPY bin/linux-aarch64-musl/sqlguard      /usr/local/bin/sqlguard
+COPY bin/linux-aarch64-musl/sqlguard-mine /usr/local/bin/sqlguard-mine
+
+WORKDIR /work
+ENTRYPOINT ["sqlguard"]
+CMD ["--help"]

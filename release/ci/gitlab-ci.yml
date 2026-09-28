@@ -1,0 +1,48 @@
+# SqlGuard —— GitLab CI 流水线片段
+#
+# 用法：复制到仓库 .gitlab-ci.yml，或把 job 合并进现有配置。
+# 前提：镜像内已安装 sqlguard；如需在 job 内安装，参考下面注释掉的 before_script。
+
+stages:
+  - lint
+
+# 全量检查
+sqlguard:check:
+  stage: lint
+  image: alpine:3.20                 # musl 静态二进制可直接跑在 alpine 上
+  # before_script:
+  #   - wget -qO /tmp/sg.tar.gz "$SQLGUARD_URL"
+  #   - tar -xzf /tmp/sg.tar.gz -C /tmp
+  #   - /tmp/sql-guard-*/scripts/install.sh --no-config
+  script:
+    - sqlguard check ./sql -f json,html -o reports/
+  artifacts:
+    when: always
+    paths:
+      - reports/
+    expire_in: 1 week
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+
+# 合并请求增量检查（只校验本次改动）
+sqlguard:check-diff:
+  stage: lint
+  image: alpine:3.20
+  variables:
+    GIT_DEPTH: 0                     # ★ 需要完整历史
+  script:
+    - git fetch origin $CI_MERGE_REQUEST_TARGET_BRANCH_NAME
+    - sqlguard check-diff --base origin/$CI_MERGE_REQUEST_TARGET_BRANCH_NAME -f json -o reports/
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+      changes:
+        - "**/*.sql"
+        - "**/*.ddl"
+        - "**/*.dml"
+        - "src/main/resources/mapper/**/*.xml"
+  artifacts:
+    when: always
+    paths:
+      - reports/
+    expire_in: 1 week
