@@ -1,6 +1,6 @@
 # GaussDB 开发规范 → SqlGuard 规则映射与 Rhai 能力缺口分析
 
-> 输入：`docs/GaussDB开发技术实施策略（试用）.doc`（中国银行软件中心 GaussDB 开发规范）
+> 输入：`docs/GaussDB开发技术实施策略（试用）.doc`（GaussDB 开发规范）
 > 目的：把文档中的 SQL 开发规范归纳为可执行规则类别，并评估**当前** Rhai 规则引擎能否承载
 > 结论口径：所有"引擎能力"结论均以 `src/rule/engine/{ast,analyzer,parser,runner,idents,scanner}.rs` 的实际注册代码为准
 > 关联文档：[`rule-scripting.md`](rule-scripting.md)、[`default-rules.md`](default-rules.md)、[`dialect-fallback.md`](dialect-fallback.md)

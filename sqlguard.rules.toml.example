@@ -270,7 +270,7 @@ severity = "warning"
 # ================================================================================
 # GaussDB 规范规则（对应 docs/gaussdb-rule-gap-analysis.md 的 A 类条目）
 #
-# 来源：中国银行《GaussDB开发技术实施策略（试行）》SQL 开发规范。
+# 来源：《GaussDB开发技术实施策略（试行）》SQL 开发规范。
 # 默认**禁用**（enabled = false），GaussDB 项目按需把对应条目改为 true 即可启用；
 # 非 GaussDB 项目保持禁用，不受影响。
 #

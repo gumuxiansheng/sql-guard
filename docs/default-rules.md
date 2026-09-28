@@ -34,7 +34,7 @@ SqlGuard 内置 25 条默认规则，分为 **P0（17 条，默认启用）** �
 
 ### GaussDB 规范规则（新增，默认禁用 `enabled = false`）
 
-来源：中国银行《GaussDB开发技术实施策略（试行）》SQL 开发规范。
+来源：《GaussDB开发技术实施策略（试行）》SQL 开发规范。
 逐条映射、可实现性判定与引擎缺口分析见 [`gaussdb-rule-gap-analysis.md`](gaussdb-rule-gap-analysis.md)，
 实现清单见其 §9。GaussDB 项目按需把 `sqlguard.rules.toml` 里对应条目的 `enabled` 改为 `true`。
 
