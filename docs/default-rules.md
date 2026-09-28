@@ -32,6 +32,37 @@ SqlGuard 内置 25 条默认规则，分为 **P0（17 条，默认启用）** �
 | DML110 | `max_join_tables` | dml-performance | warning | P0 | — |
 | DML111 | `no_or_in_where` | dml-performance | warning | P0 | — |
 
+### GaussDB 规范规则（新增，默认禁用 `enabled = false`）
+
+来源：中国银行《GaussDB开发技术实施策略（试行）》SQL 开发规范。
+逐条映射、可实现性判定与引擎缺口分析见 [`gaussdb-rule-gap-analysis.md`](gaussdb-rule-gap-analysis.md)，
+实现清单见其 §9。GaussDB 项目按需把 `sqlguard.rules.toml` 里对应条目的 `enabled` 改为 `true`。
+
+| 规则 ID | `name` | group | 严重度 | applies_to | 对应规范条目 |
+|---|---|---|---|---|---|
+| GNAM001 | `gaussdb_object_name_charset` | gaussdb-naming | error | ddl | G-NAM-01 |
+| GNAM002 | `gaussdb_no_quoted_object_name` | gaussdb-naming | error | ddl | G-NAM-02 |
+| GNAM003 | `gaussdb_no_reserved_prefix` | gaussdb-naming | error | ddl | G-NAM-03 |
+| GNAM004 | `gaussdb_object_name_max_bytes` | gaussdb-naming | error | ddl | G-NAM-04 |
+| GTYP001 | `gaussdb_max_large_fields` | gaussdb-type | warning | ddl | G-TYP-02 |
+| GTYP002 | `gaussdb_no_system_column` | gaussdb-type | error | ddl | G-TYP-03 |
+| GTYP003 | `gaussdb_recommended_data_types` | gaussdb-type | warning | ddl | G-TYP-04 |
+| GOBJ001 | `gaussdb_no_materialized_view` | gaussdb-object | error | ddl | G-OBJ-01 |
+| GOBJ002 | `gaussdb_no_order_by_in_view` | gaussdb-object | error | ddl | G-OBJ-02 |
+| GOBJ003 | `gaussdb_view_usage_warning` | gaussdb-object | warning | ddl | G-OBJ-09 |
+| GIDX001 | `gaussdb_create_index_concurrently` | gaussdb-index | error | ddl | G-IDX-01 |
+| GDCL001 | `gaussdb_no_quoted_column_in_ddl` | gaussdb-ddl | error | ddl | G-DCL-02 |
+| GDDL001 | `gaussdb_require_commit_in_transaction` | gaussdb-ddl | error | ddl | G-DDL-02 |
+| GDML002 | `gaussdb_no_order_by_group_by_in_update` | gaussdb-dml | error | dml | G-DML-08 |
+| GDML003 | `gaussdb_no_order_by_group_by_in_delete` | gaussdb-dml | error | dml | G-DML-09 |
+| GDML004 | `gaussdb_update_subquery_to_join` | gaussdb-dml | warning | dml | G-DML-10 |
+| GDML005 | `gaussdb_order_by_explicit_sort` | gaussdb-dml | error | dml | G-DML-17 |
+| GPERF001 | `gaussdb_statement_max_bytes` | gaussdb-performance | warning | ddl, dml | G-PERF-07 |
+
+> 另有 4 条 GaussDB 规范条目**复用既有规则**，不新增脚本：
+> G-NAM-05 → DDL003/004/005/007、G-IDX-05 → DDL006、G-DML-19 → DML111、
+> G-DML-01 → DML110（本轮给 DML110 加了 `params.max_join_tables` 以支持 GaussDB 更严阈值，默认仍为 5）。
+
 ---
 
 ## P0 规则（默认启用）

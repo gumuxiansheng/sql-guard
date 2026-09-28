@@ -1505,6 +1505,100 @@ const INIT_RULE_SCRIPTS: &[(&str, &str, &str)] = &[
         "dml",
         include_str!("../config/rules/dml/no_or_in_where.rhai"),
     ),
+
+    // ===== GaussDB 规范规则（GNAM/GTYP/GOBJ/GIDX/GDCL/GDDL/GDML/GPERF）=====
+    // 对应 docs/gaussdb-rule-gap-analysis.md 的 A 类条目，默认在
+    // sqlguard.rules.toml.example 中 enabled = false，按项目启用。
+    (
+        "gaussdb_object_name_charset",
+        "ddl",
+        include_str!("../config/rules/ddl/gaussdb_object_name_charset.rhai"),
+    ),
+    (
+        "gaussdb_no_quoted_object_name",
+        "ddl",
+        include_str!("../config/rules/ddl/gaussdb_no_quoted_object_name.rhai"),
+    ),
+    (
+        "gaussdb_no_reserved_prefix",
+        "ddl",
+        include_str!("../config/rules/ddl/gaussdb_no_reserved_prefix.rhai"),
+    ),
+    (
+        "gaussdb_object_name_max_bytes",
+        "ddl",
+        include_str!("../config/rules/ddl/gaussdb_object_name_max_bytes.rhai"),
+    ),
+    (
+        "gaussdb_max_large_fields",
+        "ddl",
+        include_str!("../config/rules/ddl/gaussdb_max_large_fields.rhai"),
+    ),
+    (
+        "gaussdb_no_system_column",
+        "ddl",
+        include_str!("../config/rules/ddl/gaussdb_no_system_column.rhai"),
+    ),
+    (
+        "gaussdb_recommended_data_types",
+        "ddl",
+        include_str!("../config/rules/ddl/gaussdb_recommended_data_types.rhai"),
+    ),
+    (
+        "gaussdb_no_materialized_view",
+        "ddl",
+        include_str!("../config/rules/ddl/gaussdb_no_materialized_view.rhai"),
+    ),
+    (
+        "gaussdb_no_order_by_in_view",
+        "ddl",
+        include_str!("../config/rules/ddl/gaussdb_no_order_by_in_view.rhai"),
+    ),
+    (
+        "gaussdb_view_usage_warning",
+        "ddl",
+        include_str!("../config/rules/ddl/gaussdb_view_usage_warning.rhai"),
+    ),
+    (
+        "gaussdb_create_index_concurrently",
+        "ddl",
+        include_str!("../config/rules/ddl/gaussdb_create_index_concurrently.rhai"),
+    ),
+    (
+        "gaussdb_no_quoted_column_in_ddl",
+        "ddl",
+        include_str!("../config/rules/ddl/gaussdb_no_quoted_column_in_ddl.rhai"),
+    ),
+    (
+        "gaussdb_require_commit_in_transaction",
+        "ddl",
+        include_str!("../config/rules/ddl/gaussdb_require_commit_in_transaction.rhai"),
+    ),
+    (
+        "gaussdb_no_order_by_group_by_in_update",
+        "dml",
+        include_str!("../config/rules/dml/gaussdb_no_order_by_group_by_in_update.rhai"),
+    ),
+    (
+        "gaussdb_no_order_by_group_by_in_delete",
+        "dml",
+        include_str!("../config/rules/dml/gaussdb_no_order_by_group_by_in_delete.rhai"),
+    ),
+    (
+        "gaussdb_update_subquery_to_join",
+        "dml",
+        include_str!("../config/rules/dml/gaussdb_update_subquery_to_join.rhai"),
+    ),
+    (
+        "gaussdb_order_by_explicit_sort",
+        "dml",
+        include_str!("../config/rules/dml/gaussdb_order_by_explicit_sort.rhai"),
+    ),
+    (
+        "gaussdb_statement_max_bytes",
+        "dml",
+        include_str!("../config/rules/dml/gaussdb_statement_max_bytes.rhai"),
+    ),
 ];
 
 ///
