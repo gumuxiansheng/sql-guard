@@ -1,43 +1,33 @@
 # ================================================================================
-# 规则配置（独立文件）
+# 默认规则包 `rules-core` 清单（规则与引擎分开发版）
+# ================================================================================
+# 本文件使仓库 `config/` 目录成为一个合规的规则包根：
+#   config/rules-pack.toml           ← 本清单
+#   config/rules/ddl/*.rhai          ← 规则脚本（script_path 相对包根解析）
+#   config/rules/lib/helpers.rhai    ← 引擎内置 helpers（故此处不声明 [pack].helpers）
 #
-# 每条 [[rules]] 对应一个 Rhai 脚本。脚本路径（script_path）相对本文件
-# 所在目录解析，也支持绝对路径。
+# 用法：
+#   1. `sqlguard init --with-default-pack` 会把它 vendor 到项目 vendor/rules/rules-core/；
+#   2. 也可把整个包目录复制到独立规则仓库后独立版本化、独立 CI（见
+#      docs/rule-pack-design.md §十二 迁移指南）。
 #
-# 在 sqlguard.toml 中用 rules_file = "sqlguard.rules.toml" 引用本文件；
-# 不写该行时，工具也会自动在同目录查找 sqlguard.rules.toml。
+# ★ 规则内容与 sqlguard.rules.toml.example 保持同步（有守护测试）。
 # ================================================================================
 
-# ================================================================================
-# 规则包兼容声明（可选，M1）
-#
-# [pack] 声明"这套规则"与引擎的版本契约，避免规则跑在不支持的引擎上静默失效。
-# 全部字段可选——不写该段时行为与此前完全一致。必须写在任何 [[rules]] 之前。
-#
-#   api_version  本规则集所需的规则 API 版本（整数）。高于引擎支持值时 sqlguard
-#                直接报错并给出升级提示（防止"新规则在旧引擎上整条不生效"）。
-#   engine       兼容的引擎版本范围（空格分隔的多个比较器为 AND），如
-#                ">=0.2.7 <0.3"。不满足时默认仅告警，加 --strict-engine 则报错。
-#   namespace    规则 id 命名空间（预留，M2 生效）；当前仅校验字符集 [a-z0-9_-]。
-#
-# [pack]
-# name        = "rules-core"
-# api_version = 1
-# engine      = ">=0.2.7 <0.3"
-# namespace   = "core"
-# ================================================================================
-
-# ================================================================================
-# P0 规则：默认启用，建议 CI 中保持开启
-# ================================================================================
-
+[pack]
+name        = "rules-core"
+version     = "1.0.0"
+api_version = 1
+engine      = ">=0.2.7 <0.3"
+description = "SqlGuard 默认规则集（DDL/DML 基础规范 + GaussDB 规范条目）"
+license     = "MIT"
 [[rules]]
 id = "DDL001"
 name = "no_drop_table"
 group = "ddl-safety"
 description = "Disallow DROP TABLE in DDL scripts"
 enabled = true
-script_path = "config/rules/ddl/no_drop_table.rhai"
+script_path = "rules/ddl/no_drop_table.rhai"
 applies_to = ["ddl"]
 severity = "error"
 
@@ -47,7 +37,7 @@ name = "primary_key_required"
 group = "ddl-safety"
 description = "CREATE TABLE must have a PRIMARY KEY"
 enabled = true
-script_path = "config/rules/ddl/primary_key_required.rhai"
+script_path = "rules/ddl/primary_key_required.rhai"
 applies_to = ["ddl"]
 severity = "warning"
 
@@ -57,7 +47,7 @@ name = "no_reserved_keyword_naming"
 group = "ddl-safety"
 description = "Database object names must not use SQL reserved keywords"
 enabled = true
-script_path = "config/rules/ddl/no_reserved_keyword_naming.rhai"
+script_path = "rules/ddl/no_reserved_keyword_naming.rhai"
 applies_to = ["ddl"]
 severity = "error"
 
@@ -67,7 +57,7 @@ name = "backup_table_naming"
 group = "ddl-convention"
 description = "Backup tables created via CREATE TABLE AS SELECT must be prefixed with 'bks_'"
 enabled = true
-script_path = "config/rules/ddl/backup_table_naming.rhai"
+script_path = "rules/ddl/backup_table_naming.rhai"
 applies_to = ["ddl"]
 severity = "warning"
 
@@ -77,7 +67,7 @@ name = "index_naming_convention"
 group = "ddl-convention"
 description = "Indexes follow idx_/uk_/pk_ naming convention based on type and columns"
 enabled = true
-script_path = "config/rules/ddl/index_naming_convention.rhai"
+script_path = "rules/ddl/index_naming_convention.rhai"
 applies_to = ["ddl"]
 severity = "warning"
 
@@ -87,7 +77,7 @@ name = "no_redundant_index"
 group = "ddl-performance"
 description = "Avoid redundant indexes (duplicate PK indexes and leftmost-prefix duplicates)"
 enabled = true
-script_path = "config/rules/ddl/no_redundant_index.rhai"
+script_path = "rules/ddl/no_redundant_index.rhai"
 applies_to = ["ddl"]
 severity = "warning"
 
@@ -97,7 +87,7 @@ name = "table_name_naming"
 group = "ddl-convention"
 description = "Table names must contain only lowercase letters, digits, and underscores, and must not start with a digit"
 enabled = true
-script_path = "config/rules/ddl/table_name_naming.rhai"
+script_path = "rules/ddl/table_name_naming.rhai"
 applies_to = ["ddl"]
 severity = "warning"
 
@@ -107,7 +97,7 @@ name = "no_select_all"
 group = "dml-safety"
 description = "Disallow SELECT * in DML scripts"
 enabled = true
-script_path = "config/rules/dml/no_select_all.rhai"
+script_path = "rules/dml/no_select_all.rhai"
 applies_to = ["dml"]
 severity = "error"
 
@@ -117,7 +107,7 @@ name = "no_delete_update_without_where"
 group = "dml-safety"
 description = "DELETE/UPDATE must have a WHERE clause"
 enabled = true
-script_path = "config/rules/dml/no_delete_update_without_where.rhai"
+script_path = "rules/dml/no_delete_update_without_where.rhai"
 applies_to = ["dml"]
 severity = "error"
 
@@ -127,7 +117,7 @@ name = "insert_columns_required"
 group = "dml-safety"
 description = "INSERT must specify target columns"
 enabled = true
-script_path = "config/rules/dml/insert_columns_required.rhai"
+script_path = "rules/dml/insert_columns_required.rhai"
 applies_to = ["dml"]
 severity = "error"
 
@@ -137,7 +127,7 @@ name = "subquery_alias_required"
 group = "dml-style"
 description = "Subqueries in FROM must have an alias"
 enabled = true
-script_path = "config/rules/dml/subquery_alias_required.rhai"
+script_path = "rules/dml/subquery_alias_required.rhai"
 applies_to = ["dml"]
 severity = "error"
 
@@ -147,7 +137,7 @@ name = "column_references_qualified"
 group = "dml-style"
 description = "Qualify column references with table name in multi-table queries"
 enabled = true
-script_path = "config/rules/dml/column_references_qualified.rhai"
+script_path = "rules/dml/column_references_qualified.rhai"
 applies_to = ["dml"]
 severity = "warning"
 
@@ -157,7 +147,7 @@ name = "no_join_without_condition"
 group = "dml-safety"
 description = "JOIN must have ON or USING condition"
 enabled = true
-script_path = "config/rules/dml/no_join_without_condition.rhai"
+script_path = "rules/dml/no_join_without_condition.rhai"
 applies_to = ["dml"]
 severity = "error"
 
@@ -167,14 +157,9 @@ name = "order_by_required_for_pagination"
 group = "dml-safety"
 description = "Pagination (LIMIT/OFFSET/FETCH) must have ORDER BY to keep result order deterministic"
 enabled = true
-script_path = "config/rules/dml/order_by_required_for_pagination.rhai"
+script_path = "rules/dml/order_by_required_for_pagination.rhai"
 applies_to = ["dml"]
 severity = "error"
-
-# ================================================================================
-# P1 规则：默认禁用，建议评估后启用
-# 在 sqlguard.rules.toml 中将 enabled = false 改为 true 即可启用
-# ================================================================================
 
 [[rules]]
 id = "DML101"
@@ -182,7 +167,7 @@ name = "no_unused_join"
 group = "dml-performance"
 description = "Detect potentially unused JOINs"
 enabled = false
-script_path = "config/rules/dml/no_unused_join.rhai"
+script_path = "rules/dml/no_unused_join.rhai"
 applies_to = ["dml"]
 severity = "warning"
 
@@ -192,7 +177,7 @@ name = "no_unused_cte"
 group = "dml-performance"
 description = "Detect unused CTEs (WITH clauses)"
 enabled = false
-script_path = "config/rules/dml/no_unused_cte.rhai"
+script_path = "rules/dml/no_unused_cte.rhai"
 applies_to = ["dml"]
 severity = "warning"
 
@@ -202,7 +187,7 @@ name = "use_is_null"
 group = "dml-convention"
 description = "Use IS NULL instead of = NULL"
 enabled = false
-script_path = "config/rules/dml/use_is_null.rhai"
+script_path = "rules/dml/use_is_null.rhai"
 applies_to = ["dml"]
 severity = "error"
 
@@ -212,7 +197,7 @@ name = "use_coalesce"
 group = "dml-convention"
 description = "Use standard COALESCE instead of NVL/ISNULL"
 enabled = false
-script_path = "config/rules/dml/use_coalesce.rhai"
+script_path = "rules/dml/use_coalesce.rhai"
 applies_to = ["dml"]
 severity = "warning"
 
@@ -222,7 +207,7 @@ name = "no_order_by_in_subquery"
 group = "dml-performance"
 description = "ORDER BY in subquery is typically ignored"
 enabled = false
-script_path = "config/rules/dml/no_order_by_in_subquery.rhai"
+script_path = "rules/dml/no_order_by_in_subquery.rhai"
 applies_to = ["dml"]
 severity = "warning"
 
@@ -232,7 +217,7 @@ name = "union_all_preferred"
 group = "dml-performance"
 description = "Prefer UNION ALL over UNION unless dedup needed"
 enabled = false
-script_path = "config/rules/dml/union_all_preferred.rhai"
+script_path = "rules/dml/union_all_preferred.rhai"
 applies_to = ["dml"]
 severity = "warning"
 
@@ -242,7 +227,7 @@ name = "no_nested_case"
 group = "dml-convention"
 description = "Avoid nested CASE expressions"
 enabled = false
-script_path = "config/rules/dml/no_nested_case.rhai"
+script_path = "rules/dml/no_nested_case.rhai"
 applies_to = ["dml"]
 severity = "warning"
 
@@ -252,7 +237,7 @@ name = "no_constant_where"
 group = "dml-convention"
 description = "Avoid constant/tautology conditions in WHERE clause (e.g. 1=1, 2=2, 'a'='a', TRUE)"
 enabled = true
-script_path = "config/rules/dml/no_constant_where.rhai"
+script_path = "rules/dml/no_constant_where.rhai"
 applies_to = ["dml"]
 severity = "warning"
 
@@ -262,7 +247,7 @@ name = "join_type_required"
 group = "dml-style"
 description = "JOIN must specify an explicit type (e.g. LEFT JOIN or INNER JOIN); bare JOIN is not allowed"
 enabled = true
-script_path = "config/rules/dml/join_type_required.rhai"
+script_path = "rules/dml/join_type_required.rhai"
 applies_to = ["dml"]
 severity = "warning"
 
@@ -272,7 +257,7 @@ name = "max_join_tables"
 group = "dml-performance"
 description = "A query must not join more than 5 tables"
 enabled = true
-script_path = "config/rules/dml/max_join_tables.rhai"
+script_path = "rules/dml/max_join_tables.rhai"
 applies_to = ["dml"]
 severity = "warning"
 
@@ -282,21 +267,9 @@ name = "no_or_in_where"
 group = "dml-performance"
 description = "Do not use OR to combine conditions in WHERE; prefer IN, UNION ALL, or splitting the query"
 enabled = true
-script_path = "config/rules/dml/no_or_in_where.rhai"
+script_path = "rules/dml/no_or_in_where.rhai"
 applies_to = ["dml"]
 severity = "warning"
-
-# ================================================================================
-# GaussDB 规范规则（对应 docs/gaussdb-rule-gap-analysis.md 的 A 类条目）
-#
-# 来源：《GaussDB开发技术实施策略（试行）》SQL 开发规范。
-# 默认**禁用**（enabled = false），GaussDB 项目按需把对应条目改为 true 即可启用；
-# 非 GaussDB 项目保持禁用，不受影响。
-#
-# 注意 G-DML-01（关联表数上限）由既有规则 DML110 max_join_tables 覆盖，
-# GaussDB 更严口径（联机 3 / 批量 5）通过给 DML110 配置 params.max_join_tables 实现，
-# 不另起一条同概念规则。
-# ================================================================================
 
 [[rules]]
 id = "GNAM001"
@@ -304,7 +277,7 @@ name = "gaussdb_object_name_charset"
 group = "gaussdb-naming"
 description = "Object names must contain only letters, digits and underscores"
 enabled = false
-script_path = "config/rules/ddl/gaussdb_object_name_charset.rhai"
+script_path = "rules/ddl/gaussdb_object_name_charset.rhai"
 applies_to = ["ddl"]
 severity = "error"
 
@@ -314,7 +287,7 @@ name = "gaussdb_no_quoted_object_name"
 group = "gaussdb-naming"
 description = "Do not define object names with double quotes"
 enabled = false
-script_path = "config/rules/ddl/gaussdb_no_quoted_object_name.rhai"
+script_path = "rules/ddl/gaussdb_no_quoted_object_name.rhai"
 applies_to = ["ddl"]
 severity = "error"
 
@@ -324,7 +297,7 @@ name = "gaussdb_no_reserved_prefix"
 group = "gaussdb-naming"
 description = "Object names must not use the system-reserved prefixes pg_/gs_/adm_/my_/db_"
 enabled = false
-script_path = "config/rules/ddl/gaussdb_no_reserved_prefix.rhai"
+script_path = "rules/ddl/gaussdb_no_reserved_prefix.rhai"
 applies_to = ["ddl"]
 severity = "error"
 
@@ -334,7 +307,7 @@ name = "gaussdb_object_name_max_bytes"
 group = "gaussdb-naming"
 description = "Object names must not exceed 63 bytes"
 enabled = false
-script_path = "config/rules/ddl/gaussdb_object_name_max_bytes.rhai"
+script_path = "rules/ddl/gaussdb_object_name_max_bytes.rhai"
 applies_to = ["ddl"]
 severity = "error"
 
@@ -347,7 +320,7 @@ name = "gaussdb_max_large_fields"
 group = "gaussdb-type"
 description = "A table should not have more than 8 large fields"
 enabled = false
-script_path = "config/rules/ddl/gaussdb_max_large_fields.rhai"
+script_path = "rules/ddl/gaussdb_max_large_fields.rhai"
 applies_to = ["ddl"]
 severity = "warning"
 
@@ -361,7 +334,7 @@ name = "gaussdb_no_system_column"
 group = "gaussdb-type"
 description = "Do not use CTID/CID/OID/XID/TID/XMIN/CMIN/XMAX/CMAX as business columns"
 enabled = false
-script_path = "config/rules/ddl/gaussdb_no_system_column.rhai"
+script_path = "rules/ddl/gaussdb_no_system_column.rhai"
 applies_to = ["ddl"]
 severity = "error"
 
@@ -371,7 +344,7 @@ name = "gaussdb_recommended_data_types"
 group = "gaussdb-type"
 description = "Prefer the recommended basic data types from the specification appendix"
 enabled = false
-script_path = "config/rules/ddl/gaussdb_recommended_data_types.rhai"
+script_path = "rules/ddl/gaussdb_recommended_data_types.rhai"
 applies_to = ["ddl"]
 severity = "warning"
 
@@ -381,7 +354,7 @@ name = "gaussdb_no_materialized_view"
 group = "gaussdb-object"
 description = "Materialized views are not allowed"
 enabled = false
-script_path = "config/rules/ddl/gaussdb_no_materialized_view.rhai"
+script_path = "rules/ddl/gaussdb_no_materialized_view.rhai"
 applies_to = ["ddl"]
 severity = "error"
 
@@ -391,7 +364,7 @@ name = "gaussdb_no_order_by_in_view"
 group = "gaussdb-object"
 description = "ORDER BY is not allowed inside a view definition"
 enabled = false
-script_path = "config/rules/ddl/gaussdb_no_order_by_in_view.rhai"
+script_path = "rules/ddl/gaussdb_no_order_by_in_view.rhai"
 applies_to = ["ddl"]
 severity = "error"
 
@@ -401,7 +374,7 @@ name = "gaussdb_view_usage_warning"
 group = "gaussdb-object"
 description = "Views are discouraged (and nested views especially so)"
 enabled = false
-script_path = "config/rules/ddl/gaussdb_view_usage_warning.rhai"
+script_path = "rules/ddl/gaussdb_view_usage_warning.rhai"
 applies_to = ["ddl"]
 severity = "warning"
 
@@ -411,7 +384,7 @@ name = "gaussdb_create_index_concurrently"
 group = "gaussdb-index"
 description = "CREATE INDEX must use CONCURRENTLY when online transactions exist"
 enabled = false
-script_path = "config/rules/ddl/gaussdb_create_index_concurrently.rhai"
+script_path = "rules/ddl/gaussdb_create_index_concurrently.rhai"
 applies_to = ["ddl"]
 severity = "error"
 
@@ -421,7 +394,7 @@ name = "gaussdb_no_quoted_column_in_ddl"
 group = "gaussdb-ddl"
 description = "Column names in DDL must not be wrapped in quotes or backticks"
 enabled = false
-script_path = "config/rules/ddl/gaussdb_no_quoted_column_in_ddl.rhai"
+script_path = "rules/ddl/gaussdb_no_quoted_column_in_ddl.rhai"
 applies_to = ["ddl"]
 severity = "error"
 
@@ -431,7 +404,7 @@ name = "gaussdb_require_commit_in_transaction"
 group = "gaussdb-ddl"
 description = "DDL inside a transaction requires an explicit COMMIT/ROLLBACK"
 enabled = false
-script_path = "config/rules/ddl/gaussdb_require_commit_in_transaction.rhai"
+script_path = "rules/ddl/gaussdb_require_commit_in_transaction.rhai"
 applies_to = ["ddl"]
 severity = "error"
 
@@ -441,7 +414,7 @@ name = "gaussdb_no_order_by_group_by_in_update"
 group = "gaussdb-dml"
 description = "UPDATE must not use ORDER BY or GROUP BY"
 enabled = false
-script_path = "config/rules/dml/gaussdb_no_order_by_group_by_in_update.rhai"
+script_path = "rules/dml/gaussdb_no_order_by_group_by_in_update.rhai"
 applies_to = ["dml"]
 severity = "error"
 
@@ -451,7 +424,7 @@ name = "gaussdb_no_order_by_group_by_in_delete"
 group = "gaussdb-dml"
 description = "DELETE must not use ORDER BY or GROUP BY"
 enabled = false
-script_path = "config/rules/dml/gaussdb_no_order_by_group_by_in_delete.rhai"
+script_path = "rules/dml/gaussdb_no_order_by_group_by_in_delete.rhai"
 applies_to = ["dml"]
 severity = "error"
 
@@ -461,7 +434,7 @@ name = "gaussdb_update_subquery_to_join"
 group = "gaussdb-dml"
 description = "UPDATE ... WHERE with a subquery should be rewritten as JOIN"
 enabled = false
-script_path = "config/rules/dml/gaussdb_update_subquery_to_join.rhai"
+script_path = "rules/dml/gaussdb_update_subquery_to_join.rhai"
 applies_to = ["dml"]
 severity = "warning"
 
@@ -471,7 +444,7 @@ name = "gaussdb_order_by_explicit_sort"
 group = "gaussdb-dml"
 description = "ORDER BY must specify ASC/DESC and NULLS FIRST/LAST explicitly"
 enabled = false
-script_path = "config/rules/dml/gaussdb_order_by_explicit_sort.rhai"
+script_path = "rules/dml/gaussdb_order_by_explicit_sort.rhai"
 applies_to = ["dml"]
 severity = "error"
 
@@ -481,7 +454,7 @@ name = "gaussdb_statement_max_bytes"
 group = "gaussdb-performance"
 description = "A single statement should stay under 5KB"
 enabled = false
-script_path = "config/rules/dml/gaussdb_statement_max_bytes.rhai"
+script_path = "rules/dml/gaussdb_statement_max_bytes.rhai"
 applies_to = ["ddl", "dml"]
 severity = "warning"
 

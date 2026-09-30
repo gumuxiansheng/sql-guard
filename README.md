@@ -357,6 +357,8 @@ SqlGuard/
 │   │   └── encoding.rs      # UTF-8 BOM / 换行符检查（FILE001/FILE002）
 │   ├── rule/
 │   │   ├── mod.rs
+│   │   ├── pack.rs              # ★ 规则包：清单解析、多包合并/优先级、namespace、overrides（M2）
+│   │   ├── lock.rs              # ★ sqlguard.lock：生成与校验（M3）
 │   │   └── engine/
 │   │       ├── mod.rs           # 模块入口
 │   │       ├── ast.rs           # SqlAst / StmtInfo / SelectInfo 等包装类型
@@ -405,6 +407,7 @@ SqlGuard/
 │       ├── replay/Replayer.java
 │       └── plan/            # ExplainAdapter / PlanParser / PlanCollector
 ├── config/
+│   ├── rules-pack.toml           # ★ 默认规则包 rules-core 清单（使 config/ 成为合规包根）
 │   └── rules/
 │       ├── lib/
 │       │   └── helpers.rhai      # 公共辅助函数（编译时嵌入，用户无需关心）
@@ -546,6 +549,84 @@ script_path = "config/rules/ddl/no_drop_table.rhai"
 applies_to = ["ddl"]                             # 仅对匹配的 script_type 生效
 severity = "error"                               # error / warning
 ```
+
+### `[pack]` 规则包兼容声明
+
+可选的 `[pack]` 段声明"这套规则"与引擎的版本契约，用于在规则与引擎分开发版时拦住**规则静默失效**——旧引擎没有规则用到的 API 时，规则会整条不生效却毫无报错。写在规则文件（`sqlguard.rules.toml`）或主配置中，**必须位于任何 `[[rules]]` 之前**。全部字段可选：
+
+```toml
+[pack]
+name        = "rules-core"      # 包名（报错提示；rules-pack.toml 清单中作为引用键）
+version     = "2.1.0"           # 包版本（仅 rules-pack.toml 清单中必填）
+api_version = 1                 # 本规则集所需的规则 API 版本（整数）
+engine      = ">=0.2.7 <0.3"    # 兼容的引擎版本范围（空格分隔的比较器为 AND）
+namespace   = "core"            # 规则 id 命名空间：本来源规则对外 id 变为 core:<id>
+helpers     = "lib/h.rhai"      # 包内辅助函数（仅 rules-pack.toml，在引擎 helpers 之后 prepend）
+```
+
+| 字段 | 缺省 | 行为 |
+|------|------|------|
+| `api_version` | `1` | 高于引擎支持值 → **硬错误**（附升级提示），避免规则静默失效 |
+| `engine` | 不声明 | SemVer 范围不满足当前引擎 → **默认 warning**；`--strict-engine` 时 error |
+| `namespace` | 不声明 | **生效**：本来源规则的对外 id 变为 `<namespace>:<id>`；字符集限 `[a-z0-9_-]` |
+| `helpers` | 不声明 | 包内辅助函数文件（相对包根，禁止逃逸）；仅 `rules-pack.toml` 清单使用 |
+
+外置规则文件的 `[pack]` 优先于主配置内联的 `[pack]`。引擎当前支持的规则 API 版本为 `src/rule/pack.rs` 的 `RULE_API_VERSION`（当前 `1`）。详见 [docs/rule-pack-design.md](docs/rule-pack-design.md)。
+
+### `[rule_packs]` 多包加载与覆盖
+
+规则包是一个**可独立发版**的目录（包根名即 `<search_path>/<name>`）：
+
+```
+rules-gaussdb/                  # 包根
+├── rules-pack.toml             # 清单：[pack] 元数据 + [[rules]] 规则表
+├── rules/ddl/*.rhai            # 规则脚本（script_path 相对包根，禁止 .. 逃逸）
+└── lib/h.rhai                  # 可选：包内 helpers
+```
+
+包清单 `rules-pack.toml`（`name` / `version` / `api_version` 必填）：
+
+```toml
+[pack]
+name        = "rules-gaussdb"
+version     = "1.3.0"
+api_version = 1
+engine      = ">=0.2.7 <0.3"    # 可选：不满足仅告警（--strict-engine 时 error）
+namespace   = "gaussdb"         # 可选：规则 id 变为 gaussdb:GDB001
+helpers     = "lib/h.rhai"      # 可选：包内辅助函数
+
+[[rules]]
+id          = "GDB001"
+name        = "primary_key_required"
+script_path = "rules/ddl/primary_key_required.rhai"
+applies_to  = ["ddl"]
+severity    = "warning"
+```
+
+在主配置中选用：
+
+```toml
+[rule_packs]
+search_paths = [".sqlguard/rules", "vendor/rules"]   # SQLGUARD_RULE_PATH（; 分隔）会追加
+packs = [
+  { name = "rules-core" },
+  { name = "rules-gaussdb", version = "1.3.0" },     # 声明期望版本，不符则报错
+  { name = "rules-local", path = "./my-rules" },     # path 优先，直接指向包根
+]
+
+[[rule_packs.overrides]]       # 最高优先级：只改 enabled / severity / params
+id = "gaussdb:GDB001"
+severity = "error"
+
+[rule_packs.overrides.params]
+max_join_tables = 5
+```
+
+**合并优先级**（低 → 高）：引擎内置兜底 < `packs`(按声明顺序，靠后覆盖靠前) < 项目本地规则（`rules_file` / 同级 `sqlguard.rules.toml` / 内联 `[[rules]]`）< `overrides`。同 `id` 冲突时高优先级覆盖低优先级，并在交互终端打印一条 `Note:`（CI 日志不输出）。
+
+**规则 id 命名空间**：`namespace = "gaussdb"` → 该来源规则对外 id 为 `gaussdb:GDB001`，多个包可各自拥有 `DML001` 而互不冲突；未设 `namespace` 的来源（含项目本地规则、内联 `[[rules]]`）保持裸 id，**现有用法完全不变**。`--rules` / `--exclude-rules` 支持 `gaussdb:GDB001`（精确）、`GDB001`（裸 id，跨 namespace 命中同名短 id）、`gaussdb:*`（整个 namespace）、`GDB*`（裸前缀匹配短 id）。
+
+**其他要点**：包内脚本 / helpers 禁止 `..` 逃逸包根；包内同 id 重复、`packs` 未找到、`version` 不符、`overrides` 引用未知 id 均为**硬错误**（附修复提示）；`allow_remote = true` 当前会直接报错（远程包尚未支持）；启用缓存时规则包（`name@version` + 包内 rhai + 清单）已纳入运行签名。
 
 ### `[mapper]` MyBatis Mapper 模式
 
@@ -713,6 +794,10 @@ sqlguard check [OPTIONS] [PATH]
       --dialect <D>     覆盖 [dialect]：generic / mysql / postgresql / ansi
       --cache           强制启用文件缓存（覆盖 [cache].enabled = false）
       --no-cache        强制禁用文件缓存（覆盖 [cache].enabled = true）
+      --strict-engine   规则包 [pack].engine 版本范围不匹配时按 error 处理（默认仅告警）
+      --strict-ids      规则来源间存在同 id 冲突时按 error 处理（默认告警并由高优先级来源覆盖）
+      --locked          不允许 sqlguard.lock 缺失或过期（CI 模式），并校验包 checksum
+      --no-lock         完全跳过 sqlguard.lock 校验（与 --locked 互斥）
 ```
 
 > 文件缓存（P2-8）：对未修改的文件（mtime + size 不变）复用上次检查的
@@ -725,7 +810,13 @@ sqlguard check [OPTIONS] [PATH]
 ```bash
 sqlguard init [PATH]           # 生成默认配置与示例规则（幂等）
 sqlguard init [PATH] --force   # 覆盖已存在的配置与规则文件
+sqlguard init [PATH] --with-default-pack   # 改用默认规则包（vendor 到项目内 + 生成锁文件）
 ```
+
+`--with-default-pack` 是**规则包模式**的初始化：不写 `config/rules/` 脚本，而是把默认包
+`rules-core` vendor 到 `vendor/rules/rules-core/`，在主配置末尾追加 `[rule_packs]`，并生成
+`sqlguard.lock`——产出的工程自带规则、可离线、可直接进 CI（配合 `check --locked`）。
+两种模式互不影响，默认 `init` 行为保持不变。
 
 > **幂等语义（v0.2.5 起）**：默认只补缺失文件，已存在的 `sqlguard.toml` / `sqlguard.rules.toml` /
 > 规则脚本**原样保留**并逐项提示 `skipped`——防止覆盖 gates-toolkit 等工具链按模板渲染过的定制配置。
@@ -753,6 +844,10 @@ sqlguard check-diff --base <BASE> [OPTIONS] [PATH]
       --groups <G>      仅执行指定分组的规则
       --exclude-rules <IDS>  排除指定 id
       --exclude-groups <G>   排除指定分组
+      --strict-engine   规则包 [pack].engine 版本范围不匹配时按 error 处理（默认仅告警）
+      --strict-ids      规则来源间存在同 id 冲突时按 error 处理（默认告警并由高优先级来源覆盖）
+      --locked          不允许 sqlguard.lock 缺失或过期（CI 模式），并校验包 checksum
+      --no-lock         完全跳过 sqlguard.lock 校验（与 --locked 互斥）
 ```
 
 工作流程：
@@ -805,6 +900,59 @@ sqlguard gen-rollback [OPTIONS] [PATH]
 | 强制复核 | `required` | `irreversible` / `unreliable` / `partial` | 红色置顶 |
 | 提示性复核 | `optional` | `requires_lock` / `counter_unrestored` | 黄色 |
 | 自动放行 | `none` | reliable 且无风险 flag | 绿色（默认折叠） |
+
+### `sqlguard rules`（规则包管理）
+
+管理规则包与锁文件，不执行任何检查。
+
+```
+sqlguard rules list   [-c CFG] [--json]           # 列出生效规则（合并 + 覆盖之后的结果）
+sqlguard rules lock   [-c CFG]                    # 生成 / 更新 sqlguard.lock
+sqlguard rules verify [-c CFG] [--locked]         # 校验锁与包兼容性（不跑检查）
+sqlguard rules vendor [-c CFG] [-o DIR]           # 把生效的包复制到项目内（默认 vendor/rules）
+sqlguard rules add <SPEC> [-c CFG]                # 追加一个包到配置并刷新锁文件
+```
+
+`SPEC` 可为 `name`、`name@version` 或包目录路径。`add` 采用**末尾追加 + 回滚**策略：
+只在配置末尾追加 `[[rule_packs.packs]]`，追加后若配置无法解析（例如 packs 是内联
+`packs = [...]` 写法）则恢复原文件并报错——**配置永不会被改坏**。
+
+```bash
+sqlguard rules list                     # 查看 43 条规则来自哪些包、级别、开关
+sqlguard rules list --json              # 供脚本消费
+sqlguard rules add rules-gaussdb@1.3.0  # 按 search_paths 查找并锁定
+sqlguard rules add ../shared-rules      # 直接指向包目录
+sqlguard rules vendor                   # 打包进项目，便于离线/入库
+```
+
+### `sqlguard.lock`（规则包锁文件）
+
+由 `sqlguard rules lock` 生成，**建议提交到版本库**，用于固定规则集、保证检查结论可复现：
+
+```toml
+# sqlguard.lock — 规则包锁文件（由 `sqlguard rules lock` 生成，请勿手工编辑）
+version = 1
+
+[[pack]]
+name = "rules-core"
+version = "1.0.0"
+source = "path:vendor/rules/rules-core"
+checksum = "sha256:…"
+api_version = 1
+```
+
+校验强度（`check` / `check-diff`）：
+
+| 场景 | 默认（Auto） | `--locked` |
+|------|--------------|-----------|
+| 锁文件缺失 | 仅 `note:` 提示 | **error** |
+| 包版本与锁不一致 | **error** | **error** |
+| 包内容变更（版本未变） | 不检测 | **error（checksum 不符）** |
+| 锁中存在多余的包 | 不检测 | **error** |
+| 完全跳过 | `--no-lock` | — |
+
+即：默认**零额外 IO**（只比对 `name@version`）；`--locked` 才读取包内全部文件做 checksum，
+适合 CI 严格模式（`sqlguard check . --locked`）。
 
 ### `sqlguard-mine`（独立二进制）
 
@@ -1181,6 +1329,47 @@ sqlguard check ./sql --groups ddl-safety
 # 完整检查但排除实验性规则
 sqlguard check ./sql --exclude-groups experimental
 ```
+
+## 规则包迁移指南
+
+### 1. 沿用现有布局（零改动）
+
+不配置 `[rule_packs]` 时行为与历史版本**完全一致**：规则来自 `sqlguard.rules.toml`
+（或 `rules_file` / 内联 `[[rules]]`）。已有项目无需任何迁移，可直接升级。
+
+### 2. 迁移到规则包（推荐）
+
+```bash
+sqlguard init . --with-default-pack   # 生成包化骨架（vendor 默认包 + 锁文件）
+sqlguard rules list                   # 确认生效规则及其来源
+sqlguard rules lock                   # 固定版本，提交 sqlguard.lock
+```
+
+迁移后：
+- 规则包独立演进；升级包版本只需改 `[rule_packs].packs` 的 `version` 再 `rules lock`；
+- 项目自定义规则继续写在 `sqlguard.rules.toml`（优先级高于包内规则）；
+- 只改级别 / 阈值 / 开关时用 `[[rule_packs.overrides]]`，**不要复制脚本**；
+- 需要与包内规则同名但语义不同时，给包设 `namespace`（如 `gaussdb`）→ id 变为
+  `gaussdb:GDB001`，与裸 `DML001` 不再冲突。
+
+### 3. 把规则集抽成独立仓库（可选）
+
+默认规则包在仓库内**已经是一个合规包根**（`config/rules-pack.toml` + `config/rules/**`），
+抽取即复制：
+
+```bash
+# 在独立规则仓库中
+cp <sqlguard>/config/rules-pack.toml  .            # 包清单
+cp -r <sqlguard>/config/rules         ./rules      # 脚本（含 lib/helpers.rhai）
+```
+
+业务项目侧当前通过 `sqlguard rules vendor`（或 `git submodule` / CI 检出）把包放进项目，
+再用 `search_paths` 或 `path` 引用——因为 `source` **本期只实现 `path:`**
+（`git+` / `registry:` 已在格式中预留，后续里程碑实现）。包的版本号与 CI 由该独立仓库
+自行负责：它只需声明 `api_version` 与 `engine`，引擎在不兼容时会**明确报错**而非静默失效。
+
+> 破坏性变更约定：新增/修改引擎暴露给 Rhai 的类型、函数、内置 helpers 或 `context` 字段时，
+> 必须递增 `src/rule/pack.rs` 的 `RULE_API_VERSION`；包声明更高的 `api_version` 会被拒绝加载。
 
 ## 退出码
 

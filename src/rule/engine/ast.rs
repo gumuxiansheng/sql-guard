@@ -62,7 +62,7 @@ impl RuleFilter {
     /// 每个条目支持前缀通配 `prefix*`。
     pub fn matches_id_group(&self, id: &str, group: Option<&str>) -> bool {
         // 1. 黑名单优先：命中即排除
-        if matches_any(&self.exclude_rules, id) {
+        if matches_rule_id_any(&self.exclude_rules, id) {
             return false;
         }
         if let Some(g) = group {
@@ -72,7 +72,8 @@ impl RuleFilter {
         }
 
         // 2. 白名单为空表示不限制
-        let in_rules = self.include_rules.is_empty() || matches_any(&self.include_rules, id);
+        let in_rules =
+            self.include_rules.is_empty() || matches_rule_id_any(&self.include_rules, id);
         let in_groups = self.include_groups.is_empty()
             || group
                 .map(|g| matches_any(&self.include_groups, g))
@@ -84,16 +85,38 @@ impl RuleFilter {
 
 /// 判断 `value` 是否匹配 patterns 中的任一项。支持前缀通配 `prefix*`。
 pub fn matches_any(patterns: &[String], value: &str) -> bool {
-    for pat in patterns {
-        if let Some(prefix) = pat.strip_suffix('*') {
-            if value.starts_with(prefix) {
-                return true;
-            }
-        } else if pat == value {
-            return true;
-        }
+    patterns.iter().any(|pat| matches_plain(pat, value))
+}
+
+/// 单值匹配：精确相等，或 `prefix*` 前缀通配。
+fn matches_plain(pattern: &str, value: &str) -> bool {
+    match pattern.strip_suffix('*') {
+        Some(prefix) => value.starts_with(prefix),
+        None => pattern == value,
     }
-    false
+}
+
+/// 单个过滤项是否匹配规则 id（支持 namespace 规范 id `<ns>:<id>`）。
+///
+/// 匹配语义（见 `docs/rule-pack-design.md` §5.3）：
+/// - 过滤项**带** namespace（`ns:id` / `ns:*`）→ 规则 id 的 namespace 必须相同，再匹配短 id；
+/// - 过滤项为**裸 id**（`DDL001` / `DDL*`）→ 忽略 namespace，匹配规则的短 id。
+///
+/// 无 namespace 的规则（裸 id）与 [`matches_any`] 行为完全一致。
+pub fn matches_rule_id(pattern: &str, id: &str) -> bool {
+    let short = crate::rule::pack::short_id(id);
+    match pattern.split_once(':') {
+        Some((pat_ns, pat_short)) => {
+            let rule_ns = id.split_once(':').map(|(ns, _)| ns);
+            rule_ns == Some(pat_ns) && matches_plain(pat_short, short)
+        }
+        None => matches_plain(pattern, short),
+    }
+}
+
+/// 任一过滤项匹配规则 id（namespace 感知，见 [`matches_rule_id`]）。
+pub fn matches_rule_id_any(patterns: &[String], id: &str) -> bool {
+    patterns.iter().any(|pat| matches_rule_id(pat, id))
 }
 
 /// 规则执行上下文，传递给每条 Rhai 规则脚本。
@@ -1583,6 +1606,50 @@ mod tests {
         let pats = vec!["*".to_string()];
         assert!(matches_any(&pats, "anything"));
         assert!(matches_any(&pats, ""));
+    }
+
+    // ===== namespace 规范 id 匹配（M2，见 docs/rule-pack-design.md §5.3） =====
+
+    #[test]
+    fn test_matches_rule_id_namespace_semantics() {
+        // `ns:id` → namespace 必须相同，再精确匹配短 id
+        assert!(matches_rule_id("gaussdb:GDB001", "gaussdb:GDB001"));
+        assert!(!matches_rule_id("gaussdb:GDB001", "other:GDB001"));
+        assert!(!matches_rule_id("gaussdb:GDB001", "GDB001"));
+
+        // 裸 id → 忽略 namespace，匹配短 id
+        assert!(matches_rule_id("GDB001", "gaussdb:GDB001"));
+        assert!(matches_rule_id("GDB001", "GDB001"));
+        assert!(!matches_rule_id("GDB001", "gaussdb:GDB002"));
+
+        // `ns:*` → 该 namespace 下全部规则
+        assert!(matches_rule_id("gaussdb:*", "gaussdb:ANY"));
+        assert!(!matches_rule_id("gaussdb:*", "other:ANY"));
+        assert!(!matches_rule_id("gaussdb:*", "ANY"));
+
+        // 裸前缀通配 → 匹配短 id 前缀（保持 `--rules DDL*` 直觉）
+        assert!(matches_rule_id("GDB*", "gaussdb:GDB001"));
+        assert!(matches_rule_id("GDB*", "GDB001"));
+        assert!(!matches_rule_id("GDB*", "gaussdb:OTHER"));
+    }
+
+    #[test]
+    fn test_rule_filter_namespaced_ids() {
+        let f = RuleFilter::from_cli(&Some("gaussdb:*".to_string()), &None, &None, &None);
+        assert!(f.matches_id_group("gaussdb:GDB001", None));
+        assert!(!f.matches_id_group("other:GDB001", None));
+        assert!(!f.matches_id_group("DDL001", None));
+
+        // 裸 id 白名单跨 namespace 命中；黑名单优先
+        let f = RuleFilter::from_cli(
+            &Some("GDB001".to_string()),
+            &None,
+            &Some("gaussdb:GDB001".to_string()),
+            &None,
+        );
+        assert!(!f.matches_id_group("gaussdb:GDB001", None));
+        assert!(f.matches_id_group("other:GDB001", None));
+        assert!(f.matches_id_group("GDB001", None));
     }
 
     // ===== RuleFilter =====

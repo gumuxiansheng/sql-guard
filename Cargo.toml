@@ -19,6 +19,7 @@ anyhow = "1.0"
 colored = "2"
 sqlparser = "0.60"
 quick-xml = "0.31"
+sha2 = "0.10"
 
 [dev-dependencies]
 proptest = "1.5"

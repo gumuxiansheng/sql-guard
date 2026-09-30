@@ -2,6 +2,15 @@
 
 SqlGuard 内置 25 条默认规则，分为 **P0（17 条，默认启用）** 和 **P1（8 条，默认禁用）** 两档（7 DDL + 18 DML）。
 
+> **与规则包的关系**：本手册的表格覆盖核心 P0/P1 规则；**权威且完整的规则清单**是
+> [`sqlguard.rules.toml.example`](../sqlguard.rules.toml.example) 与默认规则包清单
+> [`config/rules-pack.toml`](../config/rules-pack.toml)（当前 43 条，含 GaussDB 规范条目，
+> 其中 GaussDB 条目默认 `enabled = false`，按项目启用）。
+>
+> 这套规则现在也以**规则包 `rules-core`** 的形式提供，可被独立选择、指定版本、vendor 到
+> 项目内并用 `sqlguard.lock` 锁定；用法见 [rule-pack-design.md](rule-pack-design.md)
+> 与 README「`[rule_packs]` 多包加载与覆盖」「规则包迁移指南」。
+
 ## 规则总览
 
 | 编号 | 名称 | 分组 | 严重度 | P0/P1 | 对标来源 |

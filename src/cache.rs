@@ -233,6 +233,19 @@ pub fn compute_run_signature(
         parts.push(format!("rhai={}", s));
     }
 
+    // M2：生效的规则包纳入签名（name@version + 包内 rhai + 包清单）。
+    // 包内脚本在 rules_dir 之外，不加这一段会在"改了包内规则但缓存命中"时
+    // 复用旧 violations，产生静默错结果。
+    for pack in &config.resolved_packs {
+        parts.push(format!("pack={}@{}", pack.name, pack.version));
+        if let Some(s) = dir_signature_recursive(&pack.root, "rhai") {
+            parts.push(format!("pack_rhai={}:{}", pack.name, s));
+        }
+        if let Some(s) = file_signature(&pack.root.join(crate::rule::pack::PACK_MANIFEST_FILE)) {
+            parts.push(format!("pack_manifest={}:{}", pack.name, s));
+        }
+    }
+
     parts.join("|")
 }
 

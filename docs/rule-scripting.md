@@ -24,6 +24,13 @@ SqlGuard 使用 [Rhai](https://rhai.rs/) 脚本语言编写自定义规则。每
 
 > ⚠️ **Rhai 值语义注意**：Rhai 是值语义语言，函数内对 Array 参数的 push 不会写回调用者变量。因此所有 helper 函数只返回值，`violations.push(...)` 必须在脚本顶层执行。详见 [`helpers.rhai`](../config/rules/lib/helpers.rhai) 中的注释。
 
+> **规则包内的辅助函数（M2）**：规则包可在清单里声明 `[pack].helpers = "lib/h.rhai"`，该文件内容会在
+> **引擎内置 helpers 之后** prepend——因此包内 helper 可以调用 `violation` / `violation_msg` 等引擎 helper，
+> 但引擎 helper 不能调用包内 helper。路径相对包根，禁止 `..` 逃逸。
+> 包内 helper 与引擎内置 helper 一样会 prepend 到**该包每条规则**脚本之前；项目本地规则（`sqlguard.rules.toml`）
+> 不会加载任何包内 helper。若你只是写项目自有规则，直接使用引擎内置 helper 即可，无需声明 `[pack].helpers`。
+> 注意：引擎内置 helper 属于**规则 API 面**，其变更会递增 `RULE_API_VERSION`；包声明更高的 `api_version` 会被拒绝加载。
+
 ## 3. 全局变量
 
 ### 3.1 `context`（Map）
