@@ -280,8 +280,9 @@ api_version = 1                     # 冗余记录，便于审计
 |------|------|
 | 无锁文件 | 正常检查；stderr 提示 `note: no sqlguard.lock; run 'sqlguard rules lock'` |
 | 锁文件存在且匹配 | 正常检查 |
-| 版本或 checksum 不匹配 | **默认 error**，提示 `run 'sqlguard rules lock'` 更新；`--no-lock` 可临时跳过 |
-| `--locked` | 严格模式：任何不匹配都 error（CI 推荐） |
+| **版本**不匹配 | **默认 error**，提示 `run 'sqlguard rules lock'` 更新；`--no-lock` 可临时跳过 |
+| **checksum** 不匹配（版本未变却改了内容） | 默认**不检测**（见 §7 的 IO 折中）；`--locked` 时 error |
+| `--locked` | 严格模式：锁缺失、版本不符、checksum 不符、锁有多余条目，全部 error（CI 推荐） |
 
 > 选择"默认 error"而非 cargo 式的默认 warn，因为本工具的输出直接用于 **CI 阻断决策**，静默漂移比报错更危险。
 
@@ -393,7 +394,7 @@ M1 可独立先上，**只堵"规则静默失败"风险**，不改任何格式�
 | `RULE_API_VERSION` | `src/rule/pack.rs` | 当前值 `1`；语义为"引擎暴露给 Rhai 的 API 面"（见 §4.1） |
 | `[pack]` 解析 | `src/rule/pack.rs::RulePackMeta` + `src/config.rs` | `Config.pack`；外置规则文件的 `[pack]` 优先于主配置内联 |
 | `api_version` 硬校验 | `config.rs::Config::validate_rule_pack` | 高于引擎支持值 → `ConfigError`（附升级 hint），检查直接中止 |
-| `engine` 范围校验 | `pack.rs::engine_mismatch` + `main.rs::check_rule_pack_compat` | 默认 warning；`check` / `check-diff` 加 `--strict-engine` → error |
+| `engine` 范围校验 | `pack.rs::RulePackMeta::engine_mismatch` + `main.rs::check_rule_pack_compat` | 默认 warning；`check` / `check-diff` 加 `--strict-engine` → error。**M1 只诊断本地 `[pack]`**，M2 起由 `config.rs::rule_pack_engine_mismatches` 覆盖每个生效规则包（见 §10.5） |
 | `namespace` | `pack.rs::namespace_error` | 仅校验字符集 `[a-z0-9_-]`；解析成功后提示"尚未生效"，id 仍为裸 id（**M2 起已生效**，见 §10.5） |
 | SemVer 范围求值 | `pack.rs`（私有 `parse_engine_range`） | 仅支持 `>=` `>` `<=` `<` `=` 的 AND 组合（空白/逗号分隔）；`||` 明确报错 |
 
@@ -414,6 +415,7 @@ M1 未改动任何文件格式与规则 id，既有工程行为不变。已附�
 | 目录逃逸拦截 | `pack.rs::resolve_pack_path` | `script_path` / `helpers` 不得 `..` 逃逸包根 |
 | 缓存签名 | `cache.rs::compute_run_signature` | 追加 `pack=name@version` + 包内 rhai 递归签名 + 清单签名（原计划 M3；因 M2 一引入包就存在"改包不失效"的静默风险，提前到 M2） |
 | 非致命提示 | `config.rs::rule_pack_notes` + `main.rs::check_rule_pack_compat` | 仅在 stderr 为 TTY 时输出，避免污染 CI 日志 |
+| 包级 `engine` 诊断 | `ResolvedPack::engine` + `config.rs::rule_pack_engine_mismatches` | `ResolvedPack` 必须带出包声明的 `engine`，否则包清单里的范围声明形同虚设（曾漏：只诊断本地 `[pack]`，包声明 `>=9.0` 也不告警） |
 
 M2 **未改动 `RuleConfig` 结构**（短 id 由 canonical id 按 `:` 反推），因此既有配置、报告、
 `--rules` 用法在**不使用 `[rule_packs]` 与 namespace 时**完全不变。新增测试 18 个

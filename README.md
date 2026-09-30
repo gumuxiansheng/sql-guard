@@ -794,7 +794,7 @@ sqlguard check [OPTIONS] [PATH]
       --dialect <D>     覆盖 [dialect]：generic / mysql / postgresql / ansi
       --cache           强制启用文件缓存（覆盖 [cache].enabled = false）
       --no-cache        强制禁用文件缓存（覆盖 [cache].enabled = true）
-      --strict-engine   规则包 [pack].engine 版本范围不匹配时按 error 处理（默认仅告警）
+      --strict-engine   本地 [pack] 或规则包清单的 engine 版本范围不匹配时按 error 处理（默认仅告警）
       --strict-ids      规则来源间存在同 id 冲突时按 error 处理（默认告警并由高优先级来源覆盖）
       --locked          不允许 sqlguard.lock 缺失或过期（CI 模式），并校验包 checksum
       --no-lock         完全跳过 sqlguard.lock 校验（与 --locked 互斥）
@@ -844,7 +844,7 @@ sqlguard check-diff --base <BASE> [OPTIONS] [PATH]
       --groups <G>      仅执行指定分组的规则
       --exclude-rules <IDS>  排除指定 id
       --exclude-groups <G>   排除指定分组
-      --strict-engine   规则包 [pack].engine 版本范围不匹配时按 error 处理（默认仅告警）
+      --strict-engine   本地 [pack] 或规则包清单的 engine 版本范围不匹配时按 error 处理（默认仅告警）
       --strict-ids      规则来源间存在同 id 冲突时按 error 处理（默认告警并由高优先级来源覆盖）
       --locked          不允许 sqlguard.lock 缺失或过期（CI 模式），并校验包 checksum
       --no-lock         完全跳过 sqlguard.lock 校验（与 --locked 互斥）

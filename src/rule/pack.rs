@@ -306,12 +306,41 @@ pub struct ResolvedPack {
     pub version: String,
     pub namespace: Option<String>,
     pub api_version: u32,
+    /// 包声明的兼容引擎版本范围（可选，仅软告警）。
+    ///
+    /// 与 `api_version`（硬闸门）是两道不同的闸门：这里不满足只表示"该包未在
+    /// 当前引擎版本上验证过"，由调用方决定 warning 还是 `--strict-engine` 的 error。
+    pub engine: Option<String>,
     /// 包根（脚本/helpers 的解析基准，已规范化）。
     pub root: PathBuf,
     /// 包内规则条数（帮助信息用）。
     pub rule_count: usize,
     /// 包内 helpers 文件内容（清单声明了 `helpers` 时），在引擎 helpers 之后 prepend。
     pub helpers: Option<String>,
+}
+
+impl ResolvedPack {
+    /// `engine` 版本范围不满足当前引擎时的提示（满足或未声明则返回 `None`）。
+    ///
+    /// 这是**非致命**诊断：调用方决定 warning 还是 error（`--strict-engine`）。
+    /// `engine` 不可解析属硬错误，已在 [`RulePackMeta::validate`] 于加载时拦截，
+    /// 这里的 `Err` 分支只是不可达兜底（避免 panic）。
+    pub fn engine_mismatch(&self, engine_version: &str) -> Option<String> {
+        let range = self.engine.as_deref()?;
+        match engine_range_satisfied(range, engine_version) {
+            Ok(true) => None,
+            Ok(false) => Some(format!(
+                "rule pack '{}' declares engine compatibility '{}', but this engine is {}.\n\
+                 note: the rule set was not validated on this engine version; \
+                 pass --strict-engine to fail instead of warn.",
+                self.name, range, engine_version
+            )),
+            Err(err) => Some(format!(
+                "rule pack '{}' has an invalid engine range '{}': {}",
+                self.name, range, err
+            )),
+        }
+    }
 }
 
 /// 多包合并结果。
@@ -525,6 +554,7 @@ pub fn resolve_and_merge(config: &Config, config_dir: &Path) -> Result<MergedRul
             version,
             namespace,
             api_version,
+            engine: meta.engine.clone(),
             root,
             rule_count,
             helpers,
@@ -806,6 +836,32 @@ mod tests {
         assert!(msg.contains("--strict-engine"), "got: {msg}");
         // 未声明 engine → 永不告警
         assert!(meta(None, None).engine_mismatch("9.9.9").is_none());
+    }
+
+    #[test]
+    fn resolved_pack_engine_mismatch_covers_declared_ranges() {
+        let pack = |engine: Option<&str>| ResolvedPack {
+            name: "rules-test".to_string(),
+            version: "1.0.0".to_string(),
+            namespace: None,
+            api_version: 1,
+            engine: engine.map(str::to_string),
+            root: PathBuf::from("."),
+            rule_count: 1,
+            helpers: None,
+        };
+        // 未声明 → 永不告警（与本地 [pack] 行为一致）
+        assert!(pack(None).engine_mismatch("0.0.1").is_none());
+        // 范围内 → 不告警
+        assert!(pack(Some(">=0.2.7 <0.3"))
+            .engine_mismatch("0.2.7")
+            .is_none());
+        // 范围外 → 告警，并给出 --strict-engine 提示
+        let msg = pack(Some(">=9.0 <10"))
+            .engine_mismatch("0.2.7")
+            .expect("must warn");
+        assert!(msg.contains("rules-test"), "got: {msg}");
+        assert!(msg.contains("--strict-engine"), "got: {msg}");
     }
 
     #[test]

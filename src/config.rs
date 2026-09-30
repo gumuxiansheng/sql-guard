@@ -709,6 +709,24 @@ impl Config {
             .engine_mismatch(env!("CARGO_PKG_VERSION"))
     }
 
+    /// M2：所有规则来源的 `engine` 范围诊断——本地 `[pack]` **与** 每个生效规则包。
+    ///
+    /// 早先只诊断本地 `[pack]`，导致包清单里声明的 `engine` 形同虚设
+    /// （包作者声明了范围却永远收不到告警）。逐条返回，由调用方决定
+    /// warning 还是 `--strict-engine` 的 error。
+    pub fn rule_pack_engine_mismatches(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        if let Some(msg) = self.rule_pack_engine_mismatch() {
+            out.push(msg);
+        }
+        for pack in &self.resolved_packs {
+            if let Some(msg) = pack.engine_mismatch(env!("CARGO_PKG_VERSION")) {
+                out.push(msg);
+            }
+        }
+        out
+    }
+
     /// M2：规则包的非致命提示（如 id 被高优先级来源覆盖）。
     ///
     /// 由调用方（`check` / `check-diff`）决定是否展示——通常仅在 stderr 为
@@ -1319,6 +1337,76 @@ type = "sql"
         assert_eq!(cfg.resolved_packs.len(), 2);
         assert_eq!(cfg.resolved_packs[0].version, "1.0.0");
         assert!(cfg.rule_pack_notes().is_empty(), "no conflict expected");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 包清单带 `engine` 范围的清单文本（其余同 [`pack_manifest`]）。
+    fn pack_manifest_engine(name: &str, engine: &str) -> String {
+        pack_manifest(name, None, "x.rhai").replace(
+            "api_version = 1\n",
+            &format!("api_version = 1\nengine = \"{engine}\"\n"),
+        )
+    }
+
+    #[test]
+    fn engine_mismatches_are_collected_from_local_pack_and_every_resolved_pack() {
+        let extra = "[rule_packs]\nsearch_paths = [\"packs\"]\n\
+                     packs = [{ name = \"pack-a\" }, { name = \"pack-b\" }]\n";
+        // 本地 [pack] 也声明一个不满足的范围
+        let local_body =
+            format!("[pack]\nname = \"local\"\nengine = \">=0.0.1 <0.0.2\"\n\n{ONE_RULE}");
+        let (dir, cfg_path) = setup_pack_proj("sqlguard_pack_engine_all", extra, &local_body);
+        let cfg_dir = cfg_path.parent().unwrap();
+        write_pack(
+            cfg_dir,
+            "pack-a",
+            &pack_manifest_engine("pack-a", ">=0.0.1 <0.0.2"),
+            &[("x.rhai", "// a")],
+        );
+        write_pack(
+            cfg_dir,
+            "pack-b",
+            &pack_manifest_engine("pack-b", ">=0.0.1"),
+            &[("x.rhai", "// b")],
+        );
+
+        let cfg = Config::load(&cfg_path).expect("engine mismatch must NOT fail load");
+        let mismatches = cfg.rule_pack_engine_mismatches();
+        // 本地 1 条 + pack-a 1 条；pack-b 在范围内，不应告警
+        assert_eq!(mismatches.len(), 2, "got: {mismatches:?}");
+        assert!(
+            mismatches.iter().any(|m| m.contains("'local'")),
+            "{mismatches:?}"
+        );
+        assert!(
+            mismatches.iter().any(|m| m.contains("'pack-a'")),
+            "包清单声明的 engine 必须被诊断: {mismatches:?}"
+        );
+        assert!(
+            !mismatches.iter().any(|m| m.contains("pack-b")),
+            "在范围内的包不应告警: {mismatches:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn resolved_packs_carry_declared_engine_range() {
+        let extra = "[rule_packs]\nsearch_paths = [\"packs\"]\npacks = [{ name = \"pack-a\" }]\n";
+        let (dir, cfg_path) = setup_pack_proj("sqlguard_pack_engine_field", extra, ONE_RULE);
+        let cfg_dir = cfg_path.parent().unwrap();
+        write_pack(
+            cfg_dir,
+            "pack-a",
+            &pack_manifest_engine("pack-a", ">=0.2.7 <0.3"),
+            &[("x.rhai", "// a")],
+        );
+        let cfg = Config::load(&cfg_path).expect("load");
+        assert_eq!(
+            cfg.resolved_packs[0].engine.as_deref(),
+            Some(">=0.2.7 <0.3"),
+            "包声明的 engine 必须随解析结果带出"
+        );
+        assert!(cfg.rule_pack_engine_mismatches().is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

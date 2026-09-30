@@ -253,11 +253,21 @@ fn collect_files(
     Ok(())
 }
 
+/// 去掉 Windows `canonicalize()` 引入的 `\\?\` 前缀（仅影响展示/落盘文本）。
+fn strip_unc(p: &Path) -> String {
+    let s = p.to_string_lossy();
+    s.strip_prefix("\\\\?\\").unwrap_or(&s).to_string()
+}
+
 /// `source` 字段：包根相对配置文件目录（不可相对时用绝对路径）。
+///
+/// 路径统一去掉 `\\?\` 前缀并转为 `/`：锁文件要提交进版本库，机器相关的
+/// UNC 前缀会让它在其它机器上失去意义（也污染 diff）。
 fn source_of(root: &Path, canonical_config_dir: &Path) -> String {
+    let rendered = strip_unc(root);
     match root.strip_prefix(canonical_config_dir) {
         Ok(rel) => format!("path:{}", rel.to_string_lossy().replace('\\', "/")),
-        Err(_) => format!("path:{}", root.to_string_lossy().replace('\\', "/")),
+        Err(_) => format!("path:{}", rendered.replace('\\', "/")),
     }
 }
 
@@ -369,6 +379,21 @@ mod tests {
     fn read_lock_returns_none_when_absent() {
         let dir = tmp("sqlguard_lock_absent");
         assert!(read_lock(&dir).unwrap().is_none());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn source_never_leaks_unc_prefix() {
+        // 包根与配置目录无法相对化时退化为绝对路径，但不能带 Windows 的 \\?\ 前缀
+        // （锁文件要进版本库，机器相关前缀既无意义又污染 diff）。
+        let dir = tmp("sqlguard_lock_unc");
+        fs::create_dir_all(dir.join("vendor/rules/x")).unwrap();
+        let cfg = canonical_or_self(&dir);
+        let outside = canonical_or_self(&std::env::temp_dir());
+        let s = source_of(&outside, &cfg);
+        assert!(s.starts_with("path:"), "got: {s}");
+        assert!(!s.contains("\\\\?\\"), "UNC prefix must be stripped: {s}");
+        assert!(!s.contains("//?/"), "UNC prefix must be stripped: {s}");
         let _ = fs::remove_dir_all(&dir);
     }
 

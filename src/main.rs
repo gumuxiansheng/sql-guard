@@ -283,16 +283,16 @@ fn run_explain(
 /// - 未显式指定（使用默认的 `sqlguard.toml`）→ 先尝试同目录的 `sqlguard.toml`，
 ///   仍找不到则退回内置默认配置并打印警告，保留「零配置」开箱即用的行为。
 fn load_config(config_path: &Path, explicit: bool) -> Result<(Config, PathBuf), SqlGuardError> {
-    let config_dir = config_path
-        .parent()
-        .unwrap_or_else(|| Path::new("."))
+    // `parent()` 对裸文件名（如默认的 "sqlguard.toml"）返回**空路径**而非 "."。
+    // 空路径无法 canonicalize，会让 `sqlguard.lock` 的 source 退化成机器相关的
+    // 绝对路径（`path://?/C:/...`），锁文件因此不可移植。这里统一兜底为 "."。
+    let config_parent = match config_path.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
+        _ => PathBuf::from("."),
+    };
+    let config_dir = config_parent
         .canonicalize()
-        .unwrap_or_else(|_| {
-            config_path
-                .parent()
-                .unwrap_or_else(|| Path::new("."))
-                .to_path_buf()
-        });
+        .unwrap_or_else(|_| config_parent.clone());
     let config = if config_path.exists() {
         Config::load(config_path)?
     } else if explicit {
@@ -337,12 +337,15 @@ fn check_rule_pack_compat(
             config.rule_pack_id_conflicts().join("\n  ")
         )));
     }
-    if let Some(msg) = config.rule_pack_engine_mismatch() {
-        if strict_engine {
-            return Err(SqlGuardError::ConfigError(format!(
-                "--strict-engine: {msg}"
-            )));
-        }
+    // engine 范围：本地 [pack] + 每个生效规则包都参与诊断（可解析性已在加载时硬校验）。
+    let mismatches = config.rule_pack_engine_mismatches();
+    if strict_engine && !mismatches.is_empty() {
+        return Err(SqlGuardError::ConfigError(format!(
+            "--strict-engine:\n  {}",
+            mismatches.join("\n  ")
+        )));
+    }
+    for msg in &mismatches {
         eprintln!("Warning: {msg}");
     }
     Ok(())
@@ -434,7 +437,7 @@ fn rules_list(config: Option<&Path>, json: bool) -> Result<(), SqlGuardError> {
                     "namespace": p.namespace,
                     "api_version": p.api_version,
                     "rule_count": p.rule_count,
-                    "root": p.root.display().to_string(),
+                    "root": display_path(&p.root),
                     "has_helpers": p.helpers.is_some(),
                 })
             })
@@ -537,7 +540,7 @@ fn rules_lock(config: Option<&Path>) -> Result<(), SqlGuardError> {
 
 fn rules_verify(config: Option<&Path>, locked: bool) -> Result<(), SqlGuardError> {
     let (cfg, dir, _path, _explicit) = load_for_rules(config)?;
-    if let Some(msg) = cfg.rule_pack_engine_mismatch() {
+    for msg in cfg.rule_pack_engine_mismatches() {
         eprintln!("Warning: {msg}");
     }
     let mode = if locked {

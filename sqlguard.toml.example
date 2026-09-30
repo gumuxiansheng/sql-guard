@@ -36,7 +36,9 @@ paths = [
 ]
 strict = true
 # init 子命令会在项目内创建 config/rules/（规则脚本），strict 结构校验时放行
-allow_extra = [".gitkeep", "config/"]
+# vendor/ 是 `init --with-default-pack` 落规则包（vendor/rules/rules-core/）的目录，
+# 同样放行——否则每个包化项目每次 check 都会刷一批 "vendor/... (unexpected)"
+allow_extra = [".gitkeep", "config/", "vendor/"]
 
 [classification]
 default_type = "other"
