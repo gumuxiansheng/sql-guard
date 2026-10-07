@@ -3,10 +3,10 @@
 # 默认 x86_64；ARM64 主机请改用 Dockerfile.aarch64。
 #
 # 构建（在发布包根目录执行）：
-#   docker build -t sqlguard:0.2.6 .
+#   docker build -t sqlguard:0.2.7 .
 #
 # 运行：
-#   docker run --rm -v "$PWD:/work" sqlguard:0.2.6 check /work/sql
+#   docker run --rm -v "$PWD:/work" sqlguard:0.2.7 check /work/sql
 
 FROM alpine:3.20
 

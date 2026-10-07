@@ -3392,3 +3392,252 @@ formats = ["json"]
 
     let _ = std::fs::remove_dir_all(dir);
 }
+
+
+// ===== GaussDB 规范 A 类规则（docs/gaussdb-rule-gap-analysis.md §2 的 A 类）=====
+
+/// 把本轮新增的 18 个 GaussDB 规则脚本复制到临时项目。
+fn copy_gaussdb_rule_scripts(dir: &str) {
+    let scripts: &[(&str, &str)] = &[
+        ("ddl", "gaussdb_object_name_charset"),
+        ("ddl", "gaussdb_no_quoted_object_name"),
+        ("ddl", "gaussdb_no_reserved_prefix"),
+        ("ddl", "gaussdb_object_name_max_bytes"),
+        ("ddl", "gaussdb_max_large_fields"),
+        ("ddl", "gaussdb_no_system_column"),
+        ("ddl", "gaussdb_recommended_data_types"),
+        ("ddl", "gaussdb_no_materialized_view"),
+        ("ddl", "gaussdb_no_order_by_in_view"),
+        ("ddl", "gaussdb_view_usage_warning"),
+        ("ddl", "gaussdb_create_index_concurrently"),
+        ("ddl", "gaussdb_no_quoted_column_in_ddl"),
+        ("ddl", "gaussdb_require_commit_in_transaction"),
+        ("dml", "gaussdb_no_order_by_group_by_in_update"),
+        ("dml", "gaussdb_no_order_by_group_by_in_delete"),
+        ("dml", "gaussdb_update_subquery_to_join"),
+        ("dml", "gaussdb_order_by_explicit_sort"),
+        ("dml", "gaussdb_statement_max_bytes"),
+    ];
+    for (sub, name) in scripts {
+        let src = std::env::current_dir()
+            .unwrap()
+            .join(format!("config/rules/{}/{}.rhai", sub, name));
+        let dst = format!("{}/config/rules/{}/{}.rhai", dir, sub, name);
+        std::fs::write(&dst, std::fs::read_to_string(&src).unwrap())
+            .unwrap_or_else(|e| panic!("copy {} failed: {}", name, e));
+    }
+}
+
+/// 生成含 18 条 GaussDB 规则的规则声明（全部启用）。
+fn gaussdb_rules_toml() -> String {
+    let defs: &[(&str, &str, &str, &str, &str)] = &[
+        ("GNAM001", "gaussdb_object_name_charset", "ddl", "error", ""),
+        ("GNAM002", "gaussdb_no_quoted_object_name", "ddl", "error", ""),
+        ("GNAM003", "gaussdb_no_reserved_prefix", "ddl", "error", ""),
+        ("GNAM004", "gaussdb_object_name_max_bytes", "ddl", "error", "name_max_bytes = 63\n"),
+        ("GTYP001", "gaussdb_max_large_fields", "ddl", "warning", "max_large_fields = 8\nlarge_field_bytes = 2000\n"),
+        ("GTYP002", "gaussdb_no_system_column", "ddl", "error", ""),
+        ("GTYP003", "gaussdb_recommended_data_types", "ddl", "warning", ""),
+        ("GOBJ001", "gaussdb_no_materialized_view", "ddl", "error", ""),
+        ("GOBJ002", "gaussdb_no_order_by_in_view", "ddl", "error", ""),
+        ("GOBJ003", "gaussdb_view_usage_warning", "ddl", "warning", ""),
+        ("GIDX001", "gaussdb_create_index_concurrently", "ddl", "error", ""),
+        ("GDCL001", "gaussdb_no_quoted_column_in_ddl", "ddl", "error", ""),
+        ("GDDL001", "gaussdb_require_commit_in_transaction", "ddl", "error", ""),
+        ("GDML002", "gaussdb_no_order_by_group_by_in_update", "dml", "error", ""),
+        ("GDML003", "gaussdb_no_order_by_group_by_in_delete", "dml", "error", ""),
+        ("GDML004", "gaussdb_update_subquery_to_join", "dml", "warning", ""),
+        ("GDML005", "gaussdb_order_by_explicit_sort", "dml", "error", ""),
+        ("GPERF001", "gaussdb_statement_max_bytes", "dml", "warning", "stmt_max_bytes = 5120\n"),
+    ];
+    let mut out = String::new();
+    for (id, name, sub, severity, params) in defs {
+        out.push_str(&format!(
+            "[[rules]]\nid = \"{}\"\nname = \"{}\"\ngroup = \"gaussdb\"\nenabled = true\nscript_path = \"config/rules/{}/{}.rhai\"\napplies_to = [\"{}\"]\nseverity = \"{}\"\n\n",
+            id, name, sub, name, sub, severity
+        ));
+        if !params.is_empty() {
+            out.push_str(&format!("[rules.params]\n{}\n", params));
+        }
+    }
+    out
+}
+
+#[test]
+fn test_check_gaussdb_a_class_rules_hit_expected_ids() {
+    let dir = "/tmp/sqlguard-test-gaussdb-a";
+    let _ = std::fs::remove_dir_all(dir);
+    for p in [
+        "sql/ddl",
+        "sql/dml",
+        "config/rules/ddl",
+        "config/rules/dml",
+    ] {
+        std::fs::create_dir_all(format!("{}/{}", dir, p)).unwrap();
+    }
+    copy_gaussdb_rule_scripts(dir);
+
+    let long_name = format!("t_{}", "a".repeat(72)); // 74 字节 > 63
+
+    // ---- 违规夹具：每条对应一个规则 ----
+    std::fs::write(
+        format!("{}/sql/ddl/violations.sql", dir),
+        format!(
+            r#"CREATE TABLE "user-orders" (id INT);
+CREATE TABLE "Quoted" (id INT);
+CREATE TABLE pg_legacy (id INT);
+CREATE TABLE {} (id INT);
+CREATE TABLE t_big (a VARCHAR(4000), b VARCHAR(4000), c TEXT, d TEXT, e TEXT, f TEXT, g TEXT, h TEXT, i TEXT);
+CREATE TABLE t_sys (id INT, ctid INT);
+CREATE TABLE t_type (id SERIAL, ip INET);
+CREATE MATERIALIZED VIEW mv_orders AS SELECT id FROM orders;
+CREATE VIEW v_sorted AS SELECT id FROM orders ORDER BY id;
+CREATE INDEX idx_t_a ON t (a);
+ALTER TABLE t ADD COLUMN "name" VARCHAR(20);
+BEGIN;
+CREATE TABLE t_txn (id INT);
+"#,
+            long_name
+        ),
+    )
+    .unwrap();
+
+    // 超长语句（> 5KB）用于 GPERF001
+    let big_select = format!(
+        "SELECT {} FROM t;\n",
+        (0..900)
+            .map(|i| format!("c{:04}", i))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    std::fs::write(
+        format!("{}/sql/dml/violations.sql", dir),
+        format!(
+            r#"UPDATE t SET a = 1 ORDER BY b;
+UPDATE t SET a = 1 GROUP BY b;
+DELETE FROM t WHERE a = 1 ORDER BY b;
+UPDATE t SET a = 1 WHERE id IN (SELECT id FROM y);
+SELECT id FROM t ORDER BY id;
+{}"#,
+            big_select
+        ),
+    )
+    .unwrap();
+
+    // ---- 合规夹具：不应产生任何违规 ----
+    std::fs::write(
+        format!("{}/sql/ddl/clean.sql", dir),
+        r#"CREATE TABLE t_clean (id BIGINT, name VARCHAR(64), amount NUMERIC(18,2));
+CREATE INDEX CONCURRENTLY idx_clean_name ON t_clean (name);
+BEGIN;
+CREATE TABLE t_clean_txn (id BIGINT);
+COMMIT;
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        format!("{}/sql/dml/clean.sql", dir),
+        r#"SELECT id FROM t ORDER BY id ASC NULLS LAST;
+UPDATE t SET a = 1 WHERE id = 2;
+DELETE FROM t WHERE id = 2;
+"#,
+    )
+    .unwrap();
+
+    // dialect 必须是根级键且位于 [section] 之前
+    std::fs::write(
+        format!("{}/sqlguard.toml", dir),
+        format!(
+            r#"dialect = "gaussdb"
+dialect_fallback = "oracle"
+
+[structure]
+paths = ["sql"]
+strict = false
+
+[classification]
+default_type = "dml"
+
+[[classification.rules]]
+name = "ddl-by-dir"
+pattern = "**/ddl/**"
+type = "ddl"
+priority = 10
+
+[[classification.rules]]
+name = "dml-by-dir"
+pattern = "**/dml/**"
+type = "dml"
+priority = 10
+
+[output]
+formats = ["json"]
+
+{}"#,
+            gaussdb_rules_toml()
+        ),
+    )
+    .unwrap();
+
+    let output = Command::new(binary_abs_path())
+        .args([
+            "check",
+            dir,
+            "-c",
+            &format!("{}/sqlguard.toml", dir),
+            "-f",
+            "json",
+            "-o",
+            dir,
+        ])
+        .output()
+        .expect("Failed to run sqlguard check");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("JSON report saved"), "JSON report should be saved: {}", stderr);
+
+    let content = std::fs::read_to_string(format!("{}/sqlguard-report.json", dir)).unwrap();
+    let json: serde_json::Value = serde_json::from_str(&content).unwrap();
+    let violations = json["violations"].as_array().unwrap();
+
+    // 1) 任何规则脚本都不得抛运行时错误（Rhai fn 访问外层 scope 变量等坑的护栏）
+    for v in violations {
+        let msg = v["message"].as_str().unwrap_or("");
+        assert!(
+            !msg.contains("Rule execution error") && !msg.contains("Script error"),
+            "rule script must not error: {}",
+            msg
+        );
+    }
+
+    // 2) 每条 A 类规则都应命中
+    let expected = [
+        "GNAM001", "GNAM002", "GNAM003", "GNAM004", "GTYP001", "GTYP002", "GTYP003",
+        "GOBJ001", "GOBJ002", "GOBJ003", "GIDX001", "GDCL001", "GDDL001", "GDML002",
+        "GDML003", "GDML004", "GDML005", "GPERF001",
+    ];
+    let hit: std::collections::HashSet<String> = violations
+        .iter()
+        .filter_map(|v| v["rule_id"].as_str().map(|s| s.to_string()))
+        .collect();
+    for id in expected {
+        assert!(hit.contains(id), "rule {} should fire; got: {:?}", id, hit);
+    }
+
+    // 3) 合规夹具不应产生任何违规（防误报）
+    let clean_hits: Vec<String> = violations
+        .iter()
+        .filter(|v| {
+            let f = v["file_path"].as_str().unwrap_or("");
+            f.contains("clean.sql")
+        })
+        .map(|v| format!("{}: {}", v["rule_id"].as_str().unwrap_or(""), v["message"].as_str().unwrap_or("")))
+        .collect();
+    assert!(
+        clean_hits.is_empty(),
+        "clean fixtures must not produce violations: {:?}",
+        clean_hits
+    );
+
+    let _ = std::fs::remove_dir_all(dir);
+}

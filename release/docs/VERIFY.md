@@ -74,7 +74,7 @@ sqlguard --version
 同时 `VERSION` 文件记录了构建来源，可用于回溯：
 
 ```
-version      = 0.2.6
+version      = 0.2.7
 git_commit   = a6acd576e5b19211f90dba4e0702dad2dfac5516
 build_date   = 2026-09-18
 rustc        = 1.97.1

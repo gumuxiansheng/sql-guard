@@ -36,7 +36,9 @@ paths = [
 ]
 strict = true
 # init 子命令会在项目内创建 config/rules/（规则脚本），strict 结构校验时放行
-allow_extra = [".gitkeep", "config/"]
+# vendor/ 是 `init --with-default-pack` 落规则包（vendor/rules/rules-core/）的目录，
+# 同样放行——否则每个包化项目每次 check 都会刷一批 "vendor/... (unexpected)"
+allow_extra = [".gitkeep", "config/", "vendor/"]
 
 [classification]
 default_type = "other"
@@ -70,6 +72,54 @@ priority = 0
 # 不写本行时，工具也会自动在同目录查找 sqlguard.rules.toml。
 # ================================================================================
 rules_file = "sqlguard.rules.toml"
+
+# ================================================================================
+# 规则包 [rule_packs]（规则与引擎分开发版）
+# ================================================================================
+# 规则包 = 一个目录（<search_path>/<name>/），含 rules-pack.toml 清单 + *.rhai 脚本。
+# 包可独立发版、独立选版本，项目按需选用；包内规则与本地 sqlguard.rules.toml 共存。
+#
+# 合并优先级（低 → 高）：
+#   引擎内置兜底 < packs（按声明顺序，靠后覆盖靠前）< 项目本地规则 < overrides
+#
+# search_paths：包搜索路径（相对配置文件目录或绝对路径）。
+#   包位于 <search_path>/<name>/rules-pack.toml。
+#   环境变量 SQLGUARD_RULE_PATH（; 分隔）会追加在其后，便于 CI 注入共享包。
+# packs：生效的规则包。
+#   { name }                 按 search_paths 查找
+#   { name, path }           直接指向包根（path 优先）
+#   { name, version }        声明期望版本，与实际不符时报错
+# overrides：按 id 覆盖包内/本地规则的 enabled / severity / params（最高优先级）。
+#   id 可写规范 id（gaussdb:GDB001）或裸 id（GDB001，命中多条时取优先级最高者）；
+#   引用不存在的 id 会报错（防 typo）。
+# allow_remote：远程包来源。当前尚不支持远程拉取，设为 true 会直接报错
+#   （避免"看起来放开了、其实没生效"）。
+#
+# 规则 id 命名空间：包清单 [pack].namespace = "gaussdb" → 该包规则对外 id 变为
+#   gaussdb:GDB001，多个包可各自拥有 DML001 而互不冲突。未设 namespace 的来源
+#   （含项目本地规则、内联 [[rules]]）保持裸 id，现有用法完全不变。
+#   CLI 过滤写法（--rules / --exclude-rules）：
+#     gaussdb:GDB001   精确匹配规范 id
+#     GDB001           裸 id，跨 namespace 命中所有同名短 id
+#     gaussdb:*        该 namespace 下全部规则
+#     GDB*             裸前缀，匹配短 id 前缀
+#   详见 docs/rule-pack-design.md §5.3。
+#
+# [rule_packs]
+# search_paths = [".sqlguard/rules", "vendor/rules"]
+# packs = [
+#   { name = "rules-core" },                          # 按 search_paths 查找
+#   { name = "rules-gaussdb", version = "1.3.0" },    # 声明期望版本
+#   { name = "rules-local", path = "./my-rules" },    # 直接指向包根
+# ]
+# allow_remote = false
+#
+# [[rule_packs.overrides]]
+# id = "gaussdb:GDB001"
+# enabled = false
+# severity = "error"
+# [rule_packs.overrides.params]
+# max_join_tables = 5
 
 [output]
 # 可用格式：plain（控制台）/ json / html / sarif（接 GitHub/Azure/GitLab code scanning）

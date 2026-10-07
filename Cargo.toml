@@ -1,6 +1,6 @@
 [package]
 name = "sqlguard"
-version = "0.2.6"
+version = "0.2.7"
 edition = "2021"
 description = "A SQL script checking tool with customizable rules engine for CI/CD pipelines"
 
@@ -19,6 +19,7 @@ anyhow = "1.0"
 colored = "2"
 sqlparser = "0.60"
 quick-xml = "0.31"
+sha2 = "0.10"
 
 [dev-dependencies]
 proptest = "1.5"

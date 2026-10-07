@@ -64,3 +64,48 @@ fn join_strs(arr, sep) {
     }
     return s;
 }
+
+/// 取字符串第 i 个字符（返回单字符字符串）；越界或负索引返回空串。
+/// Rhai 的 `s[i]` 索引语义不稳定，统一用本函数做字符级访问。
+fn char_at(s, i) {
+    if i < 0 { return ""; }
+    if i >= s.len() { return ""; }
+    return s.sub_string(i, 1);
+}
+
+/// 把十进制数字字符串解析为整数（安全版）。
+///
+/// 为什么不用 Rhai 内建的 `parse_int`：内建版本遇到非数字输入会 **抛错**
+/// （"invalid digit found in string"），把整条规则的脚本执行打断；规则里读的是
+/// 用户写的类型文本（`VARCHAR(n)` 的 n），不能假设一定合法。
+///
+/// 典型用途：读类型声明中的长度，如 `VARCHAR(1000)` → 1000，
+/// 供「大字段」判定（GaussDB 规范：字符串长度超过 2000 字节即大字段）使用。
+///
+/// 语义：跳过前导空白；遇到第一个非数字字符即停止；全无数字时返回 0。
+/// 例：parse_int_safe("1000") == 1000；parse_int_safe(" 42x") == 42；
+///     parse_int_safe("abc") == 0
+fn parse_int_safe(s) {
+    let digits = "0123456789";
+    let n = 0;
+    let i = 0;
+    let started = false;
+    while i < s.len() {
+        let c = char_at(s, i);
+        let d = -1;
+        let j = 0;
+        while j < 10 {
+            if char_at(digits, j) == c { d = j; }
+            j = j + 1;
+        }
+        if d >= 0 {
+            n = n * 10 + d;
+            started = true;
+        } else {
+            if started { break; }
+            if c != " " && c != "\t" { break; }
+        }
+        i = i + 1;
+    }
+    return n;
+}

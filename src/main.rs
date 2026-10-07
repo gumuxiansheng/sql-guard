@@ -9,7 +9,7 @@ use sqlguard::cache;
 use sqlguard::checker::classification;
 use sqlguard::checker::directory;
 use sqlguard::checker::encoding;
-use sqlguard::cli::{Cli, Commands};
+use sqlguard::cli::{Cli, Commands, RulesAction};
 use sqlguard::config::{CheckDialect, Config};
 use sqlguard::error::{SqlGuardError, Violation};
 use sqlguard::git_diff;
@@ -17,6 +17,8 @@ use sqlguard::mapper;
 use sqlguard::replay_export;
 use sqlguard::reporter;
 use sqlguard::rule::engine;
+use sqlguard::rule::lock;
+use sqlguard::rule::pack;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 在大栈线程中运行：真实业务 mapper 可含数百甚至上千个 <if>，AllTrue 渲染后
@@ -49,6 +51,10 @@ fn main_inner() -> Result<(), Box<dyn std::error::Error>> {
             cache,
             no_cache,
             encoding,
+            strict_engine,
+            strict_ids,
+            locked,
+            no_lock,
         } => {
             let config_path = config
                 .clone()
@@ -69,10 +75,25 @@ fn main_inner() -> Result<(), Box<dyn std::error::Error>> {
                 cache,
                 no_cache,
                 encoding.as_deref(),
+                strict_engine,
+                strict_ids,
+                locked,
+                no_lock,
             )?;
         }
-        Commands::Init { path, force } => {
-            run_init(&path, force)?;
+        Commands::Init {
+            path,
+            force,
+            with_default_pack,
+        } => {
+            if with_default_pack {
+                run_init_with_default_pack(&path, force)?;
+            } else {
+                run_init(&path, force)?;
+            }
+        }
+        Commands::Rules { action } => {
+            run_rules_subcommand(action)?;
         }
         Commands::CheckDiff {
             base,
@@ -87,6 +108,10 @@ fn main_inner() -> Result<(), Box<dyn std::error::Error>> {
             dialect,
             dialect_fallback,
             encoding,
+            strict_engine,
+            strict_ids,
+            locked,
+            no_lock,
         } => {
             let config_path = config
                 .clone()
@@ -106,6 +131,10 @@ fn main_inner() -> Result<(), Box<dyn std::error::Error>> {
                 dialect.as_deref(),
                 dialect_fallback.as_deref(),
                 encoding.as_deref(),
+                strict_engine,
+                strict_ids,
+                locked,
+                no_lock,
             )?;
         }
         Commands::ReplayExport {
@@ -254,16 +283,16 @@ fn run_explain(
 /// - 未显式指定（使用默认的 `sqlguard.toml`）→ 先尝试同目录的 `sqlguard.toml`，
 ///   仍找不到则退回内置默认配置并打印警告，保留「零配置」开箱即用的行为。
 fn load_config(config_path: &Path, explicit: bool) -> Result<(Config, PathBuf), SqlGuardError> {
-    let config_dir = config_path
-        .parent()
-        .unwrap_or_else(|| Path::new("."))
+    // `parent()` 对裸文件名（如默认的 "sqlguard.toml"）返回**空路径**而非 "."。
+    // 空路径无法 canonicalize，会让 `sqlguard.lock` 的 source 退化成机器相关的
+    // 绝对路径（`path://?/C:/...`），锁文件因此不可移植。这里统一兜底为 "."。
+    let config_parent = match config_path.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
+        _ => PathBuf::from("."),
+    };
+    let config_dir = config_parent
         .canonicalize()
-        .unwrap_or_else(|_| {
-            config_path
-                .parent()
-                .unwrap_or_else(|| Path::new("."))
-                .to_path_buf()
-        });
+        .unwrap_or_else(|_| config_parent.clone());
     let config = if config_path.exists() {
         Config::load(config_path)?
     } else if explicit {
@@ -285,6 +314,396 @@ fn load_config(config_path: &Path, explicit: bool) -> Result<(Config, PathBuf), 
         generate_default_config()
     };
     Ok((config, config_dir))
+}
+
+/// M1/M2：规则包（`[pack]` / `[rule_packs]`）兼容诊断。
+///
+/// `api_version` 高于引擎支持属硬错误，已在 `Config::load` 拦截，这里不重复。
+/// 本函数只处理非致命信息：
+/// - 规则包提示（如 id 被高优先级来源覆盖）→ 仅在交互终端输出，避免污染 CI 日志；
+/// - `--strict-ids` 且存在跨来源同 id 冲突 → error；
+/// - `engine` 版本范围不满足当前引擎 → 默认 warning，`--strict-engine` 时 error。
+///
+/// 诊断写 stderr，不污染报告输出。
+fn check_rule_pack_compat(
+    config: &Config,
+    strict_engine: bool,
+    strict_ids: bool,
+) -> Result<(), SqlGuardError> {
+    emit_notes(config.rule_pack_notes());
+    if strict_ids && !config.rule_pack_id_conflicts().is_empty() {
+        return Err(SqlGuardError::ConfigError(format!(
+            "--strict-ids: duplicate rule ids across rule sources:\n  {}",
+            config.rule_pack_id_conflicts().join("\n  ")
+        )));
+    }
+    // engine 范围：本地 [pack] + 每个生效规则包都参与诊断（可解析性已在加载时硬校验）。
+    let mismatches = config.rule_pack_engine_mismatches();
+    if strict_engine && !mismatches.is_empty() {
+        return Err(SqlGuardError::ConfigError(format!(
+            "--strict-engine:\n  {}",
+            mismatches.join("\n  ")
+        )));
+    }
+    for msg in &mismatches {
+        eprintln!("Warning: {msg}");
+    }
+    Ok(())
+}
+
+/// 终端展示路径：去掉 Windows `canonicalize()` 引入的 `\\?\` 前缀（仅影响显示）。
+fn display_path(p: &Path) -> String {
+    let s = p.to_string_lossy();
+    s.strip_prefix("\\\\?\\").unwrap_or(&s).to_string()
+}
+
+/// 提示仅在交互终端输出，避免污染 CI 日志。
+fn emit_notes(notes: &[String]) {
+    if !std::io::stderr().is_terminal() {
+        return;
+    }
+    for note in notes {
+        eprintln!("Note: {note}");
+    }
+}
+
+/// M3：`--locked` / `--no-lock` → 锁校验强度。
+fn lock_mode(locked: bool, no_lock: bool) -> Result<lock::LockMode, SqlGuardError> {
+    if locked && no_lock {
+        return Err(SqlGuardError::CheckError(
+            "--locked and --no-lock are mutually exclusive".to_string(),
+        ));
+    }
+    Ok(if no_lock {
+        lock::LockMode::Off
+    } else if locked {
+        lock::LockMode::Strict
+    } else {
+        lock::LockMode::Auto
+    })
+}
+
+// ===== sqlguard rules（M3） =====
+
+fn run_rules_subcommand(action: RulesAction) -> Result<(), SqlGuardError> {
+    match action {
+        RulesAction::List { config, json } => rules_list(config.as_deref(), json),
+        RulesAction::Lock { config } => rules_lock(config.as_deref()),
+        RulesAction::Verify { config, locked } => rules_verify(config.as_deref(), locked),
+        RulesAction::Vendor { config, output_dir } => {
+            rules_vendor(config.as_deref(), output_dir.as_deref())
+        }
+        RulesAction::Add { spec, config } => rules_add(&spec, config.as_deref()),
+    }
+}
+
+/// 解析 `-c/--config`（默认 `sqlguard.toml`）并加载配置，返回
+/// `(config, config_dir, config_path, 是否显式指定)`。
+fn load_for_rules(
+    config: Option<&Path>,
+) -> Result<(Config, PathBuf, PathBuf, bool), SqlGuardError> {
+    let config_path = config
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| PathBuf::from("sqlguard.toml"));
+    let explicit = config.is_some();
+    let (cfg, dir) = load_config(&config_path, explicit)?;
+    Ok((cfg, dir, config_path, explicit))
+}
+
+/// 规则来源标签：`<pack>@<version>`（包内规则）或 `project`（本地规则）。
+fn rule_source_label(cfg: &Config, script_path: &Path) -> String {
+    match cfg.pack_name_for(script_path) {
+        Some(name) => cfg
+            .resolved_packs
+            .iter()
+            .find(|p| p.name == name)
+            .map(|p| format!("{}@{}", p.name, p.version))
+            .unwrap_or_else(|| name.to_string()),
+        None => "project".to_string(),
+    }
+}
+
+fn rules_list(config: Option<&Path>, json: bool) -> Result<(), SqlGuardError> {
+    let (cfg, _dir, _path, _explicit) = load_for_rules(config)?;
+
+    if json {
+        let packs: Vec<serde_json::Value> = cfg
+            .resolved_packs
+            .iter()
+            .map(|p| {
+                serde_json::json!({
+                    "name": p.name,
+                    "version": p.version,
+                    "namespace": p.namespace,
+                    "api_version": p.api_version,
+                    "rule_count": p.rule_count,
+                    "root": display_path(&p.root),
+                    "has_helpers": p.helpers.is_some(),
+                })
+            })
+            .collect();
+        let rules: Vec<serde_json::Value> = cfg
+            .rules
+            .iter()
+            .map(|r| {
+                serde_json::json!({
+                    "id": r.id,
+                    "name": r.name,
+                    "group": r.group,
+                    "severity": r.severity,
+                    "enabled": r.enabled,
+                    "applies_to": r.applies_to,
+                    "source": rule_source_label(&cfg, &r.script_path),
+                })
+            })
+            .collect();
+        let doc = serde_json::json!({
+            "packs": packs,
+            "rule_count": cfg.rules.len(),
+            "rules": rules,
+            "notices": cfg.rule_pack_notes(),
+        });
+        let text = serde_json::to_string_pretty(&doc)
+            .map_err(|e| SqlGuardError::CheckError(format!("failed to serialize rules: {e}")))?;
+        println!("{text}");
+        return Ok(());
+    }
+
+    if cfg.resolved_packs.is_empty() {
+        println!("No rule packs configured; rules come from sqlguard.rules.toml only.");
+    } else {
+        println!("Rule packs (declaration order decides precedence, later wins):");
+        for p in &cfg.resolved_packs {
+            println!(
+                "  {:<24} {:<10} namespace={:<10} api_version={} rules={} helpers={}",
+                p.name,
+                p.version,
+                p.namespace.as_deref().unwrap_or("-"),
+                p.api_version,
+                p.rule_count,
+                if p.helpers.is_some() { "yes" } else { "no" },
+            );
+        }
+    }
+
+    println!();
+    let id_w = cfg
+        .rules
+        .iter()
+        .map(|r| r.id.len())
+        .max()
+        .unwrap_or(2)
+        .max(2);
+    let grp_w = cfg
+        .rules
+        .iter()
+        .map(|r| r.group.as_deref().unwrap_or("-").len())
+        .max()
+        .unwrap_or(5)
+        .max(5);
+    println!(
+        "{:<id_w$}  {:<grp_w$}  {:<7}  {:<7}  SOURCE",
+        "ID", "GROUP", "SEV", "ENABLED"
+    );
+    for r in &cfg.rules {
+        println!(
+            "{:<id_w$}  {:<grp_w$}  {:<7}  {:<7}  {}",
+            r.id,
+            r.group.as_deref().unwrap_or("-"),
+            r.severity,
+            if r.enabled { "yes" } else { "no" },
+            rule_source_label(&cfg, &r.script_path),
+        );
+    }
+    println!();
+    println!("{} rule(s) effective", cfg.rules.len());
+    for note in cfg.rule_pack_notes() {
+        println!("note: {note}");
+    }
+    Ok(())
+}
+
+fn rules_lock(config: Option<&Path>) -> Result<(), SqlGuardError> {
+    let (cfg, dir, _path, _explicit) = load_for_rules(config)?;
+    if cfg.resolved_packs.is_empty() {
+        println!("No rule packs configured; nothing to lock.");
+        return Ok(());
+    }
+    let lock_file = lock::build_lock(&cfg, &dir)?;
+    let path = lock::write_lock(&lock_file, &dir)?;
+    println!("Wrote {}", display_path(&path));
+    for p in &lock_file.packs {
+        println!("  {:<24} {:<10} {}", p.name, p.version, p.source);
+    }
+    Ok(())
+}
+
+fn rules_verify(config: Option<&Path>, locked: bool) -> Result<(), SqlGuardError> {
+    let (cfg, dir, _path, _explicit) = load_for_rules(config)?;
+    for msg in cfg.rule_pack_engine_mismatches() {
+        eprintln!("Warning: {msg}");
+    }
+    let mode = if locked {
+        lock::LockMode::Strict
+    } else {
+        lock::LockMode::Auto
+    };
+    for note in lock::verify_lock(&cfg, &dir, mode)? {
+        println!("note: {note}");
+    }
+    for note in cfg.rule_pack_notes() {
+        println!("note: {note}");
+    }
+    println!(
+        "OK: {} rule pack(s), {} rule(s) effective",
+        cfg.resolved_packs.len(),
+        cfg.rules.len()
+    );
+    Ok(())
+}
+
+fn rules_vendor(config: Option<&Path>, output_dir: Option<&Path>) -> Result<(), SqlGuardError> {
+    let (cfg, dir, _path, _explicit) = load_for_rules(config)?;
+    if cfg.resolved_packs.is_empty() {
+        return Err(SqlGuardError::ConfigError(
+            "no rule packs to vendor (declare them under [rule_packs].packs first)".to_string(),
+        ));
+    }
+    let dest_root = match output_dir {
+        Some(p) if p.is_absolute() => p.to_path_buf(),
+        Some(p) => dir.join(p),
+        None => dir.join("vendor").join("rules"),
+    };
+    for p in &cfg.resolved_packs {
+        let dest = dest_root.join(&p.name);
+        copy_dir(&p.root, &dest)?;
+        println!(
+            "vendored {}@{} → {}",
+            p.name,
+            p.version,
+            display_path(&dest)
+        );
+    }
+    let rel = dest_root
+        .strip_prefix(&dir)
+        .map(|r| r.to_string_lossy().replace('\\', "/"))
+        .unwrap_or_else(|_| dest_root.to_string_lossy().replace('\\', "/"));
+    let covered = cfg
+        .rule_packs
+        .search_paths
+        .iter()
+        .any(|s| s.trim_end_matches('/') == rel);
+    if !covered {
+        println!();
+        println!("Add the vendored directory to [rule_packs].search_paths so it is found:");
+        println!("    search_paths = [\"{rel}\"]");
+    }
+    Ok(())
+}
+
+/// 待追加的 `[[rule_packs.packs]]` 片段。
+struct PackEntry {
+    name: String,
+    toml: String,
+}
+
+fn rules_add(spec: &str, config: Option<&Path>) -> Result<(), SqlGuardError> {
+    let (cfg, dir, config_path, explicit) = load_for_rules(config)?;
+    if !explicit && !config_path.exists() {
+        return Err(SqlGuardError::ConfigError(format!(
+            "config file '{}' not found; pass --config or run `sqlguard init` first",
+            config_path.display()
+        )));
+    }
+
+    let entry = pack_entry_toml(spec, &dir)?;
+    if cfg.resolved_packs.iter().any(|p| p.name == entry.name) {
+        return Err(SqlGuardError::ConfigError(format!(
+            "[rule_packs] already declares a pack named '{}' in '{}'",
+            entry.name,
+            config_path.display()
+        )));
+    }
+
+    let original = fs::read_to_string(&config_path).map_err(SqlGuardError::IoError)?;
+    let mut updated = original.clone();
+    if !updated.ends_with('\n') {
+        updated.push('\n');
+    }
+    updated.push_str(&entry.toml);
+    fs::write(&config_path, &updated).map_err(SqlGuardError::IoError)?;
+
+    // 追加后必须仍能解析（含包定位与兼容校验）；否则回滚，保证配置文件永不被改坏。
+    match load_config(&config_path, true) {
+        Ok((cfg2, dir2)) => {
+            let lock_file = lock::build_lock(&cfg2, &dir2)?;
+            let lock_path = lock::write_lock(&lock_file, &dir2)?;
+            println!(
+                "Added rule pack '{}' to {}",
+                entry.name,
+                config_path.display()
+            );
+            println!("Wrote {}", display_path(&lock_path));
+            Ok(())
+        }
+        Err(err) => {
+            fs::write(&config_path, &original).map_err(SqlGuardError::IoError)?;
+            Err(SqlGuardError::ConfigError(format!(
+                "appending the pack entry would make '{}' invalid; the file has been restored.\n\
+                 cause: {err}\n\
+                 hint: if packs are declared inline (`packs = [...]`), add the entry there by hand.",
+                config_path.display()
+            )))
+        }
+    }
+}
+
+/// 依据 SPEC 构造待追加的 TOML：`name` / `name@version` / 目录路径。
+fn pack_entry_toml(spec: &str, config_dir: &Path) -> Result<PackEntry, SqlGuardError> {
+    let looks_like_path = spec.contains('/') || spec.contains('\\');
+    if looks_like_path {
+        let given = PathBuf::from(spec);
+        let abs = if given.is_absolute() {
+            given
+        } else {
+            config_dir.join(&given)
+        };
+        let name = pack::read_pack_name(&abs)?;
+        let rel = spec.replace('\\', "/");
+        let toml = format!("\n[[rule_packs.packs]]\nname = \"{name}\"\npath = \"{rel}\"\n");
+        Ok(PackEntry { name, toml })
+    } else {
+        let (name, version) = match spec.split_once('@') {
+            Some((n, v)) => (n.to_string(), Some(v.to_string())),
+            None => (spec.to_string(), None),
+        };
+        let mut toml = format!("\n[[rule_packs.packs]]\nname = \"{name}\"\n");
+        if let Some(v) = &version {
+            toml.push_str(&format!("version = \"{v}\"\n"));
+        }
+        Ok(PackEntry { name, toml })
+    }
+}
+
+/// 递归复制目录（跳过 `.git` 等版本控制目录），用于 `rules vendor`。
+fn copy_dir(src: &Path, dest: &Path) -> Result<(), SqlGuardError> {
+    fs::create_dir_all(dest).map_err(SqlGuardError::IoError)?;
+    let entries = fs::read_dir(src).map_err(SqlGuardError::IoError)?;
+    for entry in entries {
+        let entry = entry.map_err(SqlGuardError::IoError)?;
+        let name = entry.file_name();
+        let file_type = entry.file_type().map_err(SqlGuardError::IoError)?;
+        let target = dest.join(&name);
+        if file_type.is_dir() {
+            if name.to_string_lossy() == ".git" {
+                continue;
+            }
+            copy_dir(&entry.path(), &target)?;
+        } else if file_type.is_file() {
+            fs::copy(entry.path(), &target).map_err(SqlGuardError::IoError)?;
+        }
+    }
+    Ok(())
 }
 
 fn resolve_absolute_path(path: &Path) -> PathBuf {
@@ -500,6 +919,10 @@ fn run_check(
     cache_flag: bool,
     no_cache_flag: bool,
     encoding_override: Option<&str>,
+    strict_engine: bool,
+    strict_ids: bool,
+    locked: bool,
+    no_lock: bool,
 ) -> Result<(), SqlGuardError> {
     if cache_flag && no_cache_flag {
         return Err(SqlGuardError::CheckError(
@@ -507,6 +930,11 @@ fn run_check(
         ));
     }
     let (mut config, config_dir) = load_config(config_path, explicit_config)?;
+    // M1：规则包兼容诊断（api_version 已在 Config::load 硬校验）。
+    check_rule_pack_compat(&config, strict_engine, strict_ids)?;
+    // M3：锁文件校验（默认比对 name+version；--locked 额外校验 checksum）。
+    let lock_notes = lock::verify_lock(&config, &config_dir, lock_mode(locked, no_lock)?)?;
+    emit_notes(&lock_notes);
     if let Some(enc) = encoding_override {
         sqlguard::encoding::validate(enc).map_err(SqlGuardError::ConfigError)?;
         config.scan.encoding = enc.to_string();
@@ -827,8 +1255,17 @@ fn run_check_diff(
     dialect_override: Option<&str>,
     dialect_fallback_override: Option<&str>,
     encoding_override: Option<&str>,
+    strict_engine: bool,
+    strict_ids: bool,
+    locked: bool,
+    no_lock: bool,
 ) -> Result<(), SqlGuardError> {
     let (mut config, config_dir) = load_config(config_path, explicit_config)?;
+    // M1：规则包兼容诊断（api_version 已在 Config::load 硬校验）。
+    check_rule_pack_compat(&config, strict_engine, strict_ids)?;
+    // M3：锁文件校验（默认比对 name+version；--locked 额外校验 checksum）。
+    let lock_notes = lock::verify_lock(&config, &config_dir, lock_mode(locked, no_lock)?)?;
+    emit_notes(&lock_notes);
     if let Some(enc) = encoding_override {
         sqlguard::encoding::validate(enc).map_err(SqlGuardError::ConfigError)?;
         config.scan.encoding = enc.to_string();
@@ -1505,6 +1942,100 @@ const INIT_RULE_SCRIPTS: &[(&str, &str, &str)] = &[
         "dml",
         include_str!("../config/rules/dml/no_or_in_where.rhai"),
     ),
+
+    // ===== GaussDB 规范规则（GNAM/GTYP/GOBJ/GIDX/GDCL/GDDL/GDML/GPERF）=====
+    // 对应 docs/gaussdb-rule-gap-analysis.md 的 A 类条目，默认在
+    // sqlguard.rules.toml.example 中 enabled = false，按项目启用。
+    (
+        "gaussdb_object_name_charset",
+        "ddl",
+        include_str!("../config/rules/ddl/gaussdb_object_name_charset.rhai"),
+    ),
+    (
+        "gaussdb_no_quoted_object_name",
+        "ddl",
+        include_str!("../config/rules/ddl/gaussdb_no_quoted_object_name.rhai"),
+    ),
+    (
+        "gaussdb_no_reserved_prefix",
+        "ddl",
+        include_str!("../config/rules/ddl/gaussdb_no_reserved_prefix.rhai"),
+    ),
+    (
+        "gaussdb_object_name_max_bytes",
+        "ddl",
+        include_str!("../config/rules/ddl/gaussdb_object_name_max_bytes.rhai"),
+    ),
+    (
+        "gaussdb_max_large_fields",
+        "ddl",
+        include_str!("../config/rules/ddl/gaussdb_max_large_fields.rhai"),
+    ),
+    (
+        "gaussdb_no_system_column",
+        "ddl",
+        include_str!("../config/rules/ddl/gaussdb_no_system_column.rhai"),
+    ),
+    (
+        "gaussdb_recommended_data_types",
+        "ddl",
+        include_str!("../config/rules/ddl/gaussdb_recommended_data_types.rhai"),
+    ),
+    (
+        "gaussdb_no_materialized_view",
+        "ddl",
+        include_str!("../config/rules/ddl/gaussdb_no_materialized_view.rhai"),
+    ),
+    (
+        "gaussdb_no_order_by_in_view",
+        "ddl",
+        include_str!("../config/rules/ddl/gaussdb_no_order_by_in_view.rhai"),
+    ),
+    (
+        "gaussdb_view_usage_warning",
+        "ddl",
+        include_str!("../config/rules/ddl/gaussdb_view_usage_warning.rhai"),
+    ),
+    (
+        "gaussdb_create_index_concurrently",
+        "ddl",
+        include_str!("../config/rules/ddl/gaussdb_create_index_concurrently.rhai"),
+    ),
+    (
+        "gaussdb_no_quoted_column_in_ddl",
+        "ddl",
+        include_str!("../config/rules/ddl/gaussdb_no_quoted_column_in_ddl.rhai"),
+    ),
+    (
+        "gaussdb_require_commit_in_transaction",
+        "ddl",
+        include_str!("../config/rules/ddl/gaussdb_require_commit_in_transaction.rhai"),
+    ),
+    (
+        "gaussdb_no_order_by_group_by_in_update",
+        "dml",
+        include_str!("../config/rules/dml/gaussdb_no_order_by_group_by_in_update.rhai"),
+    ),
+    (
+        "gaussdb_no_order_by_group_by_in_delete",
+        "dml",
+        include_str!("../config/rules/dml/gaussdb_no_order_by_group_by_in_delete.rhai"),
+    ),
+    (
+        "gaussdb_update_subquery_to_join",
+        "dml",
+        include_str!("../config/rules/dml/gaussdb_update_subquery_to_join.rhai"),
+    ),
+    (
+        "gaussdb_order_by_explicit_sort",
+        "dml",
+        include_str!("../config/rules/dml/gaussdb_order_by_explicit_sort.rhai"),
+    ),
+    (
+        "gaussdb_statement_max_bytes",
+        "dml",
+        include_str!("../config/rules/dml/gaussdb_statement_max_bytes.rhai"),
+    ),
 ];
 
 ///
@@ -1873,6 +2404,11 @@ fn generate_default_config() -> Config {
         ],
         rules_file: None,
         rules_dir: PathBuf::new(),
+        pack: None,
+        rule_packs: Default::default(),
+        resolved_packs: Vec::new(),
+        rule_pack_notices: Vec::new(),
+        rule_pack_id_conflicts: Vec::new(),
         output: sqlguard::config::OutputConfig {
             formats: vec!["plain".to_string()],
             output_dir: None,
@@ -1901,10 +2437,251 @@ fn get_default_rules_content() -> &'static str {
     include_str!("../sqlguard.rules.toml.example")
 }
 
+/// 默认规则包清单（`config/rules-pack.toml`）——单一事实来源，编译期嵌入。
+/// 使仓库 `config/` 目录同时是一个合规的规则包根（M4）。
+fn get_default_pack_manifest() -> &'static str {
+    include_str!("../config/rules-pack.toml")
+}
+
+/// 默认包在项目内的 vendor 目录（相对配置文件目录）。
+const DEFAULT_PACK_VENDOR_DIR: &str = "vendor/rules/rules-core";
+
+/// `init --with-default-pack` 追加到主配置末尾的规则包声明。
+///
+/// 追加在文件末尾：`[rule_packs]` 是顶层表头，无论原配置以什么内容结尾都合法，
+/// 因此无需改写既有配置文本（保留注释与排版）。
+const DEFAULT_PACK_CONFIG_BLOCK: &str = r#"
+# ================================================================================
+# 规则包 [rule_packs]（由 `sqlguard init --with-default-pack` 生成）
+# ================================================================================
+# 规则来自 vendor/rules/rules-core/ 下的默认规则包，版本由 sqlguard.lock 固定
+# （CI 建议加 --locked 强制校验）。项目自定义规则写在 sqlguard.rules.toml，
+# 优先级高于包内规则；也可用 [[rule_packs.overrides]] 只改级别/阈值/开关。
+[rule_packs]
+search_paths = ["vendor/rules"]
+
+[[rule_packs.packs]]
+name = "rules-core"
+"#;
+
+/// `init --with-default-pack` 写出的 `sqlguard.rules.toml`（仅承载本地自定义规则）。
+const DEFAULT_PACK_RULES_TEMPLATE: &str = r#"# ================================================================================
+# 项目本地规则（可选）
+# ================================================================================
+# 规则由规则包提供（见 sqlguard.toml 的 [rule_packs]）；本文件只放项目自定义规则。
+# 本地规则优先级高于包内规则，可与包内规则同 id 覆盖之。
+#
+# 示例：
+# [[rules]]
+# id = "LOCAL001"
+# name = "my_rule"
+# script_path = "config/rules/local/my_rule.rhai"
+# applies_to = ["dml"]
+# severity = "warning"
+"#;
+
+/// `init --with-default-pack`：把默认规则包 vendor 到项目内，并在主配置里声明
+/// `[rule_packs]`，最后生成 `sqlguard.lock`（M4）。
+///
+/// 与默认 `init`（写 `config/rules/` 脚本 + 完整 `sqlguard.rules.toml`）互不影响，
+/// 后者行为保持不变。
+fn run_init_with_default_pack(target_dir: &Path, force: bool) -> Result<(), SqlGuardError> {
+    let pack_root = target_dir.join(DEFAULT_PACK_VENDOR_DIR);
+    for sub in ["ddl", "dml"] {
+        fs::create_dir_all(pack_root.join("rules").join(sub)).map_err(SqlGuardError::IoError)?;
+    }
+
+    // 主配置 = 默认配置 + 末尾追加的 [rule_packs] 声明
+    let mut config_content = get_default_config_content().to_string();
+    if !config_content.ends_with('\n') {
+        config_content.push('\n');
+    }
+    config_content.push_str(DEFAULT_PACK_CONFIG_BLOCK);
+
+    let mut files: Vec<(String, String)> = vec![
+        ("sqlguard.toml".to_string(), config_content),
+        (
+            "sqlguard.rules.toml".to_string(),
+            DEFAULT_PACK_RULES_TEMPLATE.to_string(),
+        ),
+        (
+            format!("{DEFAULT_PACK_VENDOR_DIR}/rules-pack.toml"),
+            get_default_pack_manifest().to_string(),
+        ),
+    ];
+    for (name, subdir, content) in INIT_RULE_SCRIPTS {
+        files.push((
+            format!("{DEFAULT_PACK_VENDOR_DIR}/rules/{subdir}/{name}.rhai"),
+            (*content).to_string(),
+        ));
+    }
+
+    let mut written = 0usize;
+    let mut skipped = 0usize;
+    for (rel, content) in &files {
+        let path = target_dir.join(rel);
+        if path.exists() && !force {
+            skipped += 1;
+        } else {
+            fs::write(&path, content).map_err(SqlGuardError::IoError)?;
+            written += 1;
+        }
+    }
+
+    // 生成锁文件：直接复用配置加载 + 解析结果，保证与实际生效包一致。
+    let cfg_path = target_dir.join("sqlguard.toml");
+    let (cfg, cfg_dir) = load_config(&cfg_path, true)?;
+    let lock_file = lock::build_lock(&cfg, &cfg_dir)?;
+    let lock_path = lock::write_lock(&lock_file, &cfg_dir)?;
+
+    println!(
+        "Initialized SqlGuard with the default rule pack in {}",
+        target_dir.display()
+    );
+    println!("  - sqlguard.toml                      # 主配置（含 [rule_packs]）");
+    println!("  - sqlguard.rules.toml                # 仅本地自定义规则（默认为空）");
+    println!(
+        "  - {DEFAULT_PACK_VENDOR_DIR}/     # 默认规则包（{} 个脚本）",
+        INIT_RULE_SCRIPTS.len()
+    );
+    println!(
+        "  - {}   ({} pack(s), {} rule(s) effective)",
+        lock_path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| lock::LOCK_FILE_NAME.to_string()),
+        cfg.resolved_packs.len(),
+        cfg.rules.len()
+    );
+    if skipped > 0 {
+        println!("  （幂等模式：保留已存在文件 {skipped} 个，写入 {written} 个）");
+    }
+    println!();
+    println!("Next: sqlguard check .        # CI 中加 --locked 强制校验锁文件");
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use sqlguard::git_diff::FileDiff;
+
+    // === 默认规则包（M4） ===
+
+    #[derive(serde::Deserialize)]
+    struct MiniManifest {
+        #[serde(default)]
+        pack: Option<MiniPack>,
+        #[serde(default)]
+        rules: Vec<MiniRule>,
+    }
+
+    #[derive(serde::Deserialize)]
+    struct MiniPack {
+        name: String,
+        version: String,
+        api_version: u32,
+    }
+
+    #[derive(serde::Deserialize)]
+    struct MiniRule {
+        id: String,
+        script_path: String,
+        #[serde(default)]
+        severity: String,
+        #[serde(default)]
+        enabled: bool,
+    }
+
+    #[test]
+    fn default_pack_manifest_matches_rules_example() {
+        let pack: MiniManifest = toml::from_str(get_default_pack_manifest())
+            .expect("config/rules-pack.toml 必须是合法 TOML");
+        let example: MiniManifest = toml::from_str(get_default_rules_content())
+            .expect("sqlguard.rules.toml.example 必须是合法 TOML");
+
+        let meta = pack.pack.as_ref().expect("包清单必须声明 [pack]");
+        assert_eq!(meta.name, "rules-core");
+        assert_eq!(meta.api_version, 1);
+        assert!(!meta.version.is_empty(), "包版本不能为空");
+        assert!(!pack.rules.is_empty());
+
+        // 两处必须声明同一套规则（id / 脚本 / 级别 / 开关），防止清单与示例漂移
+        let normalize = |rules: &[MiniRule]| -> Vec<(String, String, String, bool)> {
+            rules
+                .iter()
+                .map(|r| {
+                    (
+                        r.id.clone(),
+                        r.script_path.replace("config/rules/", "rules/"),
+                        r.severity.clone(),
+                        r.enabled,
+                    )
+                })
+                .collect()
+        };
+        assert_eq!(
+            normalize(&pack.rules),
+            normalize(&example.rules),
+            "config/rules-pack.toml 与 sqlguard.rules.toml.example 的规则集不一致"
+        );
+
+        // 每条包内脚本都必须有对应的内置脚本，否则 init --with-default-pack 会写出坏包
+        for rule in &pack.rules {
+            let rel = rule
+                .script_path
+                .strip_prefix("rules/")
+                .unwrap_or(&rule.script_path);
+            assert!(
+                INIT_RULE_SCRIPTS
+                    .iter()
+                    .any(|(n, t, _)| format!("{t}/{n}.rhai") == rel),
+                "规则 {} 引用 '{}'，但不在 INIT_RULE_SCRIPTS 中",
+                rule.id,
+                rule.script_path
+            );
+        }
+    }
+
+    #[test]
+    fn init_with_default_pack_writes_self_contained_project() {
+        let dir = tempfile::tempdir().unwrap();
+        run_init_with_default_pack(dir.path(), false).unwrap();
+
+        let cfg_path = dir.path().join("sqlguard.toml");
+        let rules_path = dir.path().join("sqlguard.rules.toml");
+        let lock_path = dir.path().join("sqlguard.lock");
+        assert!(cfg_path.exists() && rules_path.exists());
+        assert!(
+            dir.path()
+                .join(DEFAULT_PACK_VENDOR_DIR)
+                .join("rules-pack.toml")
+                .exists(),
+            "默认规则包必须被 vendor 到项目内"
+        );
+        assert!(lock_path.exists(), "必须生成 sqlguard.lock");
+        // 脚本模式的产物不应出现（两种 init 互不干扰）
+        assert!(!dir.path().join("config/rules/ddl").exists());
+
+        let cfg = Config::load(&cfg_path).expect("生成的配置必须可加载");
+        assert_eq!(cfg.resolved_packs.len(), 1);
+        assert_eq!(cfg.resolved_packs[0].name, "rules-core");
+
+        let declared: MiniManifest = toml::from_str(get_default_pack_manifest()).unwrap();
+        assert_eq!(cfg.rules.len(), declared.rules.len());
+
+        // 锁文件必须与实际解析结果一致（Strict 模式亦通过）
+        lock::verify_lock(&cfg, cfg_path.parent().unwrap(), lock::LockMode::Strict)
+            .expect("生成的锁文件必须通过严格校验");
+
+        // 幂等：重跑保留已存在文件
+        std::fs::write(&rules_path, "# customized").unwrap();
+        run_init_with_default_pack(dir.path(), false).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&rules_path).unwrap(),
+            "# customized"
+        );
+    }
 
     // === run_init（幂等 init / --force） ===
 

@@ -76,6 +76,32 @@ pub enum Commands {
         /// Files with a BOM are decoded per the BOM regardless of this value.
         #[clap(long)]
         encoding: Option<String>,
+
+        /// Treat a rule-pack `engine` version mismatch as an error (default: warn).
+        ///
+        /// `[pack].api_version` above the engine's supported version is always a
+        /// hard error; this flag only affects the non-fatal `[pack].engine`
+        /// version-range check.
+        #[clap(long)]
+        strict_engine: bool,
+
+        /// Treat duplicate rule ids across rule sources as an error
+        /// (default: warn and let the higher-priority source win).
+        #[clap(long)]
+        strict_ids: bool,
+
+        /// Disallow a missing/out-of-date `sqlguard.lock` (CI mode).
+        ///
+        /// Also verifies pack checksums (reads all pack files). Mutually
+        /// exclusive with --no-lock.
+        #[clap(long)]
+        locked: bool,
+
+        /// Skip `sqlguard.lock` verification entirely.
+        ///
+        /// Mutually exclusive with --locked.
+        #[clap(long)]
+        no_lock: bool,
     },
     /// Export a SQL manifest (sql-manifest.json) for dynamic replay.
     ///
@@ -131,6 +157,15 @@ pub enum Commands {
         /// restore the old overwrite-everything behavior.
         #[clap(long)]
         force: bool,
+
+        /// Initialize from the default rule pack instead of copying rule scripts
+        /// into `config/rules/`.
+        ///
+        /// Writes the default pack to `vendor/rules/rules-core/`, declares
+        /// `[rule_packs]` in `sqlguard.toml`, and generates `sqlguard.lock`.
+        /// The generated project is self-contained and offline-capable.
+        #[clap(long)]
+        with_default_pack: bool,
     },
     /// Only check SQL statements changed since a git baseline (incremental mode).
     ///
@@ -193,6 +228,27 @@ pub enum Commands {
         /// utf-32be, windows-1252 (latin1, iso-8859-1), ascii, ...
         #[clap(long)]
         encoding: Option<String>,
+
+        /// Treat a rule-pack `engine` version mismatch as an error (default: warn).
+        ///
+        /// See `check --strict-engine` for details.
+        #[clap(long)]
+        strict_engine: bool,
+
+        /// Treat duplicate rule ids across rule sources as an error
+        /// (default: warn and let the higher-priority source win).
+        #[clap(long)]
+        strict_ids: bool,
+
+        /// Disallow a missing/out-of-date `sqlguard.lock` (CI mode).
+        ///
+        /// See `check --locked` for details. Mutually exclusive with --no-lock.
+        #[clap(long)]
+        locked: bool,
+
+        /// Skip `sqlguard.lock` verification entirely.
+        #[clap(long)]
+        no_lock: bool,
     },
     /// Generate backup/rollback scripts for DDL/DML files.
     ///
@@ -293,5 +349,67 @@ pub enum Commands {
         /// utf-32be, windows-1252 (latin1, iso-8859-1), ascii, ...
         #[clap(long)]
         encoding: Option<String>,
+    },
+    /// Manage rule packs: list the effective rule set, generate/verify
+    /// `sqlguard.lock`, vendor packs locally, and add a pack to the config.
+    Rules {
+        #[clap(subcommand)]
+        action: RulesAction,
+    },
+}
+
+/// `sqlguard rules` 的子命令。
+#[derive(Subcommand)]
+pub enum RulesAction {
+    /// List the effective rule set (after pack merge + overrides).
+    List {
+        /// Path to configuration file (default: sqlguard.toml).
+        #[clap(short, long)]
+        config: Option<PathBuf>,
+
+        /// Emit JSON instead of a table.
+        #[clap(long)]
+        json: bool,
+    },
+    /// Generate / update `sqlguard.lock` from the resolved rule packs.
+    Lock {
+        /// Path to configuration file (default: sqlguard.toml).
+        #[clap(short, long)]
+        config: Option<PathBuf>,
+    },
+    /// Verify `sqlguard.lock` and pack version compatibility (no checks run).
+    Verify {
+        /// Path to configuration file (default: sqlguard.toml).
+        #[clap(short, long)]
+        config: Option<PathBuf>,
+
+        /// Also verify checksums (reads all pack files) and require the lock
+        /// to be complete. Same semantics as `check --locked`.
+        #[clap(long)]
+        locked: bool,
+    },
+    /// Copy resolved rule packs into a local directory (offline / committable).
+    Vendor {
+        /// Path to configuration file (default: sqlguard.toml).
+        #[clap(short, long)]
+        config: Option<PathBuf>,
+
+        /// Destination directory, relative to the config directory.
+        /// Default: `vendor/rules`.
+        #[clap(short, long)]
+        output_dir: Option<PathBuf>,
+    },
+    /// Add a rule pack to the config and refresh `sqlguard.lock`.
+    ///
+    /// SPEC is `name`, `name@version`, or a path to a pack directory.
+    /// The entry is appended to the config file; if the result no longer
+    /// parses, the file is restored and the command fails.
+    Add {
+        /// Pack spec: `name`, `name@version`, or a pack directory path.
+        spec: String,
+
+        /// Path to configuration file (default: sqlguard.toml).
+        #[clap(short, long)]
+        config: Option<PathBuf>,
     },
 }

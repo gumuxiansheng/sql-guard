@@ -186,7 +186,14 @@ pub fn run_rules_for_file(
             continue;
         }
 
-        match run_single_rule(engine, &context, rule_config, &script_path, line_offset) {
+        match run_single_rule(
+            engine,
+            &context,
+            rule_config,
+            &script_path,
+            config.pack_helpers_for(&script_path),
+            line_offset,
+        ) {
             Ok(rule_violations) => violations.extend(rule_violations),
             Err(e) => {
                 violations.push(Violation {
@@ -345,6 +352,7 @@ fn run_single_rule(
     context: &RuleContext,
     rule_config: &RuleConfig,
     script_path: &Path,
+    pack_helpers: Option<&str>,
     line_offset: usize,
 ) -> Result<Vec<Violation>, SqlGuardError> {
     let script = fs::read_to_string(script_path).map_err(|e| {
@@ -358,7 +366,13 @@ fn run_single_rule(
     // 注入 helper 函数：将公共辅助函数 prepend 到规则脚本前，
     // 使规则脚本可以直接调用 guard_parse_error / for_each_statement / report 等。
     // helper 函数通过参数接收 context / violations，不依赖全局变量。
-    let full_script = format!("{}\n{}", HELPERS_SCRIPT, script);
+    //
+    // M2：规则包可自带 helpers（`[pack].helpers`），在**引擎 helpers 之后** prepend，
+    // 因此包内 helper 可以调用引擎 helper，反之不行。
+    let full_script = match pack_helpers {
+        Some(pack) => format!("{HELPERS_SCRIPT}\n{pack}\n{script}"),
+        None => format!("{HELPERS_SCRIPT}\n{script}"),
+    };
 
     let mut scope = Scope::new();
 
@@ -1373,7 +1387,8 @@ violations.push(violation_msg("limit=" + limit.to_string()));
         };
 
         let engine = build_engine();
-        let vs = run_single_rule(&engine, &context, &rule_config, &script, 0).expect("run rule");
+        let vs =
+            run_single_rule(&engine, &context, &rule_config, &script, None, 0).expect("run rule");
         assert_eq!(vs.len(), 1);
         assert_eq!(vs[0].message, "limit=3");
         assert_eq!(vs[0].rule_id, "T001");
@@ -1413,7 +1428,8 @@ violations.push(violation_msg("len=" + p.len().to_string()));
         };
 
         let engine = build_engine();
-        let vs = run_single_rule(&engine, &context, &rule_config, &script, 0).expect("run rule");
+        let vs =
+            run_single_rule(&engine, &context, &rule_config, &script, None, 0).expect("run rule");
         assert_eq!(vs.len(), 1);
         assert_eq!(vs[0].message, "len=0");
     }
@@ -1458,7 +1474,8 @@ violations.push(violation_msg(
         };
 
         let engine = build_engine();
-        let vs = run_single_rule(&engine, &context, &rule_config, &script, 0).expect("run rule");
+        let vs =
+            run_single_rule(&engine, &context, &rule_config, &script, None, 0).expect("run rule");
         assert_eq!(vs[0].message, "SELECT 1;|9");
     }
 
