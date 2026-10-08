@@ -1,6 +1,6 @@
 # SqlGuard 用户手册
 
-> 适用版本：**0.2.7**（以包内 `VERSION` 为准）
+> 适用版本：**0.2.8**（以包内 `VERSION` 为准）
 > 安装方法见 `docs/INSTALL.md`。本手册假设 `sqlguard` 已在 `PATH` 中。
 
 ---
@@ -681,7 +681,7 @@ sudo ./scripts/uninstall.sh            # Linux/macOS
 ### 14.1 发布包目录地图
 
 ```
-sql-guard-0.2.7/
+sql-guard-0.2.8/
 ├── README.md              包总览与快速开始
 ├── VERSION                版本与构建元数据
 ├── CHANGELOG.md           版本变更记录

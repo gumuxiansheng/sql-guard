@@ -2,7 +2,7 @@
 
 本文档面向**拿到发布包的用户**，覆盖 Linux / macOS / Windows 三大系统的安装、校验、升级与卸载。
 
-> 版本：以包内 `VERSION` 文件为准（本文档随 **0.2.7** 发布包分发）。
+> 版本：以包内 `VERSION` 文件为准（本文档随 **0.2.8** 发布包分发）。
 > 若你只需要"能跑起来"的最短路径，直接跳到 [§2 三步安装](#2-三步安装最短路径)。
 
 ---
@@ -65,7 +65,7 @@
 
 ```bash
 # ① 解压
-tar -xzf sql-guard-0.2.7-linux-x86_64-musl.tar.gz && cd sql-guard-0.2.7
+tar -xzf sql-guard-0.2.8-linux-x86_64-musl.tar.gz && cd sql-guard-0.2.8
 
 # ② 安装（Linux/macOS）
 sudo ./scripts/install.sh
@@ -77,8 +77,8 @@ sqlguard --version
 Windows（PowerShell，管理员非必需）：
 
 ```powershell
-Expand-Archive sql-guard-0.2.7-windows-x86_64.zip -DestinationPath .
-cd sql-guard-0.2.7
+Expand-Archive sql-guard-0.2.8-windows-x86_64.zip -DestinationPath .
+cd sql-guard-0.2.8
 .\scripts\install.ps1 -AddToPath
 sqlguard --version
 ```
@@ -205,11 +205,11 @@ Copy-Item "$src\sqlguard-mine.exe"  $dst
 
 ```bash
 # x86_64
-docker build -t sqlguard:0.2.7 .
-docker run --rm -v "$PWD:/work" sqlguard:0.2.7 check /work/sql
+docker build -t sqlguard:0.2.8 .
+docker run --rm -v "$PWD:/work" sqlguard:0.2.8 check /work/sql
 
 # aarch64（ARM64 主机）
-docker build -f Dockerfile.aarch64 -t sqlguard:0.2.7-aarch64 .
+docker build -f Dockerfile.aarch64 -t sqlguard:0.2.8-aarch64 .
 ```
 
 > 官方镜像 `ghcr.io/sqlguard/sqlguard:latest` 由 CI 发布；若你的环境无法拉取外网镜像，用上面的本地构建即可。
@@ -270,16 +270,16 @@ sha256sum -c SHA256SUMS
 
 | 文件 | 适用 |
 |------|------|
-| `sql-guard-0.2.7-all.tar.gz` | 全平台合包（Linux/macOS 解压） |
-| `sql-guard-0.2.7-all.zip` | 全平台合包（Windows 解压） |
-| `sql-guard-0.2.7-linux-x86_64-musl.tar.gz` | 仅 Linux x86_64 |
-| `sql-guard-0.2.7-linux-aarch64-musl.tar.gz` | 仅 Linux aarch64 |
-| `sql-guard-0.2.7-windows-x86_64.zip` | 仅 Windows x86_64 |
+| `sql-guard-0.2.8-all.tar.gz` | 全平台合包（Linux/macOS 解压） |
+| `sql-guard-0.2.8-all.zip` | 全平台合包（Windows 解压） |
+| `sql-guard-0.2.8-linux-x86_64-musl.tar.gz` | 仅 Linux x86_64 |
+| `sql-guard-0.2.8-linux-aarch64-musl.tar.gz` | 仅 Linux aarch64 |
+| `sql-guard-0.2.8-windows-x86_64.zip` | 仅 Windows x86_64 |
 
 下载后请核对压缩包自身的 SHA-256 与发布页公布值一致：
 
 ```bash
-sha256sum sql-guard-0.2.7-linux-x86_64-musl.tar.gz
+sha256sum sql-guard-0.2.8-linux-x86_64-musl.tar.gz
 ```
 
 ### 7.3 关于签名
@@ -298,9 +298,9 @@ sha256sum sql-guard-0.2.7-linux-x86_64-musl.tar.gz
 ## 8. 安装后验证
 
 ```bash
-sqlguard --version            # 期望输出：sqlguard 0.2.7
+sqlguard --version            # 期望输出：sqlguard 0.2.8
 sqlguard --help               # 列出 7 个子命令
-sqlguard-mine --version       # 期望输出：sqlguard-mine 0.2.7
+sqlguard-mine --version       # 期望输出：sqlguard-mine 0.2.8
 
 # 端到端冒烟：初始化 + 检查（用包内自带示例）
 mkdir -p /tmp/sg-smoke && cd /tmp/sg-smoke
