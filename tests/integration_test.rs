@@ -611,7 +611,7 @@ fn test_check_ddl002_alter_primary_key() {
     // 规则脚本从仓库复制（集成测试在 crate 根目录运行）
     let rule_src = std::env::current_dir()
         .unwrap()
-        .join("config/rules/ddl/primary_key_required.rhai");
+        .join("config/rules-core/rules/ddl/primary_key_required.rhai");
     std::fs::write(
         format!("{}/config/rules/ddl/primary_key_required.rhai", dir),
         std::fs::read_to_string(&rule_src).unwrap(),
@@ -750,7 +750,9 @@ fn test_check_rule_audit_fixes() {
     std::fs::create_dir_all(format!("{}/config/rules/dml", dir)).unwrap();
 
     // 从仓库复制三条规则脚本（集成测试在 crate 根目录运行）
-    let rule_dir = std::env::current_dir().unwrap().join("config/rules/dml");
+    let rule_dir = std::env::current_dir()
+        .unwrap()
+        .join("config/rules-core/rules/dml");
     for r in [
         "column_references_qualified",
         "union_all_preferred",
@@ -1761,7 +1763,9 @@ fn test_check_ast_capability_upgrades() {
     std::fs::create_dir_all(format!("{}/config/rules/dml", dir)).unwrap();
 
     // 从仓库复制三条规则脚本（集成测试在 crate 根目录运行）
-    let rule_dir = std::env::current_dir().unwrap().join("config/rules/dml");
+    let rule_dir = std::env::current_dir()
+        .unwrap()
+        .join("config/rules-core/rules/dml");
     for r in ["no_unused_join", "no_unused_cte", "no_order_by_in_subquery"] {
         std::fs::write(
             format!("{}/config/rules/dml/{}.rhai", dir, r),
@@ -2197,7 +2201,7 @@ fn test_check_dml007_order_by_required_for_pagination() {
 
     let rule_src = std::env::current_dir()
         .unwrap()
-        .join("config/rules/dml/order_by_required_for_pagination.rhai");
+        .join("config/rules-core/rules/dml/order_by_required_for_pagination.rhai");
     std::fs::write(
         format!(
             "{}/config/rules/dml/order_by_required_for_pagination.rhai",
@@ -2365,7 +2369,9 @@ fn test_check_ddl003_to_ddl006_rules() {
     std::fs::create_dir_all(format!("{}/config/rules/ddl", dir)).unwrap();
 
     // 从仓库复制四条规则脚本（集成测试在 crate 根目录运行）
-    let rule_dir = std::env::current_dir().unwrap().join("config/rules/ddl");
+    let rule_dir = std::env::current_dir()
+        .unwrap()
+        .join("config/rules-core/rules/ddl");
     for r in [
         "no_reserved_keyword_naming",
         "backup_table_naming",
@@ -3235,7 +3241,9 @@ fn test_check_no_or_in_where() {
     std::fs::create_dir_all(format!("{}/config/rules/dml", dir)).unwrap();
 
     // 从仓库复制规则脚本
-    let rule_dir = std::env::current_dir().unwrap().join("config/rules/dml");
+    let rule_dir = std::env::current_dir()
+        .unwrap()
+        .join("config/rules-core/rules/dml");
     std::fs::write(
         format!("{}/config/rules/dml/no_or_in_where.rhai", dir),
         std::fs::read_to_string(rule_dir.join("no_or_in_where.rhai")).unwrap(),
@@ -3421,7 +3429,7 @@ fn copy_gaussdb_rule_scripts(dir: &str) {
     for (sub, name) in scripts {
         let src = std::env::current_dir()
             .unwrap()
-            .join(format!("config/rules/{}/{}.rhai", sub, name));
+            .join(format!("config/rules-gaussdb/rules/{}/{}.rhai", sub, name));
         let dst = format!("{}/config/rules/{}/{}.rhai", dir, sub, name);
         std::fs::write(&dst, std::fs::read_to_string(&src).unwrap())
             .unwrap_or_else(|e| panic!("copy {} failed: {}", name, e));

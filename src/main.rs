@@ -1813,230 +1813,245 @@ fn extract_sql_lines(content: &str, start_line: usize, end_line: usize) -> Strin
 
 // ===== run_init =====
 
-/// `init` 写入的规则脚本清单：(文件名, 子目录, 内容)——content 通过 include_str! 编译时嵌入。
-/// 约束：`sqlguard.rules.toml.example` 声明的每个 script_path 必须出现在本清单中
-/// （超集允许，有测试守护），否则 init 出的规则文件会引用到不存在的脚本。
-const INIT_RULE_SCRIPTS: &[(&str, &str, &str)] = &[
+/// 基础类包（`rules-core`）脚本清单：(文件名, 子目录, 内容)——content 通过
+/// include_str! 编译时嵌入。约束：`sqlguard.rules.toml.example` 声明的每个
+/// script_path 必须出现在本清单或 [`INIT_GAUSSDB_SCRIPTS`] 中（超集允许，有测试
+/// 守护），否则 init 出的规则文件会引用到不存在的脚本。
+const INIT_CORE_SCRIPTS: &[(&str, &str, &str)] = &[
     (
         "no_drop_table",
         "ddl",
-        include_str!("../config/rules/ddl/no_drop_table.rhai"),
+        include_str!("../config/rules-core/rules/ddl/no_drop_table.rhai"),
     ),
     (
         "primary_key_required",
         "ddl",
-        include_str!("../config/rules/ddl/primary_key_required.rhai"),
+        include_str!("../config/rules-core/rules/ddl/primary_key_required.rhai"),
     ),
     (
         "no_reserved_keyword_naming",
         "ddl",
-        include_str!("../config/rules/ddl/no_reserved_keyword_naming.rhai"),
+        include_str!("../config/rules-core/rules/ddl/no_reserved_keyword_naming.rhai"),
     ),
     (
         "backup_table_naming",
         "ddl",
-        include_str!("../config/rules/ddl/backup_table_naming.rhai"),
+        include_str!("../config/rules-core/rules/ddl/backup_table_naming.rhai"),
     ),
     (
         "index_naming_convention",
         "ddl",
-        include_str!("../config/rules/ddl/index_naming_convention.rhai"),
+        include_str!("../config/rules-core/rules/ddl/index_naming_convention.rhai"),
     ),
     (
         "no_redundant_index",
         "ddl",
-        include_str!("../config/rules/ddl/no_redundant_index.rhai"),
+        include_str!("../config/rules-core/rules/ddl/no_redundant_index.rhai"),
     ),
     (
         "table_name_naming",
         "ddl",
-        include_str!("../config/rules/ddl/table_name_naming.rhai"),
+        include_str!("../config/rules-core/rules/ddl/table_name_naming.rhai"),
     ),
     (
         "no_select_all",
         "dml",
-        include_str!("../config/rules/dml/no_select_all.rhai"),
+        include_str!("../config/rules-core/rules/dml/no_select_all.rhai"),
     ),
     (
         "no_delete_update_without_where",
         "dml",
-        include_str!("../config/rules/dml/no_delete_update_without_where.rhai"),
+        include_str!("../config/rules-core/rules/dml/no_delete_update_without_where.rhai"),
     ),
     (
         "insert_columns_required",
         "dml",
-        include_str!("../config/rules/dml/insert_columns_required.rhai"),
+        include_str!("../config/rules-core/rules/dml/insert_columns_required.rhai"),
     ),
     (
         "subquery_alias_required",
         "dml",
-        include_str!("../config/rules/dml/subquery_alias_required.rhai"),
+        include_str!("../config/rules-core/rules/dml/subquery_alias_required.rhai"),
     ),
     (
         "column_references_qualified",
         "dml",
-        include_str!("../config/rules/dml/column_references_qualified.rhai"),
+        include_str!("../config/rules-core/rules/dml/column_references_qualified.rhai"),
     ),
     (
         "no_join_without_condition",
         "dml",
-        include_str!("../config/rules/dml/no_join_without_condition.rhai"),
+        include_str!("../config/rules-core/rules/dml/no_join_without_condition.rhai"),
     ),
     (
         "no_unused_join",
         "dml",
-        include_str!("../config/rules/dml/no_unused_join.rhai"),
+        include_str!("../config/rules-core/rules/dml/no_unused_join.rhai"),
     ),
     (
         "no_unused_cte",
         "dml",
-        include_str!("../config/rules/dml/no_unused_cte.rhai"),
+        include_str!("../config/rules-core/rules/dml/no_unused_cte.rhai"),
     ),
     (
         "use_is_null",
         "dml",
-        include_str!("../config/rules/dml/use_is_null.rhai"),
+        include_str!("../config/rules-core/rules/dml/use_is_null.rhai"),
     ),
     (
         "use_coalesce",
         "dml",
-        include_str!("../config/rules/dml/use_coalesce.rhai"),
+        include_str!("../config/rules-core/rules/dml/use_coalesce.rhai"),
     ),
     (
         "no_order_by_in_subquery",
         "dml",
-        include_str!("../config/rules/dml/no_order_by_in_subquery.rhai"),
+        include_str!("../config/rules-core/rules/dml/no_order_by_in_subquery.rhai"),
     ),
     (
         "union_all_preferred",
         "dml",
-        include_str!("../config/rules/dml/union_all_preferred.rhai"),
+        include_str!("../config/rules-core/rules/dml/union_all_preferred.rhai"),
     ),
     (
         "no_nested_case",
         "dml",
-        include_str!("../config/rules/dml/no_nested_case.rhai"),
+        include_str!("../config/rules-core/rules/dml/no_nested_case.rhai"),
     ),
     (
         "no_constant_where",
         "dml",
-        include_str!("../config/rules/dml/no_constant_where.rhai"),
+        include_str!("../config/rules-core/rules/dml/no_constant_where.rhai"),
     ),
     (
         "order_by_required_for_pagination",
         "dml",
-        include_str!("../config/rules/dml/order_by_required_for_pagination.rhai"),
+        include_str!("../config/rules-core/rules/dml/order_by_required_for_pagination.rhai"),
     ),
     (
         "join_type_required",
         "dml",
-        include_str!("../config/rules/dml/join_type_required.rhai"),
+        include_str!("../config/rules-core/rules/dml/join_type_required.rhai"),
     ),
     (
         "max_join_tables",
         "dml",
-        include_str!("../config/rules/dml/max_join_tables.rhai"),
+        include_str!("../config/rules-core/rules/dml/max_join_tables.rhai"),
     ),
     (
         "no_or_in_where",
         "dml",
-        include_str!("../config/rules/dml/no_or_in_where.rhai"),
+        include_str!("../config/rules-core/rules/dml/no_or_in_where.rhai"),
     ),
+];
 
-    // ===== GaussDB 规范规则（GNAM/GTYP/GOBJ/GIDX/GDCL/GDDL/GDML/GPERF）=====
-    // 对应 docs/gaussdb-rule-gap-analysis.md 的 A 类条目，默认在
-    // sqlguard.rules.toml.example 中 enabled = false，按项目启用。
+/// 定制类包（`rules-gaussdb`）脚本清单（GNAM/GTYP/GOBJ/GIDX/GDCL/GDDL/GDML/GPERF）。
+/// 对应 docs/gaussdb-rule-gap-analysis.md 的 A 类条目，默认在
+/// sqlguard.rules.toml.example 中 enabled = false，按项目启用。
+const INIT_GAUSSDB_SCRIPTS: &[(&str, &str, &str)] = &[
     (
         "gaussdb_object_name_charset",
         "ddl",
-        include_str!("../config/rules/ddl/gaussdb_object_name_charset.rhai"),
+        include_str!("../config/rules-gaussdb/rules/ddl/gaussdb_object_name_charset.rhai"),
     ),
     (
         "gaussdb_no_quoted_object_name",
         "ddl",
-        include_str!("../config/rules/ddl/gaussdb_no_quoted_object_name.rhai"),
+        include_str!("../config/rules-gaussdb/rules/ddl/gaussdb_no_quoted_object_name.rhai"),
     ),
     (
         "gaussdb_no_reserved_prefix",
         "ddl",
-        include_str!("../config/rules/ddl/gaussdb_no_reserved_prefix.rhai"),
+        include_str!("../config/rules-gaussdb/rules/ddl/gaussdb_no_reserved_prefix.rhai"),
     ),
     (
         "gaussdb_object_name_max_bytes",
         "ddl",
-        include_str!("../config/rules/ddl/gaussdb_object_name_max_bytes.rhai"),
+        include_str!("../config/rules-gaussdb/rules/ddl/gaussdb_object_name_max_bytes.rhai"),
     ),
     (
         "gaussdb_max_large_fields",
         "ddl",
-        include_str!("../config/rules/ddl/gaussdb_max_large_fields.rhai"),
+        include_str!("../config/rules-gaussdb/rules/ddl/gaussdb_max_large_fields.rhai"),
     ),
     (
         "gaussdb_no_system_column",
         "ddl",
-        include_str!("../config/rules/ddl/gaussdb_no_system_column.rhai"),
+        include_str!("../config/rules-gaussdb/rules/ddl/gaussdb_no_system_column.rhai"),
     ),
     (
         "gaussdb_recommended_data_types",
         "ddl",
-        include_str!("../config/rules/ddl/gaussdb_recommended_data_types.rhai"),
+        include_str!("../config/rules-gaussdb/rules/ddl/gaussdb_recommended_data_types.rhai"),
     ),
     (
         "gaussdb_no_materialized_view",
         "ddl",
-        include_str!("../config/rules/ddl/gaussdb_no_materialized_view.rhai"),
+        include_str!("../config/rules-gaussdb/rules/ddl/gaussdb_no_materialized_view.rhai"),
     ),
     (
         "gaussdb_no_order_by_in_view",
         "ddl",
-        include_str!("../config/rules/ddl/gaussdb_no_order_by_in_view.rhai"),
+        include_str!("../config/rules-gaussdb/rules/ddl/gaussdb_no_order_by_in_view.rhai"),
     ),
     (
         "gaussdb_view_usage_warning",
         "ddl",
-        include_str!("../config/rules/ddl/gaussdb_view_usage_warning.rhai"),
+        include_str!("../config/rules-gaussdb/rules/ddl/gaussdb_view_usage_warning.rhai"),
     ),
     (
         "gaussdb_create_index_concurrently",
         "ddl",
-        include_str!("../config/rules/ddl/gaussdb_create_index_concurrently.rhai"),
+        include_str!("../config/rules-gaussdb/rules/ddl/gaussdb_create_index_concurrently.rhai"),
     ),
     (
         "gaussdb_no_quoted_column_in_ddl",
         "ddl",
-        include_str!("../config/rules/ddl/gaussdb_no_quoted_column_in_ddl.rhai"),
+        include_str!("../config/rules-gaussdb/rules/ddl/gaussdb_no_quoted_column_in_ddl.rhai"),
     ),
     (
         "gaussdb_require_commit_in_transaction",
         "ddl",
-        include_str!("../config/rules/ddl/gaussdb_require_commit_in_transaction.rhai"),
+        include_str!(
+            "../config/rules-gaussdb/rules/ddl/gaussdb_require_commit_in_transaction.rhai"
+        ),
     ),
     (
         "gaussdb_no_order_by_group_by_in_update",
         "dml",
-        include_str!("../config/rules/dml/gaussdb_no_order_by_group_by_in_update.rhai"),
+        include_str!(
+            "../config/rules-gaussdb/rules/dml/gaussdb_no_order_by_group_by_in_update.rhai"
+        ),
     ),
     (
         "gaussdb_no_order_by_group_by_in_delete",
         "dml",
-        include_str!("../config/rules/dml/gaussdb_no_order_by_group_by_in_delete.rhai"),
+        include_str!(
+            "../config/rules-gaussdb/rules/dml/gaussdb_no_order_by_group_by_in_delete.rhai"
+        ),
     ),
     (
         "gaussdb_update_subquery_to_join",
         "dml",
-        include_str!("../config/rules/dml/gaussdb_update_subquery_to_join.rhai"),
+        include_str!("../config/rules-gaussdb/rules/dml/gaussdb_update_subquery_to_join.rhai"),
     ),
     (
         "gaussdb_order_by_explicit_sort",
         "dml",
-        include_str!("../config/rules/dml/gaussdb_order_by_explicit_sort.rhai"),
+        include_str!("../config/rules-gaussdb/rules/dml/gaussdb_order_by_explicit_sort.rhai"),
     ),
     (
         "gaussdb_statement_max_bytes",
         "dml",
-        include_str!("../config/rules/dml/gaussdb_statement_max_bytes.rhai"),
+        include_str!("../config/rules-gaussdb/rules/dml/gaussdb_statement_max_bytes.rhai"),
     ),
 ];
+
+/// 全量 init 脚本（基础包 + GaussDB 定制包）：经典 `init` 仍写平铺的
+/// `config/rules/{ddl,dml}/` 布局，包归属只在 `--with-default-pack` 时区分。
+fn init_scripts() -> impl Iterator<Item = &'static (&'static str, &'static str, &'static str)> {
+    INIT_CORE_SCRIPTS.iter().chain(INIT_GAUSSDB_SCRIPTS)
+}
 
 ///
 /// 幂等 init：默认只补缺失文件，已存在的原样保留——防止内嵌默认配置覆盖
@@ -2052,20 +2067,14 @@ fn run_init(target_dir: &Path, force: bool) -> Result<(), SqlGuardError> {
     }
 
     let mut files: Vec<(String, &'static str)> = vec![
-        (
-            "sqlguard.toml".to_string(),
-            get_default_config_content(),
-        ),
+        ("sqlguard.toml".to_string(), get_default_config_content()),
         (
             "sqlguard.rules.toml".to_string(),
             get_default_rules_content(),
         ),
     ];
-    for (name, rule_type, content) in INIT_RULE_SCRIPTS {
-        files.push((
-            format!("config/rules/{}/{}.rhai", rule_type, name),
-            content,
-        ));
+    for (name, rule_type, content) in init_scripts() {
+        files.push((format!("config/rules/{}/{}.rhai", rule_type, name), content));
     }
 
     for (rel, content) in &files {
@@ -2078,15 +2087,13 @@ fn run_init(target_dir: &Path, force: bool) -> Result<(), SqlGuardError> {
         }
     }
 
-    let (ddl_count, dml_count) = INIT_RULE_SCRIPTS
-        .iter()
-        .fold((0usize, 0usize), |(d, m), (_, t, _)| {
-            if *t == "ddl" {
-                (d + 1, m)
-            } else {
-                (d, m + 1)
-            }
-        });
+    let (ddl_count, dml_count) = init_scripts().fold((0usize, 0usize), |(d, m), (_, t, _)| {
+        if *t == "ddl" {
+            (d + 1, m)
+        } else {
+            (d, m + 1)
+        }
+    });
 
     if skipped.is_empty() {
         println!(
@@ -2437,14 +2444,36 @@ fn get_default_rules_content() -> &'static str {
     include_str!("../sqlguard.rules.toml.example")
 }
 
-/// 默认规则包清单（`config/rules-pack.toml`）——单一事实来源，编译期嵌入。
-/// 使仓库 `config/` 目录同时是一个合规的规则包根（M4）。
-fn get_default_pack_manifest() -> &'static str {
-    include_str!("../config/rules-pack.toml")
+/// 默认 vendor 的规则包（基础类 + 定制类分开分发，方案 A）。
+///
+/// 每个包对应仓库 `config/` 下的一个合规包根，清单编译期嵌入（单一事实来源）。
+/// 收录标准：与数据库方言/团队约定无关的通用规则进 `rules-core`；方言/平台
+/// 相关的定制规则进 `rules-gaussdb`（namespace 隔离 id）。
+struct DefaultPack {
+    /// 包名（`[rule_packs].packs` 引用名，必须与清单 `[pack].name` 一致，有守护测试）。
+    name: &'static str,
+    /// 项目内 vendor 目录（相对配置文件目录）。
+    vendor_dir: &'static str,
+    /// 包清单内容（编译期嵌入）。
+    manifest: &'static str,
+    /// 包内脚本：(文件名, 子目录, 内容)，与清单 script_path 一一对应（有守护测试）。
+    scripts: &'static [(&'static str, &'static str, &'static str)],
 }
 
-/// 默认包在项目内的 vendor 目录（相对配置文件目录）。
-const DEFAULT_PACK_VENDOR_DIR: &str = "vendor/rules/rules-core";
+const DEFAULT_PACKS: &[DefaultPack] = &[
+    DefaultPack {
+        name: "rules-core",
+        vendor_dir: "vendor/rules/rules-core",
+        manifest: include_str!("../config/rules-core/rules-pack.toml"),
+        scripts: INIT_CORE_SCRIPTS,
+    },
+    DefaultPack {
+        name: "rules-gaussdb",
+        vendor_dir: "vendor/rules/rules-gaussdb",
+        manifest: include_str!("../config/rules-gaussdb/rules-pack.toml"),
+        scripts: INIT_GAUSSDB_SCRIPTS,
+    },
+];
 
 /// `init --with-default-pack` 追加到主配置末尾的规则包声明。
 ///
@@ -2454,14 +2483,18 @@ const DEFAULT_PACK_CONFIG_BLOCK: &str = r#"
 # ================================================================================
 # 规则包 [rule_packs]（由 `sqlguard init --with-default-pack` 生成）
 # ================================================================================
-# 规则来自 vendor/rules/rules-core/ 下的默认规则包，版本由 sqlguard.lock 固定
-# （CI 建议加 --locked 强制校验）。项目自定义规则写在 sqlguard.rules.toml，
-# 优先级高于包内规则；也可用 [[rule_packs.overrides]] 只改级别/阈值/开关。
+# 规则来自 vendor/rules/ 下的默认规则包（rules-core 通用规则 + rules-gaussdb
+# GaussDB 定制规则），版本由 sqlguard.lock 固定（CI 建议加 --locked 强制校验）。
+# 项目自定义规则写在 sqlguard.rules.toml，优先级高于包内规则；也可用
+# [[rule_packs.overrides]] 只改级别/阈值/开关。
 [rule_packs]
 search_paths = ["vendor/rules"]
 
 [[rule_packs.packs]]
 name = "rules-core"
+
+[[rule_packs.packs]]
+name = "rules-gaussdb"
 "#;
 
 /// `init --with-default-pack` 写出的 `sqlguard.rules.toml`（仅承载本地自定义规则）。
@@ -2480,15 +2513,18 @@ const DEFAULT_PACK_RULES_TEMPLATE: &str = r#"# =================================
 # severity = "warning"
 "#;
 
-/// `init --with-default-pack`：把默认规则包 vendor 到项目内，并在主配置里声明
-/// `[rule_packs]`，最后生成 `sqlguard.lock`（M4）。
+/// `init --with-default-pack`：把默认规则包（基础类 + 定制类）vendor 到项目内，
+/// 并在主配置里声明 `[rule_packs]`，最后生成 `sqlguard.lock`（M4）。
 ///
 /// 与默认 `init`（写 `config/rules/` 脚本 + 完整 `sqlguard.rules.toml`）互不影响，
 /// 后者行为保持不变。
 fn run_init_with_default_pack(target_dir: &Path, force: bool) -> Result<(), SqlGuardError> {
-    let pack_root = target_dir.join(DEFAULT_PACK_VENDOR_DIR);
-    for sub in ["ddl", "dml"] {
-        fs::create_dir_all(pack_root.join("rules").join(sub)).map_err(SqlGuardError::IoError)?;
+    for pack in DEFAULT_PACKS {
+        let pack_root = target_dir.join(pack.vendor_dir);
+        for sub in ["ddl", "dml"] {
+            fs::create_dir_all(pack_root.join("rules").join(sub))
+                .map_err(SqlGuardError::IoError)?;
+        }
     }
 
     // 主配置 = 默认配置 + 末尾追加的 [rule_packs] 声明
@@ -2504,16 +2540,18 @@ fn run_init_with_default_pack(target_dir: &Path, force: bool) -> Result<(), SqlG
             "sqlguard.rules.toml".to_string(),
             DEFAULT_PACK_RULES_TEMPLATE.to_string(),
         ),
-        (
-            format!("{DEFAULT_PACK_VENDOR_DIR}/rules-pack.toml"),
-            get_default_pack_manifest().to_string(),
-        ),
     ];
-    for (name, subdir, content) in INIT_RULE_SCRIPTS {
+    for pack in DEFAULT_PACKS {
         files.push((
-            format!("{DEFAULT_PACK_VENDOR_DIR}/rules/{subdir}/{name}.rhai"),
-            (*content).to_string(),
+            format!("{}/rules-pack.toml", pack.vendor_dir),
+            pack.manifest.to_string(),
         ));
+        for (name, subdir, content) in pack.scripts {
+            files.push((
+                format!("{}/rules/{}/{}.rhai", pack.vendor_dir, subdir, name),
+                (*content).to_string(),
+            ));
+        }
     }
 
     let mut written = 0usize;
@@ -2535,15 +2573,19 @@ fn run_init_with_default_pack(target_dir: &Path, force: bool) -> Result<(), SqlG
     let lock_path = lock::write_lock(&lock_file, &cfg_dir)?;
 
     println!(
-        "Initialized SqlGuard with the default rule pack in {}",
+        "Initialized SqlGuard with the default rule packs in {}",
         target_dir.display()
     );
     println!("  - sqlguard.toml                      # 主配置（含 [rule_packs]）");
     println!("  - sqlguard.rules.toml                # 仅本地自定义规则（默认为空）");
-    println!(
-        "  - {DEFAULT_PACK_VENDOR_DIR}/     # 默认规则包（{} 个脚本）",
-        INIT_RULE_SCRIPTS.len()
-    );
+    for pack in DEFAULT_PACKS {
+        println!(
+            "  - {}/   # 规则包 {}（{} 个脚本）",
+            pack.vendor_dir,
+            pack.name,
+            pack.scripts.len()
+        );
+    }
     println!(
         "  - {}   ({} pack(s), {} rule(s) effective)",
         lock_path
@@ -2581,6 +2623,8 @@ mod tests {
         name: String,
         version: String,
         api_version: u32,
+        #[serde(default)]
+        namespace: Option<String>,
     }
 
     #[derive(serde::Deserialize)]
@@ -2595,16 +2639,9 @@ mod tests {
 
     #[test]
     fn default_pack_manifest_matches_rules_example() {
-        let pack: MiniManifest = toml::from_str(get_default_pack_manifest())
-            .expect("config/rules-pack.toml 必须是合法 TOML");
         let example: MiniManifest = toml::from_str(get_default_rules_content())
             .expect("sqlguard.rules.toml.example 必须是合法 TOML");
-
-        let meta = pack.pack.as_ref().expect("包清单必须声明 [pack]");
-        assert_eq!(meta.name, "rules-core");
-        assert_eq!(meta.api_version, 1);
-        assert!(!meta.version.is_empty(), "包版本不能为空");
-        assert!(!pack.rules.is_empty());
+        assert!(!example.rules.is_empty());
 
         // 两处必须声明同一套规则（id / 脚本 / 级别 / 开关），防止清单与示例漂移
         let normalize = |rules: &[MiniRule]| -> Vec<(String, String, String, bool)> {
@@ -2620,27 +2657,57 @@ mod tests {
                 })
                 .collect()
         };
-        assert_eq!(
-            normalize(&pack.rules),
-            normalize(&example.rules),
-            "config/rules-pack.toml 与 sqlguard.rules.toml.example 的规则集不一致"
-        );
 
-        // 每条包内脚本都必须有对应的内置脚本，否则 init --with-default-pack 会写出坏包
-        for rule in &pack.rules {
-            let rel = rule
-                .script_path
-                .strip_prefix("rules/")
-                .unwrap_or(&rule.script_path);
-            assert!(
-                INIT_RULE_SCRIPTS
-                    .iter()
-                    .any(|(n, t, _)| format!("{t}/{n}.rhai") == rel),
-                "规则 {} 引用 '{}'，但不在 INIT_RULE_SCRIPTS 中",
-                rule.id,
-                rule.script_path
+        let mut combined: Vec<(String, String, String, bool)> = Vec::new();
+        for pack in DEFAULT_PACKS {
+            let manifest: MiniManifest =
+                toml::from_str(pack.manifest).expect("默认包清单必须是合法 TOML");
+            let meta = manifest.pack.as_ref().expect("包清单必须声明 [pack]");
+            assert_eq!(
+                meta.name, pack.name,
+                "DEFAULT_PACKS 表中的名字必须与清单一致"
             );
+            assert_eq!(meta.api_version, 1);
+            assert!(!meta.version.is_empty(), "包版本不能为空");
+            assert!(!manifest.rules.is_empty());
+            // 分层约定：基础包不带 namespace（保持裸 id），定制包必须带 namespace 隔离 id
+            match pack.name {
+                "rules-core" => assert!(
+                    meta.namespace.is_none(),
+                    "基础包不应设置 namespace（保持裸 id 兼容）"
+                ),
+                _ => assert_eq!(
+                    meta.namespace.as_deref(),
+                    Some("gaussdb"),
+                    "定制包必须用 namespace 隔离规则 id"
+                ),
+            }
+
+            // 每条包内脚本都必须有对应的内置脚本，否则 init --with-default-pack 会写出坏包
+            for rule in &manifest.rules {
+                let rel = rule
+                    .script_path
+                    .strip_prefix("rules/")
+                    .unwrap_or(&rule.script_path);
+                assert!(
+                    pack.scripts
+                        .iter()
+                        .any(|(n, t, _)| format!("{t}/{n}.rhai") == rel),
+                    "规则 {} 引用 '{}'，但不在包 {} 的内置脚本清单中",
+                    rule.id,
+                    rule.script_path,
+                    pack.name
+                );
+            }
+            combined.extend(normalize(&manifest.rules));
         }
+
+        assert_eq!(
+            combined,
+            normalize(&example.rules),
+            "默认包清单（rules-core + rules-gaussdb）与 sqlguard.rules.toml.example \
+             的规则集不一致"
+        );
     }
 
     #[test]
@@ -2652,23 +2719,40 @@ mod tests {
         let rules_path = dir.path().join("sqlguard.rules.toml");
         let lock_path = dir.path().join("sqlguard.lock");
         assert!(cfg_path.exists() && rules_path.exists());
-        assert!(
-            dir.path()
-                .join(DEFAULT_PACK_VENDOR_DIR)
-                .join("rules-pack.toml")
-                .exists(),
-            "默认规则包必须被 vendor 到项目内"
-        );
+        for pack in DEFAULT_PACKS {
+            assert!(
+                dir.path()
+                    .join(pack.vendor_dir)
+                    .join("rules-pack.toml")
+                    .exists(),
+                "规则包 {} 必须被 vendor 到项目内",
+                pack.name
+            );
+        }
         assert!(lock_path.exists(), "必须生成 sqlguard.lock");
         // 脚本模式的产物不应出现（两种 init 互不干扰）
         assert!(!dir.path().join("config/rules/ddl").exists());
 
         let cfg = Config::load(&cfg_path).expect("生成的配置必须可加载");
-        assert_eq!(cfg.resolved_packs.len(), 1);
-        assert_eq!(cfg.resolved_packs[0].name, "rules-core");
+        assert_eq!(cfg.resolved_packs.len(), DEFAULT_PACKS.len());
+        for (idx, pack) in DEFAULT_PACKS.iter().enumerate() {
+            assert_eq!(cfg.resolved_packs[idx].name, pack.name);
+        }
+        // 定制包的 namespace 必须生效（id 规范化为 gaussdb:<短 id>）
+        assert!(
+            cfg.rules.iter().any(|r| r.id == "gaussdb:GNAM001"),
+            "rules-gaussdb 的规则 id 应带 namespace 前缀，实际: {:?}",
+            cfg.rules.iter().map(|r| r.id.as_str()).collect::<Vec<_>>()
+        );
 
-        let declared: MiniManifest = toml::from_str(get_default_pack_manifest()).unwrap();
-        assert_eq!(cfg.rules.len(), declared.rules.len());
+        let declared: usize = DEFAULT_PACKS
+            .iter()
+            .map(|p| {
+                let m: MiniManifest = toml::from_str(p.manifest).unwrap();
+                m.rules.len()
+            })
+            .sum();
+        assert_eq!(cfg.rules.len(), declared);
 
         // 锁文件必须与实际解析结果一致（Strict 模式亦通过）
         lock::verify_lock(&cfg, cfg_path.parent().unwrap(), lock::LockMode::Strict)
@@ -2697,11 +2781,11 @@ mod tests {
         let dml_n = std::fs::read_dir(&dml).unwrap().count();
         assert_eq!(
             ddl_n,
-            INIT_RULE_SCRIPTS.iter().filter(|(_, t, _)| *t == "ddl").count()
+            init_scripts().filter(|(_, t, _)| *t == "ddl").count()
         );
         assert_eq!(
             dml_n,
-            INIT_RULE_SCRIPTS.iter().filter(|(_, t, _)| *t == "dml").count()
+            init_scripts().filter(|(_, t, _)| *t == "dml").count()
         );
     }
 
@@ -2764,8 +2848,7 @@ mod tests {
         for line in get_default_rules_content().lines() {
             if let Some(rest) = line.trim().strip_prefix("script_path = ") {
                 let declared = rest.trim().trim_matches('"');
-                let covered = INIT_RULE_SCRIPTS
-                    .iter()
+                let covered = init_scripts()
                     .any(|(name, ty, _)| format!("config/rules/{}/{}.rhai", ty, name) == declared);
                 assert!(
                     covered,

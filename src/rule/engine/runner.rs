@@ -12,7 +12,7 @@ use super::parser::parse_sql_to_ast_fb;
 
 /// 规则脚本公共辅助函数。在每条规则脚本执行前自动 prepend，
 /// 规则脚本无需 import 即可直接调用 guard_parse_error / for_each_statement / report 等。
-const HELPERS_SCRIPT: &str = include_str!("../../../config/rules/lib/helpers.rhai");
+const HELPERS_SCRIPT: &str = include_str!("../../../config/rules-core/lib/helpers.rhai");
 
 /// 对单个文件应用所有适用规则。AST 在此解析一次，供该文件的所有规则复用。
 ///

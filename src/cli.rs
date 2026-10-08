@@ -158,12 +158,13 @@ pub enum Commands {
         #[clap(long)]
         force: bool,
 
-        /// Initialize from the default rule pack instead of copying rule scripts
+        /// Initialize from the default rule packs instead of copying rule scripts
         /// into `config/rules/`.
         ///
-        /// Writes the default pack to `vendor/rules/rules-core/`, declares
-        /// `[rule_packs]` in `sqlguard.toml`, and generates `sqlguard.lock`.
-        /// The generated project is self-contained and offline-capable.
+        /// Writes the default packs (`rules-core` + `rules-gaussdb`) to
+        /// `vendor/rules/<pack>/`, declares `[rule_packs]` in `sqlguard.toml`,
+        /// and generates `sqlguard.lock`. The generated project is self-contained
+        /// and offline-capable.
         #[clap(long)]
         with_default_pack: bool,
     },

@@ -145,11 +145,15 @@ done
 # ---------- 安装规则库与配置模板 ----------
 if [ "$INSTALL_CONFIG" = "1" ]; then
   run mkdir -p "$CONFIG_DIR"
-  if [ -d "${PKG_ROOT}/config/rules" ]; then
-    run mkdir -p "${CONFIG_DIR}/rules"
-    run cp -R "${PKG_ROOT}/config/rules/." "${CONFIG_DIR}/rules/"
-    echo "    ->    ${CONFIG_DIR}/rules"
-  fi
+  # 默认规则包（基础类 rules-core + 定制类 rules-gaussdb），安装为
+  # $CONFIG_DIR/rules/<pack>/，消费侧将其父目录配到 [rule_packs].search_paths。
+  for pack in rules-core rules-gaussdb; do
+    if [ -d "${PKG_ROOT}/config/${pack}" ]; then
+      run mkdir -p "${CONFIG_DIR}/rules"
+      run cp -R "${PKG_ROOT}/config/${pack}" "${CONFIG_DIR}/rules/${pack}"
+      echo "    ->    ${CONFIG_DIR}/rules/${pack}"
+    fi
+  done
   for f in sqlguard.toml.example sqlguard.rules.toml.example; do
     if [ -f "${PKG_ROOT}/config/${f}" ]; then
       run cp -f "${PKG_ROOT}/config/${f}" "${CONFIG_DIR}/${f}"

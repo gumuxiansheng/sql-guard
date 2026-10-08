@@ -1,16 +1,23 @@
 # ================================================================================
-# 默认规则包 `rules-core` 清单（规则与引擎分开发版）
+# 基础类规则包 `rules-core` 清单（通用规则，与数据库方言/团队约定无关）
 # ================================================================================
-# 本文件使仓库 `config/` 目录成为一个合规的规则包根：
-#   config/rules-pack.toml           ← 本清单
-#   config/rules/ddl/*.rhai          ← 规则脚本（script_path 相对包根解析）
-#   config/rules/lib/helpers.rhai    ← 引擎内置 helpers（故此处不声明 [pack].helpers）
+# 规则分层（方案 A：基础类 + 定制类分开分发）：
+#   config/rules-core/      ← 基础类包根（本清单所在目录）
+#   config/rules-gaussdb/   ← 定制类包根（GaussDB 规范，namespace = "gaussdb"）
+# 包根内结构：
+#   rules-pack.toml           ← 本清单
+#   rules/ddl/*.rhai          ← 规则脚本（script_path 相对包根解析）
+#   rules/dml/*.rhai
+#   lib/helpers.rhai          ← 引擎内置 helpers（故此处不声明 [pack].helpers）
 #
 # 用法：
-#   1. `sqlguard init --with-default-pack` 会把它 vendor 到项目 vendor/rules/rules-core/；
-#   2. 也可把整个包目录复制到独立规则仓库后独立版本化、独立 CI（见
-#      docs/rule-pack-design.md §十二 迁移指南）。
+#   1. `sqlguard init --with-default-pack` 会把基础包与定制包一起 vendor 到
+#      项目 vendor/rules/ 下；
+#   2. 也可把包目录复制/检出后独立版本化、独立 CI（见 docs/rule-pack-design.md
+#      §十二 迁移指南）。
 #
+# ★ 收录标准：与具体数据库、团队约定无关的通用规范才允许进入本包；
+#   方言/平台相关规则一律放定制包（如 rules-gaussdb）。
 # ★ 规则内容与 sqlguard.rules.toml.example 保持同步（有守护测试）。
 # ================================================================================
 
@@ -19,8 +26,9 @@ name        = "rules-core"
 version     = "1.0.0"
 api_version = 1
 engine      = ">=0.2.7 <0.3"
-description = "SqlGuard 默认规则集（DDL/DML 基础规范 + GaussDB 规范条目）"
+description = "SqlGuard 基础规则集（通用 DDL/DML 规范，与数据库方言无关）"
 license     = "MIT"
+
 [[rules]]
 id = "DDL001"
 name = "no_drop_table"
@@ -270,193 +278,3 @@ enabled = true
 script_path = "rules/dml/no_or_in_where.rhai"
 applies_to = ["dml"]
 severity = "warning"
-
-[[rules]]
-id = "GNAM001"
-name = "gaussdb_object_name_charset"
-group = "gaussdb-naming"
-description = "Object names must contain only letters, digits and underscores"
-enabled = false
-script_path = "rules/ddl/gaussdb_object_name_charset.rhai"
-applies_to = ["ddl"]
-severity = "error"
-
-[[rules]]
-id = "GNAM002"
-name = "gaussdb_no_quoted_object_name"
-group = "gaussdb-naming"
-description = "Do not define object names with double quotes"
-enabled = false
-script_path = "rules/ddl/gaussdb_no_quoted_object_name.rhai"
-applies_to = ["ddl"]
-severity = "error"
-
-[[rules]]
-id = "GNAM003"
-name = "gaussdb_no_reserved_prefix"
-group = "gaussdb-naming"
-description = "Object names must not use the system-reserved prefixes pg_/gs_/adm_/my_/db_"
-enabled = false
-script_path = "rules/ddl/gaussdb_no_reserved_prefix.rhai"
-applies_to = ["ddl"]
-severity = "error"
-
-[[rules]]
-id = "GNAM004"
-name = "gaussdb_object_name_max_bytes"
-group = "gaussdb-naming"
-description = "Object names must not exceed 63 bytes"
-enabled = false
-script_path = "rules/ddl/gaussdb_object_name_max_bytes.rhai"
-applies_to = ["ddl"]
-severity = "error"
-
-[rules.params]
-name_max_bytes = 63
-
-[[rules]]
-id = "GTYP001"
-name = "gaussdb_max_large_fields"
-group = "gaussdb-type"
-description = "A table should not have more than 8 large fields"
-enabled = false
-script_path = "rules/ddl/gaussdb_max_large_fields.rhai"
-applies_to = ["ddl"]
-severity = "warning"
-
-[rules.params]
-max_large_fields = 8
-large_field_bytes = 2000
-
-[[rules]]
-id = "GTYP002"
-name = "gaussdb_no_system_column"
-group = "gaussdb-type"
-description = "Do not use CTID/CID/OID/XID/TID/XMIN/CMIN/XMAX/CMAX as business columns"
-enabled = false
-script_path = "rules/ddl/gaussdb_no_system_column.rhai"
-applies_to = ["ddl"]
-severity = "error"
-
-[[rules]]
-id = "GTYP003"
-name = "gaussdb_recommended_data_types"
-group = "gaussdb-type"
-description = "Prefer the recommended basic data types from the specification appendix"
-enabled = false
-script_path = "rules/ddl/gaussdb_recommended_data_types.rhai"
-applies_to = ["ddl"]
-severity = "warning"
-
-[[rules]]
-id = "GOBJ001"
-name = "gaussdb_no_materialized_view"
-group = "gaussdb-object"
-description = "Materialized views are not allowed"
-enabled = false
-script_path = "rules/ddl/gaussdb_no_materialized_view.rhai"
-applies_to = ["ddl"]
-severity = "error"
-
-[[rules]]
-id = "GOBJ002"
-name = "gaussdb_no_order_by_in_view"
-group = "gaussdb-object"
-description = "ORDER BY is not allowed inside a view definition"
-enabled = false
-script_path = "rules/ddl/gaussdb_no_order_by_in_view.rhai"
-applies_to = ["ddl"]
-severity = "error"
-
-[[rules]]
-id = "GOBJ003"
-name = "gaussdb_view_usage_warning"
-group = "gaussdb-object"
-description = "Views are discouraged (and nested views especially so)"
-enabled = false
-script_path = "rules/ddl/gaussdb_view_usage_warning.rhai"
-applies_to = ["ddl"]
-severity = "warning"
-
-[[rules]]
-id = "GIDX001"
-name = "gaussdb_create_index_concurrently"
-group = "gaussdb-index"
-description = "CREATE INDEX must use CONCURRENTLY when online transactions exist"
-enabled = false
-script_path = "rules/ddl/gaussdb_create_index_concurrently.rhai"
-applies_to = ["ddl"]
-severity = "error"
-
-[[rules]]
-id = "GDCL001"
-name = "gaussdb_no_quoted_column_in_ddl"
-group = "gaussdb-ddl"
-description = "Column names in DDL must not be wrapped in quotes or backticks"
-enabled = false
-script_path = "rules/ddl/gaussdb_no_quoted_column_in_ddl.rhai"
-applies_to = ["ddl"]
-severity = "error"
-
-[[rules]]
-id = "GDDL001"
-name = "gaussdb_require_commit_in_transaction"
-group = "gaussdb-ddl"
-description = "DDL inside a transaction requires an explicit COMMIT/ROLLBACK"
-enabled = false
-script_path = "rules/ddl/gaussdb_require_commit_in_transaction.rhai"
-applies_to = ["ddl"]
-severity = "error"
-
-[[rules]]
-id = "GDML002"
-name = "gaussdb_no_order_by_group_by_in_update"
-group = "gaussdb-dml"
-description = "UPDATE must not use ORDER BY or GROUP BY"
-enabled = false
-script_path = "rules/dml/gaussdb_no_order_by_group_by_in_update.rhai"
-applies_to = ["dml"]
-severity = "error"
-
-[[rules]]
-id = "GDML003"
-name = "gaussdb_no_order_by_group_by_in_delete"
-group = "gaussdb-dml"
-description = "DELETE must not use ORDER BY or GROUP BY"
-enabled = false
-script_path = "rules/dml/gaussdb_no_order_by_group_by_in_delete.rhai"
-applies_to = ["dml"]
-severity = "error"
-
-[[rules]]
-id = "GDML004"
-name = "gaussdb_update_subquery_to_join"
-group = "gaussdb-dml"
-description = "UPDATE ... WHERE with a subquery should be rewritten as JOIN"
-enabled = false
-script_path = "rules/dml/gaussdb_update_subquery_to_join.rhai"
-applies_to = ["dml"]
-severity = "warning"
-
-[[rules]]
-id = "GDML005"
-name = "gaussdb_order_by_explicit_sort"
-group = "gaussdb-dml"
-description = "ORDER BY must specify ASC/DESC and NULLS FIRST/LAST explicitly"
-enabled = false
-script_path = "rules/dml/gaussdb_order_by_explicit_sort.rhai"
-applies_to = ["dml"]
-severity = "error"
-
-[[rules]]
-id = "GPERF001"
-name = "gaussdb_statement_max_bytes"
-group = "gaussdb-performance"
-description = "A single statement should stay under 5KB"
-enabled = false
-script_path = "rules/dml/gaussdb_statement_max_bytes.rhai"
-applies_to = ["ddl", "dml"]
-severity = "warning"
-
-[rules.params]
-stmt_max_bytes = 5120

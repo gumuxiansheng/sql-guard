@@ -22,8 +22,9 @@ if guard_parse_error(context) {
 let ast = context["ast"];
 
 // 合法字符集：a-z / 0-9 / _
-let valid_chars = "abcdefghijklmnopqrstuvwxyz0123456789_";
-let digits = "0123456789";
+// 注意：Rhai 函数无法访问脚本级变量（let/const 均只在其所在作用域可见），
+// 故字符集常量声明在使用它们的 validate_table_name 函数内部。
+
 
 /// 去除标识符两侧的引号（双引号 / 反引号 / 方括号）。
 fn strip_quotes(name) {
@@ -52,6 +53,9 @@ fn extract_identifier(name) {
 /// 返回空字符串表示合法；返回非空字符串描述具体违规原因。
 fn validate_table_name(name) {
     if name.len() == 0 { return ""; }
+
+    const valid_chars = "abcdefghijklmnopqrstuvwxyz0123456789_";
+    const digits = "0123456789";
 
     // 不能以数字开头
     let first = name.sub_string(0, 1);

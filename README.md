@@ -407,34 +407,13 @@ SqlGuard/
 │       ├── replay/Replayer.java
 │       └── plan/            # ExplainAdapter / PlanParser / PlanCollector
 ├── config/
-│   ├── rules-pack.toml           # ★ 默认规则包 rules-core 清单（使 config/ 成为合规包根）
-│   └── rules/
-│       ├── lib/
-│       │   └── helpers.rhai      # 公共辅助函数（编译时嵌入，用户无需关心）
-│       ├── ddl/
-│       │   ├── no_drop_table.rhai
-│       │   ├── primary_key_required.rhai
-│       │   ├── backup_table_naming.rhai
-│       │   ├── index_naming_convention.rhai
-│       │   ├── no_redundant_index.rhai
-│       │   ├── no_reserved_keyword_naming.rhai
-│       │   └── table_name_naming.rhai      # ★ DDL007
-│       └── dml/
-│           ├── no_select_all.rhai
-│           ├── no_delete_update_without_where.rhai
-│           ├── insert_columns_required.rhai
-│           ├── subquery_alias_required.rhai
-│           ├── column_references_qualified.rhai
-│           ├── no_join_without_condition.rhai
-│           ├── no_unused_join.rhai
-│           ├── no_unused_cte.rhai
-│           ├── use_is_null.rhai
-│           ├── use_coalesce.rhai
-│           ├── no_order_by_in_subquery.rhai
-│           ├── union_all_preferred.rhai
-│           ├── no_nested_case.rhai
-│           ├── no_constant_where.rhai
-│           └── order_by_required_for_pagination.rhai
+│   ├── rules-core/               # ★ 基础类规则包（通用 DDL/DML 规范，25 条）
+│   │   ├── rules-pack.toml        # 包清单（合规包根）
+│   │   ├── lib/helpers.rhai      # 公共辅助函数（编译时嵌入，用户无需关心）
+│   │   └── rules/{ddl,dml}/       # no_drop_table / primary_key_required / ...
+│   └── rules-gaussdb/             # ★ 定制类规则包（GaussDB 规范，18 条，namespace = gaussdb）
+│       ├── rules-pack.toml        # 包清单
+│       └── rules/{ddl,dml}/       # gaussdb_object_name_charset / gaussdb_statement_max_bytes / ...
 ├── .github/workflows/
 │   ├── ci.yml               # ★ CI：fmt + clippy + 全量测试（Rust + Java）
 │   └── release.yml          # Release：tag 触发跨平台二进制构建
@@ -814,9 +793,9 @@ sqlguard init [PATH] --with-default-pack   # 改用默认规则包（vendor 到�
 ```
 
 `--with-default-pack` 是**规则包模式**的初始化：不写 `config/rules/` 脚本，而是把默认包
-`rules-core` vendor 到 `vendor/rules/rules-core/`，在主配置末尾追加 `[rule_packs]`，并生成
-`sqlguard.lock`——产出的工程自带规则、可离线、可直接进 CI（配合 `check --locked`）。
-两种模式互不影响，默认 `init` 行为保持不变。
+（基础类 `rules-core` + 定制类 `rules-gaussdb`）vendor 到 `vendor/rules/<包名>/`，在主配置
+末尾追加 `[rule_packs]`，并生成 `sqlguard.lock`——产出的工程自带规则、可离线、可直接进 CI
+（配合 `check --locked`）。两种模式互不影响，默认 `init` 行为保持不变。
 
 > **幂等语义（v0.2.5 起）**：默认只补缺失文件，已存在的 `sqlguard.toml` / `sqlguard.rules.toml` /
 > 规则脚本**原样保留**并逐项提示 `skipped`——防止覆盖 gates-toolkit 等工具链按模板渲染过的定制配置。
@@ -939,6 +918,13 @@ version = "1.0.0"
 source = "path:vendor/rules/rules-core"
 checksum = "sha256:…"
 api_version = 1
+
+[[pack]]
+name = "rules-gaussdb"
+version = "1.0.0"
+source = "path:vendor/rules/rules-gaussdb"
+checksum = "sha256:…"
+api_version = 1
 ```
 
 校验强度（`check` / `check-diff`）：
@@ -1048,7 +1034,7 @@ sqlguard check ./sql --groups ddl-safety --exclude-rules DDL003
 - `context` — 包含 `sql_content`、`file_path`、`script_type`、`ast` 等字段
 - `violations` — 空数组，脚本通过 `violations.push(...)` 上报违规
 
-**公共辅助函数**（`config/rules/lib/helpers.rhai`）由引擎编译时嵌入并在每条脚本执行前自动 prepend，规则脚本无需 import 即可直接调用：
+**公共辅助函数**（`config/rules-core/lib/helpers.rhai`）由引擎编译时嵌入并在每条脚本执行前自动 prepend，规则脚本无需 import 即可直接调用：
 
 | 函数 | 返回值 | 说明 |
 |------|--------|------|
@@ -1354,17 +1340,18 @@ sqlguard rules lock                   # 固定版本，提交 sqlguard.lock
 
 ### 3. 把规则集抽成独立仓库（可选）
 
-默认规则包在仓库内**已经是一个合规包根**（`config/rules-pack.toml` + `config/rules/**`），
+默认规则按**基础类 / 定制类**分成两个包，在仓库内各自是合规包根（`config/rules-core/`、
+`config/rules-gaussdb/`，方案 A：monorepo 多包 + 按包打 tag，如 `rules-core/v1.2.0`），
 抽取即复制：
 
 ```bash
-# 在独立规则仓库中
-cp <sqlguard>/config/rules-pack.toml  .            # 包清单
-cp -r <sqlguard>/config/rules         ./rules      # 脚本（含 lib/helpers.rhai）
+# 在独立规则仓库中（每个包一个目录，可各自打 tag / 接 CI）
+cp -r <sqlguard>/config/rules-core      packs/rules-core      # 基础类：清单 + 脚本 + lib/helpers.rhai
+cp -r <sqlguard>/config/rules-gaussdb   packs/rules-gaussdb   # 定制类：GaussDB 规范
 ```
 
 业务项目侧当前通过 `sqlguard rules vendor`（或 `git submodule` / CI 检出）把包放进项目，
-再用 `search_paths` 或 `path` 引用——因为 `source` **本期只实现 `path:`**
+再用 `search_paths` 或 `path` 引用——因为 `source` **本期只实现 `path:**`
 （`git+` / `registry:` 已在格式中预留，后续里程碑实现）。包的版本号与 CI 由该独立仓库
 自行负责：它只需声明 `api_version` 与 `engine`，引擎在不兼容时会**明确报错**而非静默失效。
 
@@ -1487,7 +1474,7 @@ cargo test --test integration_test   # 仅集成测试
 
 这是最常见的贡献路径，按固定四步进行：
 
-1. **编写规则脚本**：在 `config/rules/ddl/` 或 `config/rules/dml/` 下新增 `.rhai` 文件，遍历 AST 上报违规，复用 `config/rules/lib/helpers.rhai` 中的辅助函数（`guard_parse_error` / `violation` 等，无需 import）。可参考现有规则如 `config/rules/ddl/no_drop_table.rhai`。
+1. **编写规则脚本**：先按分层选包——通用规则放 `config/rules-core/rules/{ddl,dml}/`，数据库/团队定制规则放 `config/rules-gaussdb/rules/{ddl,dml}/`（或新建定制包）。新增 `.rhai` 文件遍历 AST 上报违规，复用 `config/rules-core/lib/helpers.rhai` 中的辅助函数（`guard_parse_error` / `violation` 等，无需 import）。可参考现有规则如 `config/rules-core/rules/ddl/no_drop_table.rhai`。
 2. **注册规则**：在 `sqlguard.rules.toml` 中追加 `[[rules]]`，指定唯一 `id`、分组、严重级别与 `script_path`。
 3. **补充测试**：在 `tests/integration_test.rs` 增加覆盖该规则的用例（含命中与放行的正反例）。
 4. **更新文档**：在 `docs/default-rules.md` 登记规则说明；若影响用户可见行为，同步更新 `README.md` 与 `docs/rule-scripting.md`。

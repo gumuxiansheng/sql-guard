@@ -3,13 +3,16 @@
 SqlGuard 内置 25 条默认规则，分为 **P0（17 条，默认启用）** 和 **P1（8 条，默认禁用）** 两档（7 DDL + 18 DML）。
 
 > **与规则包的关系**：本手册的表格覆盖核心 P0/P1 规则；**权威且完整的规则清单**是
-> [`sqlguard.rules.toml.example`](../sqlguard.rules.toml.example) 与默认规则包清单
-> [`config/rules-pack.toml`](../config/rules-pack.toml)（当前 43 条，含 GaussDB 规范条目，
-> 其中 GaussDB 条目默认 `enabled = false`，按项目启用）。
+> [`sqlguard.rules.toml.example`](../sqlguard.rules.toml.example) 与两个默认规则包清单
+> [`config/rules-core/rules-pack.toml`](../config/rules-core/rules-pack.toml)（基础类，25 条
+> 通用规则）与 [`config/rules-gaussdb/rules-pack.toml`](../config/rules-gaussdb/rules-pack.toml)
+> （定制类，18 条 GaussDB 规范条目，默认 `enabled = false`，按项目启用；包模式下规则 id
+> 带 `gaussdb:` 前缀）。
 >
-> 这套规则现在也以**规则包 `rules-core`** 的形式提供，可被独立选择、指定版本、vendor 到
-> 项目内并用 `sqlguard.lock` 锁定；用法见 [rule-pack-design.md](rule-pack-design.md)
-> 与 README「`[rule_packs]` 多包加载与覆盖」「规则包迁移指南」。
+> 这两套规则以**规则包（基础类 `rules-core` + 定制类 `rules-gaussdb`）**的形式分开分发，
+> 可被独立选择、指定版本、vendor 到项目内并用 `sqlguard.lock` 锁定；用法见
+> [rule-pack-design.md](rule-pack-design.md) 与 README「`[rule_packs]` 多包加载与覆盖」
+> 「规则包迁移指南」。
 
 ## 规则总览
 

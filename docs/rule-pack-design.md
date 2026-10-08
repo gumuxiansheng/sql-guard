@@ -444,11 +444,16 @@ M2 **未改动 `RuleConfig` 结构**（短 id 由 canonical id 按 `:` 反推）
 
 ### 10.7 M4/M5 已落地内容（实现对照）
 
+> **2026-10-08 拆分更新（方案 A）**：默认规则按**基础类 / 定制类**拆成两个包——
+> `config/rules-core/`（25 条通用规则，不设 namespace，保持裸 `DDL001` 等 id）与
+> `config/rules-gaussdb/`（18 条 GaussDB 规范，`namespace = "gaussdb"`，包模式下 id 形如
+> `gaussdb:GNAM001`）。`config/` 不再是单一包根，改为 `<search_path>` 下两个并列包目录。
+
 | 项 | 实现位置 | 说明 |
 |----|----------|------|
-| 默认规则包 | `config/rules-pack.toml` + `config/rules/**` | `name = "rules-core"`、`version = "1.0.0"`、`api_version = 1`、**不设 namespace**（保持裸 `DDL001` 等 id）；使 `config/` 成为合规包根 |
-| 清单/示例防漂移 | `main.rs` 测试 `default_pack_manifest_matches_rules_example` | 逐条比对 `(id, script_path, severity, enabled)`，并校验每个脚本都存在于 `INIT_RULE_SCRIPTS` |
-| `init --with-default-pack` | `main.rs::run_init_with_default_pack` | vendor 到 `vendor/rules/rules-core/` + 向主配置**末尾追加** `[rule_packs]` + 生成 `sqlguard.lock`；与旧 `init` 互不影响 |
+| 默认规则包 | `config/rules-core/rules-pack.toml` + `config/rules-gaussdb/rules-pack.toml` | 两个包均 `version = "1.0.0"`、`api_version = 1`；基础类不设 namespace，定制类设 `namespace = "gaussdb"` |
+| 清单/示例防漂移 | `main.rs` 测试 `default_pack_manifest_matches_rules_example` | 两包清单合并后与 example 逐条比对 `(id, script_path, severity, enabled)`，并校验每个脚本存在于其所属包的内置脚本清单（`DEFAULT_PACKS`） |
+| `init --with-default-pack` | `main.rs::run_init_with_default_pack` | 双包 vendor 到 `vendor/rules/<包名>/` + 向主配置**末尾追加** `[rule_packs]`（声明两个包）+ 生成 `sqlguard.lock`；与旧 `init` 互不影响 |
 | 迁移指南 | 本文 §十二 + README「规则包迁移指南」 | — |
 | 用户文档 | `README.md`（`rules` 子命令 / `sqlguard.lock` / 迁移）、`docs/default-rules.md`、`docs/rule-scripting.md` | — |
 
@@ -509,10 +514,15 @@ sqlguard check . --locked             # CI：强制锁一致 + checksum
 
 ### 12.3 抽取独立规则仓库
 
-`config/` 已是合规包根（`config/rules-pack.toml` + `config/rules/**`）。步骤：
+默认规则已按基础类/定制类拆成两个包根：`config/rules-core/`（含 `rules-pack.toml` +
+`rules/**` + `lib/helpers.rhai`）与 `config/rules-gaussdb/`（含 `rules-pack.toml` +
+`rules/**`）。方案 A（monorepo 多包 + 按包打 tag）的抽仓步骤：
 
-1. 新仓库放 `rules-pack.toml` + `rules/**`（含 `lib/helpers.rhai`）；**不要**声明 `[pack].helpers`——该 helpers 由引擎内置注入；
-2. 该仓库自行打 tag / 接 CI；包内只需维护 `version` / `api_version` / `engine`；
+1. 新仓库放 `packs/rules-core/` 与 `packs/rules-gaussdb/`，各自保留包根结构；基础包的
+   `lib/helpers.rhai` **不要**声明为 `[pack].helpers`——该 helpers 由引擎内置注入；
+   定制包（及其他团队包）自带 `namespace`（如 `gaussdb`）隔离规则 id；
+2. 该仓库按包打 tag（如 `rules-core/v1.2.0`、`rules-gaussdb/v1.0.0`）并接 CI；包内只需
+   维护 `version` / `api_version` / `engine`；
 3. 消费侧本期用 `path`（`rules vendor` / submodule / CI 检出）；`git+` / `registry:` 待后续里程碑；
 4. 引擎改动若触及规则可见 API，**必须**递增 `RULE_API_VERSION`，否则新包会在旧引擎上静默失效——这正是本方案存在的根本原因。
 
