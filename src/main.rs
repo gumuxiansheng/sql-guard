@@ -85,9 +85,10 @@ fn main_inner() -> Result<(), Box<dyn std::error::Error>> {
             path,
             force,
             with_default_pack,
+            with_gaussdb,
         } => {
             if with_default_pack {
-                run_init_with_default_pack(&path, force)?;
+                run_init_with_default_pack(&path, force, with_gaussdb)?;
             } else {
                 run_init(&path, force)?;
             }
@@ -1815,8 +1816,8 @@ fn extract_sql_lines(content: &str, start_line: usize, end_line: usize) -> Strin
 
 /// 基础类包（`rules-core`）脚本清单：(文件名, 子目录, 内容)——content 通过
 /// include_str! 编译时嵌入。约束：`sqlguard.rules.toml.example` 声明的每个
-/// script_path 必须出现在本清单或 [`INIT_GAUSSDB_SCRIPTS`] 中（超集允许，有测试
-/// 守护），否则 init 出的规则文件会引用到不存在的脚本。
+/// script_path 必须出现在本清单中（超集允许，有测试守护），否则 init 出的
+/// 规则文件会引用到不存在的脚本。
 const INIT_CORE_SCRIPTS: &[(&str, &str, &str)] = &[
     (
         "no_drop_table",
@@ -1946,8 +1947,9 @@ const INIT_CORE_SCRIPTS: &[(&str, &str, &str)] = &[
 ];
 
 /// 定制类包（`rules-gaussdb`）脚本清单（GNAM/GTYP/GOBJ/GIDX/GDCL/GDDL/GDML/GPERF）。
-/// 对应 docs/gaussdb-rule-gap-analysis.md 的 A 类条目，默认在
-/// sqlguard.rules.toml.example 中 enabled = false，按项目启用。
+/// 对应 docs/gaussdb-rule-gap-analysis.md 的 A 类条目。**不在默认 `init` 中生成**：
+/// 仅由 `init --with-default-pack --with-gaussdb` vendor 到项目内，或随发布包
+/// 分发、经 `[rule_packs]` 按需引用；包内规则默认 enabled = false。
 const INIT_GAUSSDB_SCRIPTS: &[(&str, &str, &str)] = &[
     (
         "gaussdb_object_name_charset",
@@ -2047,10 +2049,11 @@ const INIT_GAUSSDB_SCRIPTS: &[(&str, &str, &str)] = &[
     ),
 ];
 
-/// 全量 init 脚本（基础包 + GaussDB 定制包）：经典 `init` 仍写平铺的
-/// `config/rules/{ddl,dml}/` 布局，包归属只在 `--with-default-pack` 时区分。
+/// 经典 `init` 的落盘脚本清单——**仅基础包 `rules-core`（通用规则集）**。
+/// 定制包（`rules-gaussdb` 等）不在此列：由发布包提供，用户通过
+/// `init --with-default-pack --with-gaussdb` 或 `[rule_packs]` 按需接入。
 fn init_scripts() -> impl Iterator<Item = &'static (&'static str, &'static str, &'static str)> {
-    INIT_CORE_SCRIPTS.iter().chain(INIT_GAUSSDB_SCRIPTS)
+    INIT_CORE_SCRIPTS.iter()
 }
 
 ///
@@ -2478,24 +2481,26 @@ const DEFAULT_PACKS: &[DefaultPack] = &[
 /// `init --with-default-pack` 追加到主配置末尾的规则包声明。
 ///
 /// 追加在文件末尾：`[rule_packs]` 是顶层表头，无论原配置以什么内容结尾都合法，
-/// 因此无需改写既有配置文本（保留注释与排版）。
-const DEFAULT_PACK_CONFIG_BLOCK: &str = r#"
+/// 因此无需改写既有配置文本（保留注释与排版）。只声明本次选中的包。
+fn default_pack_config_block(packs: &[&DefaultPack]) -> String {
+    let mut block = String::from(
+        r#"
 # ================================================================================
 # 规则包 [rule_packs]（由 `sqlguard init --with-default-pack` 生成）
 # ================================================================================
-# 规则来自 vendor/rules/ 下的默认规则包（rules-core 通用规则 + rules-gaussdb
-# GaussDB 定制规则），版本由 sqlguard.lock 固定（CI 建议加 --locked 强制校验）。
-# 项目自定义规则写在 sqlguard.rules.toml，优先级高于包内规则；也可用
-# [[rule_packs.overrides]] 只改级别/阈值/开关。
+# 规则来自 vendor/rules/ 下的默认规则包（基础包 rules-core 通用规则；定制包
+# 如 rules-gaussdb 由 --with-gaussdb 按需引入），版本由 sqlguard.lock 固定
+# （CI 建议加 --locked 强制校验）。项目自定义规则写在 sqlguard.rules.toml，
+# 优先级高于包内规则；也可用 [[rule_packs.overrides]] 只改级别/阈值/开关。
 [rule_packs]
 search_paths = ["vendor/rules"]
-
-[[rule_packs.packs]]
-name = "rules-core"
-
-[[rule_packs.packs]]
-name = "rules-gaussdb"
-"#;
+"#,
+    );
+    for pack in packs {
+        block.push_str(&format!("\n[[rule_packs.packs]]\nname = \"{}\"\n", pack.name));
+    }
+    block
+}
 
 /// `init --with-default-pack` 写出的 `sqlguard.rules.toml`（仅承载本地自定义规则）。
 const DEFAULT_PACK_RULES_TEMPLATE: &str = r#"# ================================================================================
@@ -2513,13 +2518,24 @@ const DEFAULT_PACK_RULES_TEMPLATE: &str = r#"# =================================
 # severity = "warning"
 "#;
 
-/// `init --with-default-pack`：把默认规则包（基础类 + 定制类）vendor 到项目内，
-/// 并在主配置里声明 `[rule_packs]`，最后生成 `sqlguard.lock`（M4）。
+/// `init --with-default-pack`：把默认规则包 vendor 到项目内，并在主配置里声明
+/// `[rule_packs]`，最后生成 `sqlguard.lock`（M4）。
 ///
-/// 与默认 `init`（写 `config/rules/` 脚本 + 完整 `sqlguard.rules.toml`）互不影响，
-/// 后者行为保持不变。
-fn run_init_with_default_pack(target_dir: &Path, force: bool) -> Result<(), SqlGuardError> {
-    for pack in DEFAULT_PACKS {
+/// 默认只 vendor 基础包 `rules-core`（通用规则集）；`with_gaussdb = true` 时
+/// 追加定制包 `rules-gaussdb`（方言/平台相关，按需引入）。
+///
+/// 与默认 `init`（只写 `config/rules/` 基础脚本 + `sqlguard.rules.toml`）互不影响。
+fn run_init_with_default_pack(
+    target_dir: &Path,
+    force: bool,
+    with_gaussdb: bool,
+) -> Result<(), SqlGuardError> {
+    let selected: Vec<&DefaultPack> = DEFAULT_PACKS
+        .iter()
+        .filter(|p| with_gaussdb || p.name == "rules-core")
+        .collect();
+
+    for pack in &selected {
         let pack_root = target_dir.join(pack.vendor_dir);
         for sub in ["ddl", "dml"] {
             fs::create_dir_all(pack_root.join("rules").join(sub))
@@ -2532,7 +2548,7 @@ fn run_init_with_default_pack(target_dir: &Path, force: bool) -> Result<(), SqlG
     if !config_content.ends_with('\n') {
         config_content.push('\n');
     }
-    config_content.push_str(DEFAULT_PACK_CONFIG_BLOCK);
+    config_content.push_str(&default_pack_config_block(&selected));
 
     let mut files: Vec<(String, String)> = vec![
         ("sqlguard.toml".to_string(), config_content),
@@ -2541,7 +2557,7 @@ fn run_init_with_default_pack(target_dir: &Path, force: bool) -> Result<(), SqlG
             DEFAULT_PACK_RULES_TEMPLATE.to_string(),
         ),
     ];
-    for pack in DEFAULT_PACKS {
+    for pack in &selected {
         files.push((
             format!("{}/rules-pack.toml", pack.vendor_dir),
             pack.manifest.to_string(),
@@ -2578,13 +2594,16 @@ fn run_init_with_default_pack(target_dir: &Path, force: bool) -> Result<(), SqlG
     );
     println!("  - sqlguard.toml                      # 主配置（含 [rule_packs]）");
     println!("  - sqlguard.rules.toml                # 仅本地自定义规则（默认为空）");
-    for pack in DEFAULT_PACKS {
+    for pack in &selected {
         println!(
             "  - {}/   # 规则包 {}（{} 个脚本）",
             pack.vendor_dir,
             pack.name,
             pack.scripts.len()
         );
+    }
+    if !with_gaussdb {
+        println!("  （未引入定制包 rules-gaussdb；GaussDB 项目可加 --with-gaussdb 按需引入）");
     }
     println!(
         "  - {}   ({} pack(s), {} rule(s) effective)",
@@ -2637,13 +2656,48 @@ mod tests {
         enabled: bool,
     }
 
+    /// 守护：发布包组装脚本必须按当前规则包布局打包。
+    /// 历史坑：规则库从单一 `config/rules` 拆分为 `rules-core` / `rules-gaussdb` 两个
+    /// 合规包根后，package-release.sh 仍写死 `[ -d config/rules ] && cp -R config/rules ...`，
+    /// 目录不存在时 `[ -d ]` 为假直接静默跳过 → 发布包（含 CNB Release 附件）里没有规则包，
+    /// 且全流程无任何报错。故此处同时校验「引用了当前包名」与「不再引用旧布局」。
+    #[test]
+    fn package_release_script_references_current_rule_packs() {
+        let script = include_str!("../scripts/package-release.sh");
+        for pack in DEFAULT_PACKS {
+            assert!(
+                script.contains(pack.name),
+                "scripts/package-release.sh 未引用规则包 {}，发布包会缺少规则",
+                pack.name
+            );
+        }
+        assert!(
+            !script.contains("cp -R config/rules "),
+            "scripts/package-release.sh 仍在拷贝已废弃的旧布局 config/rules \
+             （该目录重构后不存在，会静默跳过导致发布包无规则）"
+        );
+
+        // 安装脚本消费侧的目录名必须与打包脚本产出一致
+        let installer = include_str!("../release/scripts/install.sh");
+        for pack in DEFAULT_PACKS {
+            assert!(
+                installer.contains(pack.name),
+                "release/scripts/install.sh 未安装规则包 {}，与发布包布局不一致",
+                pack.name
+            );
+        }
+    }
+
     #[test]
     fn default_pack_manifest_matches_rules_example() {
         let example: MiniManifest = toml::from_str(get_default_rules_content())
             .expect("sqlguard.rules.toml.example 必须是合法 TOML");
         assert!(!example.rules.is_empty());
 
-        // 两处必须声明同一套规则（id / 脚本 / 级别 / 开关），防止清单与示例漂移
+        // 两处必须声明同一套规则（id / 脚本 / 级别 / 开关），防止清单与示例漂移。
+        // 注意：example（即默认 init 落盘的 sqlguard.rules.toml）只承载**基础包**
+        // rules-core 的规则声明；定制包（rules-gaussdb）不在默认 init 中生成，
+        // 其清单只做自身完整性校验（脚本存在 + namespace 隔离），不与 example 对齐。
         let normalize = |rules: &[MiniRule]| -> Vec<(String, String, String, bool)> {
             rules
                 .iter()
@@ -2658,7 +2712,7 @@ mod tests {
                 .collect()
         };
 
-        let mut combined: Vec<(String, String, String, bool)> = Vec::new();
+        let mut core_rules: Vec<(String, String, String, bool)> = Vec::new();
         for pack in DEFAULT_PACKS {
             let manifest: MiniManifest =
                 toml::from_str(pack.manifest).expect("默认包清单必须是合法 TOML");
@@ -2699,26 +2753,83 @@ mod tests {
                     pack.name
                 );
             }
-            combined.extend(normalize(&manifest.rules));
+            if pack.name == "rules-core" {
+                core_rules = normalize(&manifest.rules);
+            }
         }
 
         assert_eq!(
-            combined,
+            core_rules,
             normalize(&example.rules),
-            "默认包清单（rules-core + rules-gaussdb）与 sqlguard.rules.toml.example \
-             的规则集不一致"
+            "基础包 rules-core 清单与 sqlguard.rules.toml.example 的规则集不一致"
         );
     }
 
     #[test]
     fn init_with_default_pack_writes_self_contained_project() {
+        // 默认只 vendor 基础包 rules-core（通用规则集）
         let dir = tempfile::tempdir().unwrap();
-        run_init_with_default_pack(dir.path(), false).unwrap();
+        run_init_with_default_pack(dir.path(), false, false).unwrap();
 
         let cfg_path = dir.path().join("sqlguard.toml");
         let rules_path = dir.path().join("sqlguard.rules.toml");
         let lock_path = dir.path().join("sqlguard.lock");
         assert!(cfg_path.exists() && rules_path.exists());
+        assert!(
+            dir.path()
+                .join("vendor/rules/rules-core/rules-pack.toml")
+                .exists(),
+            "基础包 rules-core 必须被 vendor 到项目内"
+        );
+        assert!(
+            !dir.path()
+                .join("vendor/rules/rules-gaussdb/rules-pack.toml")
+                .exists(),
+            "默认（不带 --with-gaussdb）不应 vendor 定制包 rules-gaussdb"
+        );
+        assert!(lock_path.exists(), "必须生成 sqlguard.lock");
+        // 脚本模式的产物不应出现（两种 init 互不干扰）
+        assert!(!dir.path().join("config/rules/ddl").exists());
+
+        let cfg = Config::load(&cfg_path).expect("生成的配置必须可加载");
+        assert_eq!(cfg.resolved_packs.len(), 1);
+        assert_eq!(cfg.resolved_packs[0].name, "rules-core");
+        assert!(
+            !cfg.rules.iter().any(|r| r.id.starts_with("gaussdb:")),
+            "默认 init 不应引入任何 GaussDB 定制规则，实际: {:?}",
+            cfg.rules.iter().map(|r| r.id.as_str()).collect::<Vec<_>>()
+        );
+
+        let declared: usize = DEFAULT_PACKS
+            .iter()
+            .find(|p| p.name == "rules-core")
+            .map(|p| {
+                let m: MiniManifest = toml::from_str(p.manifest).unwrap();
+                m.rules.len()
+            })
+            .unwrap();
+        assert_eq!(cfg.rules.len(), declared);
+
+        // 锁文件必须与实际解析结果一致（Strict 模式亦通过）
+        lock::verify_lock(&cfg, cfg_path.parent().unwrap(), lock::LockMode::Strict)
+            .expect("生成的锁文件必须通过严格校验");
+
+        // 幂等：重跑保留已存在文件
+        std::fs::write(&rules_path, "# customized").unwrap();
+        run_init_with_default_pack(dir.path(), false, false).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&rules_path).unwrap(),
+            "# customized"
+        );
+    }
+
+    #[test]
+    fn init_with_default_pack_and_gaussdb_vendors_both_packs() {
+        // --with-gaussdb：追加定制包 rules-gaussdb（namespace 隔离 id）
+        let dir = tempfile::tempdir().unwrap();
+        run_init_with_default_pack(dir.path(), false, true).unwrap();
+
+        let cfg_path = dir.path().join("sqlguard.toml");
         for pack in DEFAULT_PACKS {
             assert!(
                 dir.path()
@@ -2729,9 +2840,6 @@ mod tests {
                 pack.name
             );
         }
-        assert!(lock_path.exists(), "必须生成 sqlguard.lock");
-        // 脚本模式的产物不应出现（两种 init 互不干扰）
-        assert!(!dir.path().join("config/rules/ddl").exists());
 
         let cfg = Config::load(&cfg_path).expect("生成的配置必须可加载");
         assert_eq!(cfg.resolved_packs.len(), DEFAULT_PACKS.len());
@@ -2757,14 +2865,6 @@ mod tests {
         // 锁文件必须与实际解析结果一致（Strict 模式亦通过）
         lock::verify_lock(&cfg, cfg_path.parent().unwrap(), lock::LockMode::Strict)
             .expect("生成的锁文件必须通过严格校验");
-
-        // 幂等：重跑保留已存在文件
-        std::fs::write(&rules_path, "# customized").unwrap();
-        run_init_with_default_pack(dir.path(), false).unwrap();
-        assert_eq!(
-            std::fs::read_to_string(&rules_path).unwrap(),
-            "# customized"
-        );
     }
 
     // === run_init（幂等 init / --force） ===

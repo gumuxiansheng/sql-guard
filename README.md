@@ -787,15 +787,19 @@ sqlguard check [OPTIONS] [PATH]
 ### `sqlguard init`
 
 ```bash
-sqlguard init [PATH]           # 生成默认配置与示例规则（幂等）
+sqlguard init [PATH]           # 生成默认配置与通用规则集（幂等，仅 rules-core）
 sqlguard init [PATH] --force   # 覆盖已存在的配置与规则文件
-sqlguard init [PATH] --with-default-pack   # 改用默认规则包（vendor 到项目内 + 生成锁文件）
+sqlguard init [PATH] --with-default-pack              # 规则包模式（仅基础包 rules-core）
+sqlguard init [PATH] --with-default-pack --with-gaussdb  # 追加 GaussDB 定制包
 ```
 
-`--with-default-pack` 是**规则包模式**的初始化：不写 `config/rules/` 脚本，而是把默认包
-（基础类 `rules-core` + 定制类 `rules-gaussdb`）vendor 到 `vendor/rules/<包名>/`，在主配置
-末尾追加 `[rule_packs]`，并生成 `sqlguard.lock`——产出的工程自带规则、可离线、可直接进 CI
-（配合 `check --locked`）。两种模式互不影响，默认 `init` 行为保持不变。
+- 默认 `init` 只生成**通用规则集**（`rules-core`：DDL/DML 通用规范），不包含任何方言定制规则。
+- `--with-default-pack` 是**规则包模式**的初始化：不写 `config/rules/` 脚本，而是把基础包
+  `rules-core` vendor 到 `vendor/rules/rules-core/`，在主配置末尾追加 `[rule_packs]`，并生成
+  `sqlguard.lock`——产出的工程自带规则、可离线、可直接进 CI（配合 `check --locked`）。
+- GaussDB 等特定规则集**由发布包提供、按需引入**：`--with-gaussdb` 把定制包 `rules-gaussdb`
+  vendor 进项目（规则默认 `enabled = false`，用 `[[rule_packs.overrides]]` 按需启用）；也可将
+  发布包解压后经 `[rule_packs].search_paths` 引用。两种模式互不影响。
 
 > **幂等语义（v0.2.5 起）**：默认只补缺失文件，已存在的 `sqlguard.toml` / `sqlguard.rules.toml` /
 > 规则脚本**原样保留**并逐项提示 `skipped`——防止覆盖 gates-toolkit 等工具链按模板渲染过的定制配置。

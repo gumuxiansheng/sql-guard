@@ -452,8 +452,8 @@ M2 **未改动 `RuleConfig` 结构**（短 id 由 canonical id 按 `:` 反推）
 | 项 | 实现位置 | 说明 |
 |----|----------|------|
 | 默认规则包 | `config/rules-core/rules-pack.toml` + `config/rules-gaussdb/rules-pack.toml` | 两个包均 `version = "1.0.0"`、`api_version = 1`；基础类不设 namespace，定制类设 `namespace = "gaussdb"` |
-| 清单/示例防漂移 | `main.rs` 测试 `default_pack_manifest_matches_rules_example` | 两包清单合并后与 example 逐条比对 `(id, script_path, severity, enabled)`，并校验每个脚本存在于其所属包的内置脚本清单（`DEFAULT_PACKS`） |
-| `init --with-default-pack` | `main.rs::run_init_with_default_pack` | 双包 vendor 到 `vendor/rules/<包名>/` + 向主配置**末尾追加** `[rule_packs]`（声明两个包）+ 生成 `sqlguard.lock`；与旧 `init` 互不影响 |
+| 清单/示例防漂移 | `main.rs` 测试 `default_pack_manifest_matches_rules_example` | **基础包清单**与 example 逐条比对 `(id, script_path, severity, enabled)`；定制包（`rules-gaussdb`）只做自身完整性校验（脚本存在 + namespace 隔离），不与 example 对齐 |
+| `init --with-default-pack` | `main.rs::run_init_with_default_pack` | 默认仅 vendor 基础包 `rules-core`；`--with-gaussdb` 时追加定制包 `rules-gaussdb`。vendor 到 `vendor/rules/<包名>/` + 向主配置**末尾追加** `[rule_packs]`（只声明选中包）+ 生成 `sqlguard.lock`；与旧 `init` 互不影响 |
 | 迁移指南 | 本文 §十二 + README「规则包迁移指南」 | — |
 | 用户文档 | `README.md`（`rules` 子命令 / `sqlguard.lock` / 迁移）、`docs/default-rules.md`、`docs/rule-scripting.md` | — |
 
@@ -461,9 +461,10 @@ M2 **未改动 `RuleConfig` 结构**（短 id 由 canonical id 按 `:` 反推）
 > （需要新仓库与账号权限）。本仓库已提供使其成立的全部前置条件：合规包根、
 > `rules vendor`、锁文件、以及 §十二 的分步操作。
 >
-> **`init` 未做"降级"**：默认 `init` 仍写 `config/rules/` 全量脚本（保持向后兼容，既有测试与
-> 用户工作流零变化）；`--with-default-pack` 是新增的包化路径。彻底移除二进制内嵌脚本会让
-> "fresh init 即可用"失效（生成的 `sqlguard.rules.toml` 会指向不存在的脚本），故不做。
+> **`init` 的规则集边界（v0.2.8 起）**：默认 `init` 只落盘**基础包 `rules-core`** 脚本并只声明
+> 通用规则（`sqlguard.rules.toml.example` 不再含 GaussDB 段）；定制包（`rules-gaussdb` 等）
+> 由发布包提供，经 `--with-gaussdb` 或 `[rule_packs].search_paths` 按需引入。此前 init 过的
+> 项目不受影响（幂等语义不动已有文件）。
 
 ---
 

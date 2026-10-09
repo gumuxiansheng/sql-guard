@@ -161,12 +161,19 @@ pub enum Commands {
         /// Initialize from the default rule packs instead of copying rule scripts
         /// into `config/rules/`.
         ///
-        /// Writes the default packs (`rules-core` + `rules-gaussdb`) to
-        /// `vendor/rules/<pack>/`, declares `[rule_packs]` in `sqlguard.toml`,
-        /// and generates `sqlguard.lock`. The generated project is self-contained
-        /// and offline-capable.
+        /// Writes the base pack (`rules-core`) to `vendor/rules/<pack>/`,
+        /// declares `[rule_packs]` in `sqlguard.toml`, and generates
+        /// `sqlguard.lock`. The generated project is self-contained and
+        /// offline-capable. Dialect-specific packs (e.g. `rules-gaussdb`) are
+        /// opt-in via --with-gaussdb.
         #[clap(long)]
         with_default_pack: bool,
+
+        /// Also vendor the `rules-gaussdb` dialect pack (only meaningful with
+        /// --with-default-pack). Its rules are disabled by default; enable
+        /// them per-project via `[[rule_packs.overrides]]`.
+        #[clap(long, requires = "with-default-pack")]
+        with_gaussdb: bool,
     },
     /// Only check SQL statements changed since a git baseline (incremental mode).
     ///

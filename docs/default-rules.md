@@ -12,7 +12,9 @@ SqlGuard 内置 25 条默认规则，分为 **P0（17 条，默认启用）** �
 > 这两套规则以**规则包（基础类 `rules-core` + 定制类 `rules-gaussdb`）**的形式分开分发，
 > 可被独立选择、指定版本、vendor 到项目内并用 `sqlguard.lock` 锁定；用法见
 > [rule-pack-design.md](rule-pack-design.md) 与 README「`[rule_packs]` 多包加载与覆盖」
-> 「规则包迁移指南」。
+> 「规则包迁移指南」。默认 `sqlguard init` 只生成**通用规则集**（rules-core）；
+> GaussDB 定制集由发布包提供，`init --with-default-pack --with-gaussdb` 或
+> `[rule_packs].search_paths` 按需引入。
 
 ## 规则总览
 
