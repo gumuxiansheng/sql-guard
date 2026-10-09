@@ -172,11 +172,21 @@ BIN=bin/linux-x86_64-musl            # 或 bin/linux-aarch64-musl
 sudo install -m 0755 "$BIN/sqlguard"       /usr/local/bin/sqlguard
 sudo install -m 0755 "$BIN/sqlguard-mine"  /usr/local/bin/sqlguard-mine
 
-# 3)（可选）规则库与配置模板
+# 3)（可选）规则包与配置模板
+#    规则按「基础类 / 定制类」分为两个可独立分发的包（目录名即包名）：
+#      config/rules-core/      通用 DDL/DML 规范
+#      config/rules-gaussdb/   GaussDB 定制规范
 sudo mkdir -p /usr/local/share/sqlguard
-sudo cp -r config/rules /usr/local/share/sqlguard/
+sudo cp -r config/rules-core config/rules-gaussdb /usr/local/share/sqlguard/
 sudo cp config/sqlguard.toml.example config/sqlguard.rules.toml.example /usr/local/share/sqlguard/
 ```
+
+> 用发布包内的 `scripts/install.sh` 会自动完成上面第 3 步（装到
+> `/usr/local/share/sqlguard/rules/<包名>/`），在项目 `sqlguard.toml` 里把
+> `rules/` 的父目录配到 `[rule_packs].search_paths`（如
+> `search_paths = ["/usr/local/share/sqlguard/rules"]`）即可引用。
+> 也可直接从 Release 附件下载独立的 `rules-core-<ver>.zip` / `rules-gaussdb-<ver>.zip`
+> 单独升级规则，无需重装引擎。
 
 > macOS 请在 Release 附件下载 `sqlguard-{x86_64,aarch64}-apple-darwin`，下载后需执行一次
 > `xattr -d com.apple.quarantine ./sqlguard` 以绕过 Gatekeeper 拦截。

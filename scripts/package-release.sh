@@ -146,8 +146,44 @@ fi
 chmod +x "${PKG_DIR}/scripts/"*.sh 2>/dev/null || true
 
 # ---------- 4. 规则库与配置模板 ----------
+# 规则包布局（0.2.7 起由单一 config/rules 拆分为两个「合规包根」，目录名即包名）：
+#   config/rules-core/      基础类包（通用 DDL/DML，含 lib/helpers.rhai）
+#   config/rules-gaussdb/   定制类包（GaussDB，namespace = gaussdb）
+# 消费侧：release/scripts/install.sh 按 ${PKG_ROOT}/config/<包名> 安装到
+#         <配置目录>/rules/<包名>/，故此处目录名必须与 install.sh 期望一致。
+# ⚠️ 历史坑：这里曾写死旧路径 config/rules，重构后该目录不存在，`[ -d ]` 为假
+#    静默跳过 → 发布包（含 CNB Release 附件）里根本没有规则包，且无任何报错。
+#    因此规则包缺失/不完整一律 fail-fast，不再静默降级。
 mkdir -p "${PKG_DIR}/config"
-[ -d config/rules ] && cp -R config/rules "${PKG_DIR}/config/"
+RULE_PACKS=(rules-core rules-gaussdb)
+pack_errors=0
+for pack in "${RULE_PACKS[@]}"; do
+  if [ ! -d "config/${pack}" ]; then
+    echo "error: 缺少规则包目录 config/${pack}（发布包必须含完整规则库）" >&2
+    pack_errors=$((pack_errors + 1))
+    continue
+  fi
+  cp -R "config/${pack}" "${PKG_DIR}/config/"
+  n_scripts="$(find "config/${pack}" -name '*.rhai' | wc -l | tr -d '[:space:]')"
+  echo "    config/${pack}: ${n_scripts} 个 .rhai 脚本"
+
+  # 包清单校验：rules-pack.toml 声明的每个 script_path 必须在包内真实存在
+  manifest="config/${pack}/rules-pack.toml"
+  if [ ! -f "$manifest" ]; then
+    echo "error: 规则包 config/${pack} 缺少包清单 rules-pack.toml" >&2
+    pack_errors=$((pack_errors + 1))
+    continue
+  fi
+  while IFS= read -r sp; do
+    [ -n "$sp" ] || continue
+    if [ ! -f "config/${pack}/${sp}" ]; then
+      echo "error: ${manifest} 声明的脚本在包内不存在: ${sp}" >&2
+      pack_errors=$((pack_errors + 1))
+    fi
+  done < <(grep -E '^[[:space:]]*script_path' "$manifest" | sed -E 's/.*=\s*"([^"]+)".*/\1/')
+done
+[ "$pack_errors" -eq 0 ] || { echo "error: 规则包不完整，终止打包（共 ${pack_errors} 处问题）" >&2; exit 2; }
+
 for f in sqlguard.toml.example sqlguard.rules.toml.example; do
   [ -f "$f" ] && cp -f "$f" "${PKG_DIR}/config/${f}"
 done
@@ -157,6 +193,10 @@ mkdir -p "${PKG_DIR}/examples"
 for d in ddl dml; do
   [ -d "examples/${d}" ] && cp -R "examples/${d}" "${PKG_DIR}/examples/"
 done
+# /examples 被 .gitignore 忽略 → CI 全新检出的工作区没有示例，属预期，仅告警不中断
+if [ ! -d examples/ddl ] && [ ! -d examples/dml ]; then
+  echo "warn: 未找到 examples/{ddl,dml}（/examples 已被 .gitignore 忽略），发布包将不含示例 SQL" >&2
+fi
 [ -f examples/README.md ] && cp -f examples/README.md "${PKG_DIR}/examples/README.md"
 
 # ---------- 6. CI 片段 ----------
@@ -211,6 +251,7 @@ fi
 
 mkdir -p "$STAGE"
 rm -f "${DIST_DIR}/${PKG_NAME}"-*.tar.gz "${DIST_DIR}/${PKG_NAME}"-*.zip
+rm -f "${DIST_DIR}"/rules-*.zip   # 独立规则包压缩包（按包版本号命名，旧版本需清理）
 
 make_zip() {
   local src="$1" out="$2"
@@ -237,9 +278,21 @@ PYEOF
 }
 
 # 全平台合包
-tar -czf "${DIST_DIR}/${PKG_NAME}-all.tar.gz" -C "$DIST_DIR" "$PKG_NAME"
+# 注：tar 的输出/输入路径一律用「cd + 相对路径」——GNU tar 会把形如 `C:/tmp/...`
+# 的参数解析成远程主机（`Cannot connect to C: resolve failed`），Windows Git Bash 下必踩。
+(cd "$DIST_DIR" && tar -czf "${PKG_NAME}-all.tar.gz" "$PKG_NAME")
 echo "    -> ${DIST_DIR}/${PKG_NAME}-all.tar.gz"
 make_zip "$PKG_DIR" "${DIST_DIR}/${PKG_NAME}-all.zip"
+
+# 独立规则包压缩包（rules-core-<ver>.zip / rules-gaussdb-<ver>.zip）
+# 规则包与引擎解耦分发（docs/rule-pack-design.md 方案 A）：可单独下载升级规则，
+# 解压后把父目录配到 [rule_packs].search_paths 即可，不必重装引擎。
+for pack in "${RULE_PACKS[@]}"; do
+  pack_ver="$(grep -m1 -E '^[[:space:]]*version[[:space:]]*=' "config/${pack}/rules-pack.toml" \
+    | sed -E 's/.*"([^"]+)".*/\1/')"
+  [ -n "$pack_ver" ] || { echo "error: 无法解析 config/${pack}/rules-pack.toml 的包版本" >&2; exit 2; }
+  make_zip "${PKG_DIR}/config/${pack}" "${DIST_DIR}/${pack}-${pack_ver}.zip"
+done
 
 # 各平台独立包
 for plat in $(ls "${PKG_DIR}/bin"); do
@@ -253,13 +306,14 @@ for plat in $(ls "${PKG_DIR}/bin"); do
   gen_sums "$stage_pkg"
   case "$plat" in
     windows*) ARCH="${DIST_DIR}/${PKG_NAME}-${plat}.zip"; make_zip "$stage_pkg" "$ARCH" ;;
-    *)        ARCH="${DIST_DIR}/${PKG_NAME}-${plat}.tar.gz"; tar -czf "$ARCH" -C "${STAGE}/${plat}" "$PKG_NAME" ;;
+    *)        ARCH="${DIST_DIR}/${PKG_NAME}-${plat}.tar.gz"
+              (cd "$DIST_DIR" && tar -czf "${PKG_NAME}-${plat}.tar.gz" -C ".stage/${plat}" "$PKG_NAME") ;;
   esac
   echo "    -> ${ARCH}"
 done
 
-# 压缩包自身校验和
-(cd "$DIST_DIR" && sha256sum ${PKG_NAME}-*.tar.gz ${PKG_NAME}-*.zip > SHA256SUMS 2>/dev/null || true)
+# 压缩包自身校验和（含独立规则包压缩包）
+(cd "$DIST_DIR" && sha256sum ${PKG_NAME}-*.tar.gz ${PKG_NAME}-*.zip rules-*.zip > SHA256SUMS 2>/dev/null || true)
 echo "==> 压缩包校验和：${DIST_DIR}/SHA256SUMS"
 
 rm -rf "$STAGE"

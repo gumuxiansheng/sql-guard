@@ -50,6 +50,8 @@
 
         # 4) 将发布包与扁平二进制上传为 Release 附件
         #    - dist/sql-guard-<version>/ 目录本身不上传（附件为文件），上传其压缩包与校验和；
+        #    - dist/rules-core-<ver>.zip / dist/rules-gaussdb-<ver>.zip 为独立规则包，
+        #      可脱离引擎单独下载升级（解压后父目录配到 [rule_packs].search_paths）；
         #    - dist/SHA256SUMS 记录各压缩包的校验和，供下载方核对；
         #    - dist/sqlguard-* 为 build-release.sh 的扁平二进制，保留原有下载方式。
         - name: 上传 Release 附件
