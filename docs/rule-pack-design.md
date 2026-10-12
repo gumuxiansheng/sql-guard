@@ -46,7 +46,7 @@
 
 | 层 | 载体 | 版本节奏 | 职责 |
 |----|------|----------|------|
-| **引擎** | `sqlguard` 二进制 | 独立 tag（如 `v0.2.8`） | SQL 解析、AST/Rhai API、执行器、报告、缓存 |
+| **引擎** | `sqlguard` 二进制 | 独立 tag（如 `v0.2.9`） | SQL 解析、AST/Rhai API、执行器、报告、缓存 |
 | **规则包** | 目录/压缩包（`rules-pack.toml` + `*.rhai`） | 独立 tag（如 `rules-gaussdb/v1.3.0`） | 一批规则脚本 + 元数据 + 兼容声明 |
 | **项目实例** | `sqlguard.toml` + `sqlguard.rules.toml` + `sqlguard.lock` | 随项目仓库 | 选包、选规则、覆盖参数、写本地规则 |
 
@@ -56,7 +56,7 @@
 - 规则包 ↔ 项目：**规则清单契约**（复用现有 `[[rules]]` 数据结构）。
 
 ```
-引擎发布 v0.2.8 ──┐
+引擎发布 v0.2.9 ──┐
                   ├──▶ 规则 API 契约 ──▶ 项目实例（选包 + 选规则 + 本地规则）
 规则包发布 v1.3.0 ─┘
 ```
@@ -461,7 +461,7 @@ M2 **未改动 `RuleConfig` 结构**（短 id 由 canonical id 按 `:` 反推）
 > （需要新仓库与账号权限）。本仓库已提供使其成立的全部前置条件：合规包根、
 > `rules vendor`、锁文件、以及 §十二 的分步操作。
 >
-> **`init` 的规则集边界（v0.2.8 起）**：默认 `init` 只落盘**基础包 `rules-core`** 脚本并只声明
+> **`init` 的规则集边界（v0.2.9 起）**：默认 `init` 只落盘**基础包 `rules-core`** 脚本并只声明
 > 通用规则（`sqlguard.rules.toml.example` 不再含 GaussDB 段）；定制包（`rules-gaussdb` 等）
 > 由发布包提供，经 `--with-gaussdb` 或 `[rule_packs].search_paths` 按需引入。此前 init 过的
 > 项目不受影响（幂等语义不动已有文件）。

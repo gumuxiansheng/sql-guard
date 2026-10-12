@@ -4,6 +4,28 @@
 
 ---
 
+## 0.2.9（2026-10）
+
+**规则包独立分发（通用 / 定制分开）**
+
+- `init` 默认只落盘**通用规则集 `rules-core`**（25 个脚本），不再落盘 GaussDB 定制脚本；
+  `sqlguard.rules.toml.example` 删除 GaussDB 声明段，改为发布包接入指引。
+  新增 `init --with-gaussdb` 开关：落 2 包 43 条规则 + lock，Strict 校验通过。
+  存量 init 项目幂等不覆盖，零破坏性变更。
+- 打包脚本 `scripts/package-release.sh` 产出**可脱离引擎单独下载升级**的独立规则包附件：
+  `rules-core-<ver>.zip` / `rules-gaussdb-<ver>.zip`（版本取自各包 `rules-pack.toml`，
+  与引擎解耦），解压后把父目录配到 `[rule_packs].search_paths` 即可引用。
+- 规则包缺失/不完整时打包 fail-fast（历史坑：曾因写死旧路径 `config/rules` 导致
+  发布包里根本没有规则包且无任何报错）。
+
+**其他**
+
+- 版本号升级至 0.2.9，同步更新 `Cargo.toml`、`Cargo.lock` 与发布文档中的版本标识。
+
+提交：`chore(version): 更新 sqlguard 版本至 0.2.9`
+
+---
+
 ## 0.2.8（2026-10）
 
 - 版本号升级至 0.2.8，同步更新 `Cargo.toml`、`Cargo.lock` 与发布文档中的版本标识。
